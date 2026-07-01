@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Famelo",
+    "slug": "famelo-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "famelo",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "net.famelo.mobile"
+    },
+    "android": {
+      "package": "net.famelo.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#17233f"
+      }
+    },
+    "extra": {
+      "apiUrl": "https://famelo.net"
+    }
+  }
+}
