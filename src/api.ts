@@ -1,4 +1,4 @@
-import type { Household, HouseholdState, User } from "./types";
+import type { Household, HouseholdAccess, HouseholdState, User } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://famelo.net").replace(/\/$/, "");
 
@@ -27,6 +27,7 @@ export const api = {
   demo: () => request<{ user: User }>("/api/auth/demo", { method: "POST" }),
   signOut: () => request<{ ok: boolean }>("/api/auth/signout", { method: "POST" }),
   households: () => request<Household[]>("/api/households"),
+  householdAccess: () => request<HouseholdAccess>("/api/households/access"),
   selectHousehold: (householdId: string) => request<{ ok: boolean }>("/api/households/select", {
     method: "POST", body: JSON.stringify({ householdId })
   }),

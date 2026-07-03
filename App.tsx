@@ -8,14 +8,15 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
-import type { Household, HouseholdState, Note, User } from "./src/types";
+import type { Household, HouseholdAccess, HouseholdState, Note, PlannedMeal, User } from "./src/types";
 
-type Tab = "home" | "budget" | "calendar" | "notes" | "more";
+type Tab = "home" | "budget" | "calendar" | "notes" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
   { id: "home", label: "Home", icon: "home-outline" },
   { id: "budget", label: "Budget", icon: "wallet-outline" },
   { id: "calendar", label: "Calendar", icon: "calendar-outline" },
   { id: "notes", label: "Notes", icon: "document-text-outline" },
+  { id: "meals", label: "Meals", icon: "restaurant-outline" },
   { id: "more", label: "More", icon: "grid-outline" }
 ];
 
@@ -28,6 +29,7 @@ function AppContent() {
   const [user, setUser] = useState<User | null>(null);
   const [households, setHouseholds] = useState<Household[]>([]);
   const [state, setState] = useState<HouseholdState | null>(null);
+  const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -39,9 +41,10 @@ function AppContent() {
       const session = await api.session();
       setUser(session.user);
       if (!session.authenticated || !session.user) return setState(null);
-      const [nextHouseholds, nextState] = await Promise.all([api.households(), api.state()]);
+      const [nextHouseholds, nextState, nextAccess] = await Promise.all([api.households(), api.state(), api.householdAccess()]);
       setHouseholds(nextHouseholds);
       setState(nextState);
+      setAccess(nextAccess);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) setUser(null);
       else setError(cause instanceof Error ? cause.message : "Unable to load Famelo");
@@ -64,8 +67,9 @@ function AppContent() {
   const selected = households.find((item) => item.selected);
   const page = tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} />
-    : tab === "calendar" ? <Calendar state={state} />
+    : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
+    : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }} />;
@@ -141,7 +145,50 @@ function Budget({ state }: { state: HouseholdState }) {
   </Page>;
 }
 
-function Calendar({ state }: { state: HouseholdState }) { return <Page><Title eyebrow="CALENDAR">Schedule</Title><Card><Text style={styles.cardTitle}>Events and reminders</Text>{state.calendar.events.map((item) => <Row key={`${item.date}-${item.title}`} title={item.title} detail={item.date} badge={item.type} />)}</Card><Card><Text style={styles.cardTitle}>Chore rotation</Text>{state.calendar.chores.map((item) => <Row key={item.title} title={item.title} detail={`${item.assignee} · ${item.cadence}`} badge={item.nextDue} />)}</Card></Page>; }
+function Calendar({ state, access, onSave }: { state: HouseholdState; access: HouseholdAccess | null; onSave: (next: HouseholdState) => Promise<void> }) {
+  const members = access?.members.filter((member) => member.status === "active") || [];
+  const [editing, setEditing] = useState<{ kind: "event" | "chore"; index: number } | null>(null);
+  const [title, setTitle] = useState(""); const [date, setDate] = useState(`${state.budget.month}-01`); const [owner, setOwner] = useState(members[0]?.email || "");
+  const begin = (kind: "event" | "chore", index: number) => {
+    const item = kind === "event" ? state.calendar.events[index] : state.calendar.chores[index];
+    if (!item) return;
+    setEditing({ kind, index }); setTitle(item.title); setDate(kind === "event" ? (item as typeof state.calendar.events[number]).date : (item as typeof state.calendar.chores[number]).startDate || (item as typeof state.calendar.chores[number]).nextDue); setOwner(kind === "event" ? (item as typeof state.calendar.events[number]).owner || members[0]?.email || "" : (item as typeof state.calendar.chores[number]).assignee || members[0]?.email || "");
+  };
+  const saveItem = async () => {
+    if (!title.trim() || !date) return;
+    const member = members.find((item) => item.email === owner);
+    const next = structuredClone(state);
+    if (editing?.kind === "chore") next.calendar.chores = next.calendar.chores.map((item, index) => index === editing.index ? { ...item, title: title.trim(), startDate: date, nextDue: date, assignee: owner, assigneeName: member?.name || owner } : item);
+    else if (editing?.kind === "event") next.calendar.events = next.calendar.events.map((item, index) => index === editing.index ? { ...item, title: title.trim(), date, owner, ownerName: member?.name || owner } : item);
+    else next.calendar.events.push({ id: `event-${Date.now()}`, title: title.trim(), date, type: "reminder", owner, ownerName: member?.name || owner });
+    await onSave(next); setEditing(null); setTitle("");
+  };
+  return <Page><Title eyebrow="CALENDAR">Shared schedule</Title><Card><Text style={styles.cardTitle}>{editing ? "Edit calendar item" : "Add reminder"}</Text>
+    <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Title" /><TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
+    <Text style={styles.label}>Assign to</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
+    <Pressable style={styles.primaryButton} onPress={() => void saveItem()}><Text style={styles.primaryButtonText}>{editing ? "Save changes" : "Add reminder"}</Text></Pressable>
+  </Card><Card><Text style={styles.cardTitle}>Events and reminders</Text>{state.calendar.events.map((item, index) => <Pressable key={item.id || `${item.date}-${item.title}`} onPress={() => begin("event", index)}><Row title={item.title} detail={`${item.date} · ${item.ownerName || item.owner || "Unassigned"}`} badge={item.type} /></Pressable>)}</Card><Card><Text style={styles.cardTitle}>Chore rotation</Text>{state.calendar.chores.map((item, index) => <Pressable key={item.id || item.title} onPress={() => begin("chore", index)}><Row title={item.title} detail={`${item.assigneeName || item.assignee} · ${item.cadence}`} badge={item.nextDue} /></Pressable>)}</Card></Page>;
+}
+
+function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const slots = ["Breakfast", "Lunch", "Dinner", "Snack"];
+  const [day, setDay] = useState("Monday"); const [slot, setSlot] = useState("Breakfast"); const [recipeId, setRecipeId] = useState(state.meals.recipes[0]?.id || ""); const [servings, setServings] = useState("3");
+  const current = state.meals.plannedWeek.filter((meal) => (!meal.month || meal.month === state.budget.month) && Number(meal.week || 1) === 1);
+  const plan = async () => {
+    const recipe = state.meals.recipes.find((item) => item.id === recipeId); if (!recipe) return;
+    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week: 1, day, slot, recipeId, meal: recipe.name, servings: Math.max(1, Number(servings || 3)) };
+    const existing = slot === "Snack" ? -1 : next.meals.plannedWeek.findIndex((item) => (!item.month || item.month === state.budget.month) && Number(item.week || 1) === 1 && item.day === day && (item.slot || "Dinner") === slot);
+    if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${recipe.name} planned for ${day} ${slot}.`; await onSave(next);
+  };
+  const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week 1`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
+  const postGroceries = async () => { const next = structuredClone(state); const line = next.budget.categories.flatMap((category) => category.lines).find((item) => item.name.toLowerCase().includes("grocer")); if (!line) return Alert.alert("Budget setup needed", "Add a Groceries subcategory before posting."); const amount = Number(next.meals.groceryEstimate || 185); next.transactions.unshift({ date: new Date().toISOString().slice(0, 10), payee: "Meal plan groceries", lineId: line.id, amount, memo: "Posted from mobile meal planner" }); next.meals.feedback = `${money(amount, state.household.currency)} posted to Groceries.`; await onSave(next); };
+  return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card><View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
+    <Text style={styles.label}>Day</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
+    <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>
+    <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => setRecipeId(recipe.id)}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
+  </Card>{days.map((mealDay) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text>{slots.flatMap((mealSlot) => { const items = current.filter((item) => item.day === mealDay && (item.slot || "Dinner") === mealSlot); return items.length ? items.map((item, index) => <Row key={`${mealSlot}-${item.recipeId}-${index}`} title={item.meal} detail={`${mealSlot} · ${item.servings} servings`} />) : [<Pressable key={`${mealSlot}-open`} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>]; })}</Card>)}</Page>;
+}
 
 function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
   const notes = state.notes.entries.filter((note) => !note.trashed && !note.archived);
@@ -168,6 +215,7 @@ const styles = StyleSheet.create({
   categoryHeader: { flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 4 }, dot: { height: 20, width: 5, borderRadius: 3 },
   note: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 16 }, noteHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, noteTitle: { color: colors.text, fontWeight: "800", fontSize: 20 }, noteBody: { color: colors.text, marginVertical: 10, lineHeight: 21 }, checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 }, checkText: { flex: 1, color: colors.text, fontSize: 15 }, done: { textDecorationLine: "line-through", color: colors.muted },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
+  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" }
 });
