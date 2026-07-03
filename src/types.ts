@@ -10,6 +10,10 @@ export type Note = { id: string; title: string; body: string; checklist: NoteIte
 export type Recipe = { id: string; name: string; ingredients: string[]; calories: number; protein: number };
 export type HouseholdAccess = { canManage: boolean; members: Array<{ name: string; email: string; role: string; status: string; isOwner: boolean }> };
 export type PlannedMeal = { month?: string; week?: number; day: string; slot?: string; meal: string; recipeId?: string; servings: number };
+export type WealthAsset = { id?: string; name: string; value: number; assetClass?: "other" | "cash" | "property" | "retirement" | "stock"; symbol?: string; shares?: number; price?: number };
+export type WealthLiability = { id?: string; name: string; value: number };
+export type DebtPayment = { id?: string; date: string; amount: number; interest: number; principal: number; extra: number };
+export type Debt = { id?: string; name: string; balance: number; rate: number; minimum: number; termMonths?: number; assetId?: string; payments?: DebtPayment[] };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string };
   budget: { month: string; income: number; categories: BudgetCategory[] };
@@ -17,5 +21,5 @@ export type HouseholdState = {
   calendar: { events: CalendarEvent[]; chores: Chore[] };
   notes: { entries: Note[] };
   meals: { recipes: Recipe[]; plannedWeek: PlannedMeal[]; savedWeeks?: string[]; nutritionGoals?: { calories: number; protein: number }; selectedWeekByMonth?: Record<string, number>; feedback?: string; groceryEstimate?: number };
-  goals?: { sinkingFunds?: unknown[] };
+  goals?: { sinkingFunds?: unknown[]; debts?: Debt[]; netWorth?: { assets: WealthAsset[]; liabilities: WealthLiability[] } };
 };
