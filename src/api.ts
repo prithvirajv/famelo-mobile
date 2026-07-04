@@ -34,5 +34,8 @@ export const api = {
   state: () => request<HouseholdState>("/api/state"),
   saveState: (state: HouseholdState) => request<{ ok: boolean }>("/api/state", {
     method: "PUT", body: JSON.stringify(state)
+  }),
+  registerPushDevice: (token: string, platform: string) => request<{ ok: boolean }>("/api/push-devices", {
+    method: "POST", body: JSON.stringify({ token, platform })
   })
 };

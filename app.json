@@ -16,6 +16,7 @@
         "backgroundColor": "#17233f"
       }
     },
+    "plugins": ["expo-notifications"],
     "extra": {
       "apiUrl": "https://famelo.net"
     }
