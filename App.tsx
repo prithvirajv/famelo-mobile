@@ -474,11 +474,22 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
   </Page>;
 }
 
-function DocumentRow({ document, notes, onDownload, onDelete, onLinkNote }: {
-  document: Document; notes: Note[]; onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void
+function DocumentRow({ document, notes, folders, onDownload, onDelete, onLinkNote, onMove }: {
+  document: Document; notes: Note[]; folders: DocumentsData["folders"]; onDownload: () => void; onDelete: () => void;
+  onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void
 }) {
   const [showNotePicker, setShowNotePicker] = useState(false);
   const linkedNote = document.noteId ? notes.find((note) => note.id === document.noteId) : null;
+
+  const promptMove = () => {
+    const options = [
+      ...folders.filter((folder) => folder.id !== document.folderId).map((folder) => ({ text: folder.name, onPress: () => onMove(folder.id) })),
+      ...(document.folderId ? [{ text: "All documents (root)", onPress: () => onMove(null) }] : []),
+      { text: "Cancel", style: "cancel" as const }
+    ];
+    Alert.alert("Move to folder", document.name, options);
+  };
+
   return <View style={styles.planTaskBlock}>
     <View style={styles.row}>
       <View style={styles.rowCopy}>
@@ -486,6 +497,7 @@ function DocumentRow({ document, notes, onDownload, onDelete, onLinkNote }: {
         <Text style={styles.rowDetail}>{[formatFileSize(document.sizeBytes), document.status === "pending" ? "Uploading…" : document.contentType].filter(Boolean).join(" · ")}</Text>
         {linkedNote ? <Text style={styles.rowDetail}>Linked to “{linkedNote.title || "Untitled note"}”</Text> : null}
       </View>
+      <Pressable onPress={promptMove}><Ionicons name="folder-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={onDownload}><Ionicons name="download-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={() => setShowNotePicker((prev) => !prev)}><Ionicons name="link-outline" size={20} color={linkedNote ? colors.green : colors.muted} /></Pressable>
       <Pressable onPress={onDelete}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
@@ -592,6 +604,11 @@ function DocumentsScreen({ notes }: { notes: Note[] }) {
     catch (cause) { showError("Could not link note", cause); }
   };
 
+  const moveDocument = async (documentId: string, folderId: string | null) => {
+    try { await api.updateDocument(documentId, { folderId }); await load(); }
+    catch (cause) { showError("Could not move document", cause); }
+  };
+
   if (!data) {
     return <Page><Title eyebrow="DOCUMENTS">Household documents</Title>
       {error ? <Text style={styles.formError}>{error}</Text> : <ActivityIndicator color={colors.green} />}
@@ -627,10 +644,11 @@ function DocumentsScreen({ notes }: { notes: Note[] }) {
     </View>)}</Card> : null}
     <Card>{documents.length
       ? documents.map((document) => <DocumentRow
-          key={document.id} document={document} notes={notes}
+          key={document.id} document={document} notes={notes} folders={data.folders}
           onDownload={() => void downloadDocument(document.id)}
           onDelete={() => deleteDocument(document.id)}
           onLinkNote={(noteId) => void linkNote(document.id, noteId)}
+          onMove={(folderId) => void moveDocument(document.id, folderId)}
         />)
       : <Text style={styles.muted}>No documents in this folder yet.</Text>}</Card>
   </Page>;

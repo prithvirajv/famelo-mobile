@@ -77,6 +77,13 @@ test("package.json declares the document picker and file system dependencies", (
   assert.ok(packageJson.dependencies["expo-file-system"], "expected expo-file-system in dependencies");
 });
 
+test("Documents screen lets a document be moved to a different folder", () => {
+  const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(source, /moveDocument/);
+  assert.match(source, /promptMove/);
+  assert.match(source, /Move to folder/);
+});
+
 test("app.json configures the expo-image-picker permission plugin", () => {
   const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
   const plugins = appJson.expo.plugins || [];
