@@ -84,6 +84,14 @@ test("Documents screen lets a document be moved to a different folder", () => {
   assert.match(source, /Move to folder/);
 });
 
+test("Documents screen lets a document be tagged to a wealth asset or liability", () => {
+  const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(source, /linkWealthItem/);
+  assert.match(source, /promptWealthLink/);
+  assert.match(source, /Tag to a wealth item/);
+  assert.match(source, /wealthItemType/);
+});
+
 test("app.json configures the expo-image-picker permission plugin", () => {
   const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
   const plugins = appJson.expo.plugins || [];

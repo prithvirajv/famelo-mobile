@@ -1,4 +1,4 @@
-import type { Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User } from "./types";
+import type { Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://famelo.net").replace(/\/$/, "");
 
@@ -56,7 +56,7 @@ export const api = {
     }),
   confirmDocumentUpload: (documentId: string) => request<Document>(`/api/documents/${documentId}/confirm`, { method: "POST" }),
   documentDownloadUrl: (documentId: string) => request<{ url: string; expiresAt: number }>(`/api/documents/${documentId}/download-url`),
-  updateDocument: (documentId: string, patch: { name?: string; description?: string; folderId?: string | null; noteId?: string | null }) =>
+  updateDocument: (documentId: string, patch: { name?: string; description?: string; folderId?: string | null; noteId?: string | null; wealthItemType?: WealthItemType | null; wealthItemId?: string | null }) =>
     request<Document>(`/api/documents/${documentId}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteDocument: (documentId: string) => request<{ ok: boolean }>(`/api/documents/${documentId}`, { method: "DELETE" })
 };

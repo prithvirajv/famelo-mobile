@@ -19,7 +19,7 @@ import {
   timeToMinutes, snapMinutes
 } from "./src/planLogic";
 import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
-import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
+import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -121,7 +121,7 @@ function AppContent() {
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} />
-    : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} />
+    : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} />
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
@@ -474,12 +474,16 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
   </Page>;
 }
 
-function DocumentRow({ document, notes, folders, onDownload, onDelete, onLinkNote, onMove }: {
-  document: Document; notes: Note[]; folders: DocumentsData["folders"]; onDownload: () => void; onDelete: () => void;
-  onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void
+function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, onDownload, onDelete, onLinkNote, onMove, onLinkWealth }: {
+  document: Document; notes: Note[]; folders: DocumentsData["folders"]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[];
+  onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void;
+  onLinkWealth: (wealthItemType: WealthItemType | null, wealthItemId: string | null) => void
 }) {
   const [showNotePicker, setShowNotePicker] = useState(false);
   const linkedNote = document.noteId ? notes.find((note) => note.id === document.noteId) : null;
+  const linkedWealthItem = document.wealthItemId
+    ? (document.wealthItemType === "liability" ? wealthLiabilities : wealthAssets).find((item) => item.id === document.wealthItemId)
+    : null;
 
   const promptMove = () => {
     const options = [
@@ -490,16 +494,28 @@ function DocumentRow({ document, notes, folders, onDownload, onDelete, onLinkNot
     Alert.alert("Move to folder", document.name, options);
   };
 
+  const promptWealthLink = () => {
+    const options = [
+      ...(document.wealthItemId ? [{ text: "Remove tag", onPress: () => onLinkWealth(null, null) }] : []),
+      ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ text: `Asset: ${asset.name}`, onPress: () => onLinkWealth("asset", asset.id as string) })),
+      ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ text: `Liability: ${liability.name}`, onPress: () => onLinkWealth("liability", liability.id as string) })),
+      { text: "Cancel", style: "cancel" as const }
+    ];
+    Alert.alert("Tag to a wealth item", document.name, options);
+  };
+
   return <View style={styles.planTaskBlock}>
     <View style={styles.row}>
       <View style={styles.rowCopy}>
         <Text style={styles.rowTitle}>{document.name}</Text>
         <Text style={styles.rowDetail}>{[formatFileSize(document.sizeBytes), document.status === "pending" ? "Uploading…" : document.contentType].filter(Boolean).join(" · ")}</Text>
         {linkedNote ? <Text style={styles.rowDetail}>Linked to “{linkedNote.title || "Untitled note"}”</Text> : null}
+        {linkedWealthItem ? <Text style={styles.rowDetail}>Tagged to {document.wealthItemType === "liability" ? "Liability" : "Asset"}: {linkedWealthItem.name}</Text> : null}
       </View>
       <Pressable onPress={promptMove}><Ionicons name="folder-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={onDownload}><Ionicons name="download-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={() => setShowNotePicker((prev) => !prev)}><Ionicons name="link-outline" size={20} color={linkedNote ? colors.green : colors.muted} /></Pressable>
+      <Pressable onPress={promptWealthLink}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
       <Pressable onPress={onDelete}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>
     {showNotePicker ? <View style={styles.subtaskList}>
@@ -515,7 +531,7 @@ function DocumentRow({ document, notes, folders, onDownload, onDelete, onLinkNot
   </View>;
 }
 
-function DocumentsScreen({ notes }: { notes: Note[] }) {
+function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: Note[]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[] }) {
   const [data, setData] = useState<DocumentsData | null>(null);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -609,6 +625,11 @@ function DocumentsScreen({ notes }: { notes: Note[] }) {
     catch (cause) { showError("Could not move document", cause); }
   };
 
+  const linkWealthItem = async (documentId: string, wealthItemType: WealthItemType | null, wealthItemId: string | null) => {
+    try { await api.updateDocument(documentId, { wealthItemType, wealthItemId }); await load(); }
+    catch (cause) { showError("Could not tag wealth item", cause); }
+  };
+
   if (!data) {
     return <Page><Title eyebrow="DOCUMENTS">Household documents</Title>
       {error ? <Text style={styles.formError}>{error}</Text> : <ActivityIndicator color={colors.green} />}
@@ -645,10 +666,12 @@ function DocumentsScreen({ notes }: { notes: Note[] }) {
     <Card>{documents.length
       ? documents.map((document) => <DocumentRow
           key={document.id} document={document} notes={notes} folders={data.folders}
+          wealthAssets={wealthAssets} wealthLiabilities={wealthLiabilities}
           onDownload={() => void downloadDocument(document.id)}
           onDelete={() => deleteDocument(document.id)}
           onLinkNote={(noteId) => void linkNote(document.id, noteId)}
           onMove={(folderId) => void moveDocument(document.id, folderId)}
+          onLinkWealth={(wealthItemType, wealthItemId) => void linkWealthItem(document.id, wealthItemType, wealthItemId)}
         />)
       : <Text style={styles.muted}>No documents in this folder yet.</Text>}</Card>
   </Page>;
