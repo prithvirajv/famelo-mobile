@@ -92,6 +92,14 @@ test("Documents screen lets a document be tagged to a wealth asset or liability"
   assert.match(source, /wealthItemType/);
 });
 
+test("Documents screen lets a whole folder be tagged to a wealth asset or liability", () => {
+  const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(source, /linkFolderWealthItem/);
+  assert.match(source, /promptFolderWealthLink/);
+  assert.match(source, /Tag folder to a wealth item/);
+  assert.match(source, /updateDocumentFolder/);
+});
+
 test("app.json configures the expo-image-picker permission plugin", () => {
   const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
   const plugins = appJson.expo.plugins || [];

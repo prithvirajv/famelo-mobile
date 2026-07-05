@@ -569,6 +569,21 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
     }]);
   };
 
+  const linkFolderWealthItem = async (folderId: string, wealthItemType: WealthItemType | null, wealthItemId: string | null) => {
+    try { await api.updateDocumentFolder(folderId, { wealthItemType, wealthItemId }); await load(); }
+    catch (cause) { showError("Could not tag folder", cause); }
+  };
+
+  const promptFolderWealthLink = (folder: DocumentsData["folders"][number]) => {
+    const options = [
+      ...(folder.wealthItemId ? [{ text: "Remove tag", onPress: () => void linkFolderWealthItem(folder.id, null, null) }] : []),
+      ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ text: `Asset: ${asset.name}`, onPress: () => void linkFolderWealthItem(folder.id, "asset", asset.id as string) })),
+      ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ text: `Liability: ${liability.name}`, onPress: () => void linkFolderWealthItem(folder.id, "liability", liability.id as string) })),
+      { text: "Cancel", style: "cancel" as const }
+    ];
+    Alert.alert("Tag folder to a wealth item", folder.name, options);
+  };
+
   const uploadDocument = async () => {
     const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
     if (picked.canceled || !picked.assets?.[0]) return;
@@ -659,10 +674,19 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
         <Text style={styles.primaryButtonText}>{uploading ? "Uploading…" : "Upload a document"}</Text>
       </Pressable>
     </Card>
-    {subfolders.length ? <Card>{subfolders.map((folder) => <View key={folder.id} style={styles.row}>
-      <Pressable style={styles.rowCopy} onPress={() => setCurrentFolderId(folder.id)}><Text style={styles.rowTitle}>{folder.name}</Text></Pressable>
-      <Pressable onPress={() => deleteFolder(folder.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
-    </View>)}</Card> : null}
+    {subfolders.length ? <Card>{subfolders.map((folder) => {
+      const linkedWealthItem = folder.wealthItemId
+        ? (folder.wealthItemType === "liability" ? wealthLiabilities : wealthAssets).find((item) => item.id === folder.wealthItemId)
+        : null;
+      return <View key={folder.id} style={styles.row}>
+        <Pressable style={styles.rowCopy} onPress={() => setCurrentFolderId(folder.id)}>
+          <Text style={styles.rowTitle}>{folder.name}</Text>
+          {linkedWealthItem ? <Text style={styles.rowDetail}>Tagged to {folder.wealthItemType === "liability" ? "Liability" : "Asset"}: {linkedWealthItem.name}</Text> : null}
+        </Pressable>
+        <Pressable onPress={() => promptFolderWealthLink(folder)}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
+        <Pressable onPress={() => deleteFolder(folder.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>;
+    })}</Card> : null}
     <Card>{documents.length
       ? documents.map((document) => <DocumentRow
           key={document.id} document={document} notes={notes} folders={data.folders}

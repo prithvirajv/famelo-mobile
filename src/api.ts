@@ -50,6 +50,8 @@ export const api = {
     method: "POST", body: JSON.stringify({ name, parentId })
   }),
   deleteDocumentFolder: (folderId: string) => request<{ ok: boolean }>(`/api/documents/folders/${folderId}`, { method: "DELETE" }),
+  updateDocumentFolder: (folderId: string, patch: { name?: string; parentId?: string | null; wealthItemType?: WealthItemType | null; wealthItemId?: string | null }) =>
+    request<DocumentFolder>(`/api/documents/folders/${folderId}`, { method: "PATCH", body: JSON.stringify(patch) }),
   requestDocumentUploadUrl: (params: { name: string; contentType: string; sizeBytes: number; folderId: string | null; noteId?: string | null }) =>
     request<{ documentId: string; uploadUrl: string; expiresAt: number }>("/api/documents/upload-url", {
       method: "POST", body: JSON.stringify(params)

@@ -42,9 +42,12 @@ export type PlanTask = {
 };
 export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[] } };
 
-export type DocumentFolder = { id: string; householdId: string; parentId: string | null; name: string; createdAt: string };
 export type DocumentStatus = "pending" | "ready";
 export type WealthItemType = "asset" | "liability";
+export type DocumentFolder = {
+  id: string; householdId: string; parentId: string | null; name: string;
+  wealthItemType: WealthItemType | null; wealthItemId: string | null; createdAt: string;
+};
 export type Document = {
   id: string; householdId: string; uploadedBy: string; folderId: string | null; noteId: string | null;
   wealthItemType: WealthItemType | null; wealthItemId: string | null;
