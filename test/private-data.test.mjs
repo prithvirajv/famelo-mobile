@@ -100,6 +100,13 @@ test("Documents screen lets a whole folder be tagged to a wealth asset or liabil
   assert.match(source, /updateDocumentFolder/);
 });
 
+test("Documents screen lets a folder be renamed", () => {
+  const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(source, /startRenameFolder/);
+  assert.match(source, /saveRenameFolder/);
+  assert.match(source, /renamingFolderId/);
+});
+
 test("app.json configures the expo-image-picker permission plugin", () => {
   const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
   const plugins = appJson.expo.plugins || [];

@@ -537,6 +537,8 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
   const [uploading, setUploading] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [error, setError] = useState("");
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -567,6 +569,20 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
         catch (cause) { showError("Could not delete folder", cause); }
       }
     }]);
+  };
+
+  const startRenameFolder = (folderId: string, currentName: string) => {
+    setRenamingFolderId(folderId);
+    setRenameDraft(currentName);
+  };
+
+  const saveRenameFolder = async () => {
+    const folderId = renamingFolderId;
+    const name = renameDraft.trim();
+    setRenamingFolderId(null);
+    if (!folderId || !name) return;
+    try { await api.updateDocumentFolder(folderId, { name }); await load(); }
+    catch (cause) { showError("Could not rename folder", cause); }
   };
 
   const linkFolderWealthItem = async (folderId: string, wealthItemType: WealthItemType | null, wealthItemId: string | null) => {
@@ -678,11 +694,19 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
       const linkedWealthItem = folder.wealthItemId
         ? (folder.wealthItemType === "liability" ? wealthLiabilities : wealthAssets).find((item) => item.id === folder.wealthItemId)
         : null;
+      if (renamingFolderId === folder.id) {
+        return <View key={folder.id} style={styles.row}>
+          <TextInput style={[styles.input, styles.rowCopy]} value={renameDraft} onChangeText={setRenameDraft} autoFocus onSubmitEditing={() => void saveRenameFolder()} />
+          <Pressable onPress={() => void saveRenameFolder()}><Ionicons name="checkmark-outline" size={20} color={colors.green} /></Pressable>
+          <Pressable onPress={() => setRenamingFolderId(null)}><Ionicons name="close-outline" size={20} color={colors.muted} /></Pressable>
+        </View>;
+      }
       return <View key={folder.id} style={styles.row}>
         <Pressable style={styles.rowCopy} onPress={() => setCurrentFolderId(folder.id)}>
           <Text style={styles.rowTitle}>{folder.name}</Text>
           {linkedWealthItem ? <Text style={styles.rowDetail}>Tagged to {folder.wealthItemType === "liability" ? "Liability" : "Asset"}: {linkedWealthItem.name}</Text> : null}
         </Pressable>
+        <Pressable onPress={() => startRenameFolder(folder.id, folder.name)}><Ionicons name="pencil-outline" size={18} color={colors.text} /></Pressable>
         <Pressable onPress={() => promptFolderWealthLink(folder)}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
         <Pressable onPress={() => deleteFolder(folder.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
       </View>;
