@@ -12,7 +12,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
-import { applyChecklistToggle, firstWeekDayDates, formatShortDate } from "./src/planningLogic";
+import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstimateAmount } from "./src/planningLogic";
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
@@ -236,7 +236,17 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${recipe.name} planned for ${day} ${slot}.`; await onSave(next);
   };
   const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week 1`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
-  const postGroceries = async () => { const next = structuredClone(state); const line = next.budget.categories.flatMap((category) => category.lines).find((item) => item.name.toLowerCase().includes("grocer")); if (!line) return Alert.alert("Budget setup needed", "Add a Groceries subcategory before posting."); const amount = Number(next.meals.groceryEstimate || 185); next.transactions.unshift({ date: new Date().toISOString().slice(0, 10), payee: "Meal plan groceries", lineId: line.id, amount, memo: "Posted from mobile meal planner" }); next.meals.feedback = `${money(amount, state.household.currency)} posted to Groceries.`; await onSave(next); };
+  const postGroceries = async () => {
+    const next = structuredClone(state);
+    const line = next.budget.categories.flatMap((category) => category.lines).find((item) => item.name.toLowerCase().includes("grocer"));
+    if (!line) return Alert.alert("Budget setup needed", "Add a Groceries subcategory before posting.");
+    const estimate = groceryEstimateAmount(current, state.meals.recipes);
+    if (estimate <= 0) return Alert.alert("Nothing planned yet", "Plan at least one meal this week before posting a grocery estimate.");
+    const amount = Number(next.meals.groceryEstimate || estimate);
+    next.transactions.unshift({ date: new Date().toISOString().slice(0, 10), payee: "Meal plan groceries", lineId: line.id, amount, memo: "Posted from mobile meal planner" });
+    next.meals.feedback = `${money(amount, state.household.currency)} posted to Groceries.`;
+    await onSave(next);
+  };
   return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card><View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
     <Text style={styles.label}>Day</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
     <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>

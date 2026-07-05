@@ -1,4 +1,4 @@
-import type { NoteItem, HouseholdState } from "./types";
+import type { NoteItem, HouseholdState, PlannedMeal, Recipe } from "./types";
 
 export function applyChecklistToggle(checklist: NoteItem[], itemId: string, done: boolean): NoteItem[] {
   const next = checklist.map((item) => (item.id === itemId ? { ...item, done } : { ...item }));
@@ -35,4 +35,18 @@ export function firstWeekDayDates(monthValue: HouseholdState["budget"]["month"])
 
 export function formatShortDate(date: Date): string {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+export function groceryListFor(plannedMeals: PlannedMeal[], recipes: Recipe[]): string[] {
+  return [...new Set(plannedMeals.flatMap((planned) => recipes.find((recipe) => recipe.id === planned.recipeId)?.ingredients || []))];
+}
+
+// Recipes don't carry per-ingredient prices, so this is a rough per-item
+// average rather than exact pricing — but it scales with what's actually
+// planned instead of a fixed guess regardless of the meal plan. Matches the
+// same per-item constant used by the web app for consistency.
+const GROCERY_ITEM_ESTIMATE = 7;
+
+export function groceryEstimateAmount(plannedMeals: PlannedMeal[], recipes: Recipe[]): number {
+  return groceryListFor(plannedMeals, recipes).length * GROCERY_ITEM_ESTIMATE;
 }
