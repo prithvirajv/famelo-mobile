@@ -30,5 +30,14 @@ export type JournalEntry = {
   photos: JournalPhoto[]; createdAt: string; updatedAt: string;
 };
 export type PlanBucket = "daily" | "weekly" | "monthly";
-export type PlanTask = { id: string; title: string; notes: string; bucket: PlanBucket; anchorDate: string; done: boolean; createdAt: string };
+export type PlanRecurrence = "none" | "daily" | "weekdays" | "weekly" | "monthly";
+export type PlanSubtask = { id: string; text: string; done: boolean };
+export type PlanTask = {
+  id: string; title: string; notes: string; bucket: PlanBucket; anchorDate: string; createdAt: string;
+  subtasks?: PlanSubtask[];
+  // Weekly/monthly tasks use this plain boolean; daily tasks use completedDates instead (see below).
+  done?: boolean;
+  // Daily-bucket-only fields:
+  startTime?: string; durationMinutes?: number; recurrence?: PlanRecurrence; completedDates?: string[];
+};
 export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[] } };

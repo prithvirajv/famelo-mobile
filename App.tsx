@@ -11,8 +11,12 @@ import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
 import { applyChecklistToggle, firstWeekDayDates, formatShortDate } from "./src/planningLogic";
-import { groupPlanTasksByBucket, defaultPlanAnchorDate } from "./src/planLogic";
-import type { Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
+import {
+  groupPlanTasksByBucket, defaultPlanAnchorDate,
+  dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
+  timeToMinutes, snapMinutes
+} from "./src/planLogic";
+import type { Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -300,25 +304,107 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
   </Page>;
 }
 
+const planRecurrenceLabels: Record<PlanRecurrence, string> = {
+  none: "Does not repeat", daily: "Every day", weekdays: "Every weekday", weekly: "Every week", monthly: "Every month"
+};
+
+function formatPlanDayLabel(dateKey: string): string {
+  const date = new Date(`${dateKey}T00:00:00`);
+  const today = new Date().toISOString().slice(0, 10);
+  if (dateKey === today) return `Today · ${date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`;
+  return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void> }) {
   const [bucket, setBucket] = useState<PlanBucket>("daily");
   const [title, setTitle] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [durationMinutes, setDurationMinutes] = useState(30);
+  const [recurrence, setRecurrence] = useState<PlanRecurrence>("none");
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [subtaskDrafts, setSubtaskDrafts] = useState<Record<string, string>>({});
+
   const grouped = groupPlanTasksByBucket(privateData.plans.tasks);
-  const tasks = grouped[bucket];
+  const tasks = bucket === "daily"
+    ? grouped.daily
+        .filter((task) => dailyTaskOccursOnDate(task, selectedDate))
+        .slice()
+        .sort((a, b) => (timeToMinutes(a.startTime) ?? Infinity) - (timeToMinutes(b.startTime) ?? Infinity))
+    : grouped[bucket];
 
   const addTask = async () => {
     if (!title.trim()) return;
-    const task: PlanTask = { id: `plan-${Date.now()}`, title: title.trim(), notes: "", bucket, anchorDate: defaultPlanAnchorDate(bucket), done: false, createdAt: new Date().toISOString() };
+    const task: PlanTask = {
+      id: `plan-${Date.now()}`, title: title.trim(), notes: "", bucket,
+      anchorDate: bucket === "daily" ? selectedDate : defaultPlanAnchorDate(bucket),
+      createdAt: new Date().toISOString(), subtasks: [],
+      ...(bucket === "daily"
+        ? { startTime: startTime.trim() || undefined, durationMinutes, recurrence, completedDates: [] }
+        : { done: false })
+    };
     await onSave({ tasks: [...privateData.plans.tasks, task] });
     setTitle("");
+    setStartTime("");
+    setDurationMinutes(30);
+    setRecurrence("none");
   };
 
   const toggleTask = async (taskId: string) => {
-    await onSave({ tasks: privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, done: !task.done } : task) });
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => {
+        if (task.id !== taskId) return task;
+        return task.bucket === "daily" ? toggleDailyTaskDoneOnDate(task, selectedDate) : { ...task, done: !task.done };
+      })
+    });
   };
 
   const deleteTask = async (taskId: string) => {
     await onSave({ tasks: privateData.plans.tasks.filter((task) => task.id !== taskId) });
+  };
+
+  const adjustDuration = async (taskId: string, delta: number) => {
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => task.id === taskId
+        ? { ...task, durationMinutes: Math.max(15, snapMinutes((task.durationMinutes || 30) + delta)) }
+        : task)
+    });
+  };
+
+  const changeStartTime = async (taskId: string, value: string) => {
+    await onSave({ tasks: privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, startTime: value.trim() || undefined } : task) });
+  };
+
+  const addSubtask = async (taskId: string) => {
+    const text = (subtaskDrafts[taskId] || "").trim();
+    if (!text) return;
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => task.id === taskId
+        ? { ...task, subtasks: [...(task.subtasks || []), { id: `sub-${Date.now()}`, text, done: false }] }
+        : task)
+    });
+    setSubtaskDrafts((prev) => ({ ...prev, [taskId]: "" }));
+  };
+
+  const toggleSubtask = async (taskId: string, subtaskId: string) => {
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => task.id === taskId
+        ? { ...task, subtasks: (task.subtasks || []).map((subtask) => subtask.id === subtaskId ? { ...subtask, done: !subtask.done } : subtask) }
+        : task)
+    });
+  };
+
+  const deleteSubtask = async (taskId: string, subtaskId: string) => {
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => task.id === taskId
+        ? { ...task, subtasks: (task.subtasks || []).filter((subtask) => subtask.id !== subtaskId) }
+        : task)
+    });
+  };
+
+  const shiftDay = (delta: number) => {
+    const next = new Date(`${selectedDate}T00:00:00`);
+    next.setDate(next.getDate() + delta);
+    setSelectedDate(next.toISOString().slice(0, 10));
   };
 
   return <Page><Title eyebrow="PLAN">Daily, weekly and monthly tasks</Title>
@@ -326,17 +412,60 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
     <View style={styles.choiceRow}>
       {(["daily", "weekly", "monthly"] as PlanBucket[]).map((item) => <Pressable key={item} style={[styles.choice, bucket === item && styles.choiceActive]} onPress={() => setBucket(item)}><Text style={[styles.choiceText, bucket === item && styles.choiceTextActive]}>{item.charAt(0).toUpperCase() + item.slice(1)}</Text></Pressable>)}
     </View>
+    {bucket === "daily" && <View style={styles.dayNavRow}>
+      <Pressable style={styles.planStepperButton} onPress={() => shiftDay(-1)}><Ionicons name="chevron-back" size={18} color={colors.text} /></Pressable>
+      <Pressable style={styles.dayNavLabel} onPress={() => setSelectedDate(new Date().toISOString().slice(0, 10))}><Text style={styles.rowTitle}>{formatPlanDayLabel(selectedDate)}</Text></Pressable>
+      <Pressable style={styles.planStepperButton} onPress={() => shiftDay(1)}><Ionicons name="chevron-forward" size={18} color={colors.text} /></Pressable>
+    </View>}
     <Card>
       <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder={`Add a ${bucket} task`} />
+      {bucket === "daily" && <>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={startTime} onChangeText={setStartTime} placeholder="Start time (HH:MM, optional)" />
+        </View>
+        <View style={styles.actionRow}>
+          <Text style={[styles.rowDetail, { flex: 1 }]}>Duration: {durationMinutes} min</Text>
+          <Pressable style={styles.planStepperButton} onPress={() => setDurationMinutes((minutes) => Math.max(15, minutes - 15))}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
+          <Pressable style={styles.planStepperButton} onPress={() => setDurationMinutes((minutes) => minutes + 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
+        </View>
+        <View style={styles.choiceRow}>
+          {(["none", "daily", "weekdays", "weekly", "monthly"] as PlanRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, recurrence === item && styles.choiceActive]} onPress={() => setRecurrence(item)}><Text style={[styles.choiceText, recurrence === item && styles.choiceTextActive]}>{planRecurrenceLabels[item]}</Text></Pressable>)}
+        </View>
+      </>}
       <Pressable style={styles.primaryButton} onPress={() => void addTask()}><Text style={styles.primaryButtonText}>Add task</Text></Pressable>
     </Card>
-    <Card>{tasks.length ? tasks.map((task) => <View key={task.id} style={styles.row}>
-      <Pressable style={styles.rowCopy} onPress={() => void toggleTask(task.id)}>
-        <Text style={[styles.rowTitle, task.done && styles.done]}>{task.title}</Text>
-        <Text style={styles.rowDetail}>{task.anchorDate}</Text>
-      </Pressable>
-      <Pressable onPress={() => void deleteTask(task.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
-    </View>) : <Text style={styles.muted}>No {bucket} tasks yet.</Text>}</Card>
+    <Card>{tasks.length ? tasks.map((task) => {
+      const done = bucket === "daily" ? isDailyTaskDoneOnDate(task, selectedDate) : Boolean(task.done);
+      return <View key={task.id} style={styles.planTaskBlock}>
+        <View style={styles.row}>
+          <Pressable style={styles.rowCopy} onPress={() => void toggleTask(task.id)}>
+            <Text style={[styles.rowTitle, done && styles.done]}>{task.title}</Text>
+            <Text style={styles.rowDetail}>
+              {bucket === "daily"
+                ? [task.startTime || "Unscheduled", `${task.durationMinutes || 30} min`, planRecurrenceLabels[task.recurrence || "none"]].join(" · ")
+                : task.anchorDate}
+            </Text>
+          </Pressable>
+          <Pressable onPress={() => void deleteTask(task.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+        {bucket === "daily" && <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={task.startTime || ""} onChangeText={(value) => void changeStartTime(task.id, value)} placeholder="Start time (HH:MM)" />
+          <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, -15)}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
+          <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
+        </View>}
+        <View style={styles.subtaskList}>
+          {(task.subtasks || []).map((subtask) => <View key={subtask.id} style={styles.checkRow}>
+            <Pressable onPress={() => void toggleSubtask(task.id, subtask.id)}><Ionicons name={subtask.done ? "checkbox" : "square-outline"} size={20} color={subtask.done ? colors.green : colors.muted} /></Pressable>
+            <Text style={[styles.checkText, subtask.done && styles.done]}>{subtask.text}</Text>
+            <Pressable onPress={() => void deleteSubtask(task.id, subtask.id)}><Ionicons name="close" size={16} color={colors.muted} /></Pressable>
+          </View>)}
+          <View style={styles.actionRow}>
+            <TextInput style={[styles.input, { flex: 1 }]} value={subtaskDrafts[task.id] || ""} onChangeText={(value) => setSubtaskDrafts((prev) => ({ ...prev, [task.id]: value }))} placeholder="Add subtask" />
+            <Pressable style={styles.secondarySmall} onPress={() => void addSubtask(task.id)}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+          </View>
+        </View>
+      </View>;
+    }) : <Text style={styles.muted}>No {bucket} tasks yet.</Text>}</Card>
   </Page>;
 }
 
@@ -364,6 +493,7 @@ const styles = StyleSheet.create({
   multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
+  dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" }
 });

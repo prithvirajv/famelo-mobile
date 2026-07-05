@@ -32,6 +32,19 @@ test("package.json declares the image picker dependency", () => {
   assert.ok(packageJson.dependencies["expo-image-picker"], "expected expo-image-picker in dependencies");
 });
 
+test("Plan screen wires up Daily timeline navigation, recurrence, duration, and subtasks", () => {
+  const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(source, /dailyTaskOccursOnDate/);
+  assert.match(source, /isDailyTaskDoneOnDate/);
+  assert.match(source, /toggleDailyTaskDoneOnDate/);
+  assert.match(source, /shiftDay/);
+  assert.match(source, /planRecurrenceLabels/);
+  assert.match(source, /adjustDuration/);
+  assert.match(source, /addSubtask/);
+  assert.match(source, /toggleSubtask/);
+  assert.match(source, /deleteSubtask/);
+});
+
 test("app.json configures the expo-image-picker permission plugin", () => {
   const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
   const plugins = appJson.expo.plugins || [];
