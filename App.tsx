@@ -1,26 +1,32 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Platform, Pressable, RefreshControl,
+  ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Platform, Pressable, RefreshControl,
   SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
+import * as ImagePicker from "expo-image-picker";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
 import { applyChecklistToggle, firstWeekDayDates, formatShortDate } from "./src/planningLogic";
-import type { Household, HouseholdAccess, HouseholdState, Note, PlannedMeal, User } from "./src/types";
+import { groupPlanTasksByBucket, defaultPlanAnchorDate } from "./src/planLogic";
+import type { Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
 
-type Tab = "home" | "budget" | "calendar" | "notes" | "meals" | "more";
+type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
   { id: "home", label: "Home", icon: "home-outline" },
   { id: "budget", label: "Budget", icon: "wallet-outline" },
   { id: "calendar", label: "Calendar", icon: "calendar-outline" },
   { id: "notes", label: "Notes", icon: "document-text-outline" },
+  { id: "journal", label: "Journal", icon: "create-outline" },
+  { id: "plan", label: "Plan", icon: "layers-outline" },
   { id: "meals", label: "Meals", icon: "restaurant-outline" },
   { id: "more", label: "More", icon: "grid-outline" }
 ];
+
+const journalMoods = ["Happy", "Calm", "Neutral", "Stressed", "Sad", "Grateful", "Excited"];
 
 function money(value: number, currency = "USD") {
   return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 0 }).format(value || 0);
@@ -36,6 +42,7 @@ function AppContent() {
   const [households, setHouseholds] = useState<Household[]>([]);
   const [state, setState] = useState<HouseholdState | null>(null);
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
+  const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -47,10 +54,13 @@ function AppContent() {
       const session = await api.session();
       setUser(session.user);
       if (!session.authenticated || !session.user) return setState(null);
-      const [nextHouseholds, nextState, nextAccess] = await Promise.all([api.households(), api.state(), api.householdAccess()]);
+      // privateData is scoped to the user, not the household, so it stays the same
+      // regardless of which household is selected — fetched here alongside it anyway.
+      const [nextHouseholds, nextState, nextAccess, nextPrivateData] = await Promise.all([api.households(), api.state(), api.householdAccess(), api.privateData()]);
       setHouseholds(nextHouseholds);
       setState(nextState);
       setAccess(nextAccess);
+      setPrivateData(nextPrivateData);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) setUser(null);
       else setError(cause instanceof Error ? cause.message : "Unable to load Famelo");
@@ -76,14 +86,33 @@ function AppContent() {
     finally { setSaving(false); }
   }, []);
 
+  const saveJournal = useCallback(async (journal: PrivateData["journal"]) => {
+    setPrivateData((prev) => prev ? { ...prev, journal } : prev);
+    setSaving(true);
+    try { await api.saveJournal(journal); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Journal could not be saved"); }
+    finally { setSaving(false); }
+  }, []);
+
+  const savePlans = useCallback(async (plans: PrivateData["plans"]) => {
+    setPrivateData((prev) => prev ? { ...prev, plans } : prev);
+    setSaving(true);
+    try { await api.savePlans(plans); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Plans could not be saved"); }
+    finally { setSaving(false); }
+  }, []);
+
   if (loading) return <Centered><ActivityIndicator size="large" color={colors.green} /></Centered>;
   if (!user || !state) return <AuthScreen onAuthenticated={loadWorkspace} />;
 
   const selected = households.find((item) => item.selected);
+  const activePrivateData = privateData || { journal: { entries: [] }, plans: { tasks: [] } };
   const page = tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
+    : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
+    : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} />
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
@@ -217,6 +246,100 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   return <Page><Title eyebrow="NOTES">Household notes</Title>{notes.map((note) => <View key={note.id} style={[styles.note, { backgroundColor: note.color || colors.surface }]}><View style={styles.noteHeader}><Text style={styles.noteTitle}>{note.title}</Text>{note.pinned ? <Ionicons name="pin" size={18} color={colors.gold} /> : null}</View>{note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}{note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => void toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}</View>)}</Page>;
 }
 
+function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (journal: PrivateData["journal"]) => Promise<void> }) {
+  const [title, setTitle] = useState(""); const [body, setBody] = useState(""); const [mood, setMood] = useState("");
+  const entries = [...privateData.journal.entries].sort((a, b) => b.entryDate.localeCompare(a.entryDate));
+
+  const addEntry = async () => {
+    if (!title.trim() && !body.trim()) return;
+    const now = new Date().toISOString();
+    const entry: JournalEntry = { id: `journal-${Date.now()}`, entryDate: now.slice(0, 10), title: title.trim(), body: body.trim(), mood, tags: [], photos: [], createdAt: now, updatedAt: now };
+    await onSave({ entries: [...privateData.journal.entries, entry] });
+    setTitle(""); setBody(""); setMood("");
+  };
+
+  const deleteEntry = async (entryId: string) => {
+    await onSave({ entries: privateData.journal.entries.filter((entry) => entry.id !== entryId) });
+  };
+
+  const addPhoto = async (entryId: string) => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to attach photos to journal entries.");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.5 });
+    const asset = result.canceled ? null : result.assets?.[0];
+    if (!asset?.base64) return;
+    const dataUrl = `data:${asset.mimeType || "image/jpeg"};base64,${asset.base64}`;
+    const now = new Date().toISOString();
+    const nextEntries = privateData.journal.entries.map((entry) => entry.id === entryId
+      ? { ...entry, photos: [...entry.photos, { id: `photo-${Date.now()}`, dataUrl, createdAt: now }].slice(0, 8) }
+      : entry);
+    await onSave({ entries: nextEntries });
+  };
+
+  return <Page><Title eyebrow="JOURNAL">Your private journal</Title>
+    <Text style={styles.muted}>Private to you — never shared with other household members.</Text>
+    <Card>
+      <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Give today a title" />
+      <Text style={styles.label}>Mood</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        {journalMoods.map((item) => <Pressable key={item} style={[styles.choice, mood === item && styles.choiceActive]} onPress={() => setMood(mood === item ? "" : item)}><Text style={[styles.choiceText, mood === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}
+      </ScrollView>
+      <TextInput style={[styles.input, styles.multilineInput]} value={body} onChangeText={setBody} placeholder="What happened today?" multiline />
+      <Pressable style={styles.primaryButton} onPress={() => void addEntry()}><Text style={styles.primaryButtonText}>Add entry</Text></Pressable>
+    </Card>
+    {entries.map((entry) => <Card key={entry.id}>
+      <View style={styles.noteHeader}>
+        <Text style={styles.noteTitle}>{entry.title || "Untitled entry"}</Text>
+        <Pressable onPress={() => void deleteEntry(entry.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>
+      <Text style={styles.muted}>{entry.entryDate}{entry.mood ? ` · ${entry.mood}` : ""}</Text>
+      {entry.body ? <Text style={styles.noteBody}>{entry.body}</Text> : null}
+      {entry.photos.length ? <ScrollView horizontal style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
+      <Pressable style={styles.secondarySmall} onPress={() => void addPhoto(entry.id)}><Text style={styles.secondaryButtonText}>+ Add photo</Text></Pressable>
+    </Card>)}
+  </Page>;
+}
+
+function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void> }) {
+  const [bucket, setBucket] = useState<PlanBucket>("daily");
+  const [title, setTitle] = useState("");
+  const grouped = groupPlanTasksByBucket(privateData.plans.tasks);
+  const tasks = grouped[bucket];
+
+  const addTask = async () => {
+    if (!title.trim()) return;
+    const task: PlanTask = { id: `plan-${Date.now()}`, title: title.trim(), notes: "", bucket, anchorDate: defaultPlanAnchorDate(bucket), done: false, createdAt: new Date().toISOString() };
+    await onSave({ tasks: [...privateData.plans.tasks, task] });
+    setTitle("");
+  };
+
+  const toggleTask = async (taskId: string) => {
+    await onSave({ tasks: privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, done: !task.done } : task) });
+  };
+
+  const deleteTask = async (taskId: string) => {
+    await onSave({ tasks: privateData.plans.tasks.filter((task) => task.id !== taskId) });
+  };
+
+  return <Page><Title eyebrow="PLAN">Daily, weekly and monthly tasks</Title>
+    <Text style={styles.muted}>Private to you — never shared with other household members.</Text>
+    <View style={styles.choiceRow}>
+      {(["daily", "weekly", "monthly"] as PlanBucket[]).map((item) => <Pressable key={item} style={[styles.choice, bucket === item && styles.choiceActive]} onPress={() => setBucket(item)}><Text style={[styles.choiceText, bucket === item && styles.choiceTextActive]}>{item.charAt(0).toUpperCase() + item.slice(1)}</Text></Pressable>)}
+    </View>
+    <Card>
+      <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder={`Add a ${bucket} task`} />
+      <Pressable style={styles.primaryButton} onPress={() => void addTask()}><Text style={styles.primaryButtonText}>Add task</Text></Pressable>
+    </Card>
+    <Card>{tasks.length ? tasks.map((task) => <View key={task.id} style={styles.row}>
+      <Pressable style={styles.rowCopy} onPress={() => void toggleTask(task.id)}>
+        <Text style={[styles.rowTitle, task.done && styles.done]}>{task.title}</Text>
+        <Text style={styles.rowDetail}>{task.anchorDate}</Text>
+      </Pressable>
+      <Pressable onPress={() => void deleteTask(task.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+    </View>) : <Text style={styles.muted}>No {bucket} tasks yet.</Text>}</Card>
+  </Page>;
+}
+
 function More({ state, user, households, onSelect, onSignOut }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void> }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
@@ -237,6 +360,8 @@ const styles = StyleSheet.create({
   row: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 10 }, rowCopy: { flex: 1 }, rowTitle: { color: colors.text, fontWeight: "700", fontSize: 15 }, rowDetail: { color: colors.muted, fontSize: 12, marginTop: 3 }, rowValue: { color: colors.text, fontWeight: "800", fontSize: 13, maxWidth: "43%", textAlign: "right" }, badge: { color: colors.green, backgroundColor: colors.greenSoft, fontWeight: "700", fontSize: 11, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 12, overflow: "hidden" },
   categoryHeader: { flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 4 }, dot: { height: 20, width: 5, borderRadius: 3 },
   note: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 16 }, noteHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, noteTitle: { color: colors.text, fontWeight: "800", fontSize: 20 }, noteBody: { color: colors.text, marginVertical: 10, lineHeight: 21 }, checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 }, checkRowChild: { marginLeft: 24 }, checkText: { flex: 1, color: colors.text, fontSize: 15 }, done: { textDecorationLine: "line-through", color: colors.muted },
+  journalPhotoRow: { marginTop: 10 }, journalPhoto: { width: 72, height: 72, borderRadius: 8, marginRight: 8 },
+  multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },

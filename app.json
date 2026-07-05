@@ -16,7 +16,15 @@
         "backgroundColor": "#17233f"
       }
     },
-    "plugins": ["expo-notifications"],
+    "plugins": [
+      "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Famelo uses your photos to attach them to journal entries."
+        }
+      ]
+    ],
     "extra": {
       "apiUrl": "https://famelo.net"
     }

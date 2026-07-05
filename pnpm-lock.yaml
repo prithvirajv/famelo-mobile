@@ -26,6 +26,9 @@ importers:
       expo-font:
         specifier: 57.0.0
         version: 57.0.0(expo@57.0.1)(react-native@0.86.0(@babel/core@7.29.7)(@types/react@19.2.4)(react@19.2.3))(react@19.2.3)
+      expo-image-picker:
+        specifier: ^57.0.2
+        version: 57.0.2(expo@57.0.1)
       expo-notifications:
         specifier: ^57.0.3
         version: 57.0.3(expo@57.0.1)(react-native@0.86.0(@babel/core@7.29.7)(@types/react@19.2.4)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
@@ -1089,6 +1092,16 @@ packages:
       expo: '*'
       react: '*'
       react-native: '*'
+
+  expo-image-loader@57.0.0:
+    resolution: {integrity: sha512-EhwnoPC4T/EMdB7Nsg7qITzhO/qB0hUnmVghmtAKQwwDVaLWWYCGE4NLkes3zk9Ub451SmS/swgPp4PCPzOlnw==}
+    peerDependencies:
+      expo: '*'
+
+  expo-image-picker@57.0.2:
+    resolution: {integrity: sha512-XW+C5weIthkOLCJZzExeRJf9pcWfaXNHSDm76gmZVhDUVIHdi9IS3eihAIF0WA0fBo9ogIfQs/iep/c6CzIMKg==}
+    peerDependencies:
+      expo: '*'
 
   expo-keep-awake@57.0.0:
     resolution: {integrity: sha512-WqEoyDNSmUeAI9Gu7UaWKDjOhfaV+jGcms7N0hh/EAr7sqJrI2s0HpLSC3P9cWfXFUZCL1zZjd22m/NbsJYCKg==}
@@ -3474,6 +3487,15 @@ snapshots:
       fontfaceobserver: 2.3.0
       react: 19.2.3
       react-native: 0.86.0(@babel/core@7.29.7)(@types/react@19.2.4)(react@19.2.3)
+
+  expo-image-loader@57.0.0(expo@57.0.1):
+    dependencies:
+      expo: 57.0.1(@babel/core@7.29.7)(@expo/dom-webview@57.0.0)(react-native@0.86.0(@babel/core@7.29.7)(@types/react@19.2.4)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
+
+  expo-image-picker@57.0.2(expo@57.0.1):
+    dependencies:
+      expo: 57.0.1(@babel/core@7.29.7)(@expo/dom-webview@57.0.0)(react-native@0.86.0(@babel/core@7.29.7)(@types/react@19.2.4)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
+      expo-image-loader: 57.0.0(expo@57.0.1)
 
   expo-keep-awake@57.0.0(expo@57.0.1)(react@19.2.3):
     dependencies:

@@ -23,3 +23,12 @@ export type HouseholdState = {
   meals: { recipes: Recipe[]; plannedWeek: PlannedMeal[]; savedWeeks?: string[]; nutritionGoals?: { calories: number; protein: number }; selectedWeekByMonth?: Record<string, number>; feedback?: string; groceryEstimate?: number };
   goals?: { sinkingFunds?: unknown[]; debts?: Debt[]; netWorth?: { assets: WealthAsset[]; liabilities: WealthLiability[] } };
 };
+
+export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
+export type JournalEntry = {
+  id: string; entryDate: string; title: string; body: string; mood: string; tags: string[];
+  photos: JournalPhoto[]; createdAt: string; updatedAt: string;
+};
+export type PlanBucket = "daily" | "weekly" | "monthly";
+export type PlanTask = { id: string; title: string; notes: string; bucket: PlanBucket; anchorDate: string; done: boolean; createdAt: string };
+export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[] } };

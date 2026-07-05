@@ -1,4 +1,4 @@
-import type { Household, HouseholdAccess, HouseholdState, User } from "./types";
+import type { Household, HouseholdAccess, HouseholdState, PrivateData, User } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://famelo.net").replace(/\/$/, "");
 
@@ -37,5 +37,12 @@ export const api = {
   }),
   registerPushDevice: (token: string, platform: string) => request<{ ok: boolean }>("/api/push-devices", {
     method: "POST", body: JSON.stringify({ token, platform })
+  }),
+  privateData: () => request<PrivateData>("/api/private-data"),
+  saveJournal: (journal: PrivateData["journal"]) => request<{ ok: boolean }>("/api/private-data/journal", {
+    method: "PUT", body: JSON.stringify(journal)
+  }),
+  savePlans: (plans: PrivateData["plans"]) => request<{ ok: boolean }>("/api/private-data/plans", {
+    method: "PUT", body: JSON.stringify(plans)
   })
 };
