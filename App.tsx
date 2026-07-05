@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Platform, Pressable, RefreshControl,
+  ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
   SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
@@ -16,9 +18,10 @@ import {
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
   timeToMinutes, snapMinutes
 } from "./src/planLogic";
-import type { Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
+import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
+import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User } from "./src/types";
 
-type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "meals" | "more";
+type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
   { id: "home", label: "Home", icon: "home-outline" },
   { id: "budget", label: "Budget", icon: "wallet-outline" },
@@ -26,6 +29,7 @@ const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap
   { id: "notes", label: "Notes", icon: "document-text-outline" },
   { id: "journal", label: "Journal", icon: "create-outline" },
   { id: "plan", label: "Plan", icon: "layers-outline" },
+  { id: "documents", label: "Documents", icon: "folder-outline" },
   { id: "meals", label: "Meals", icon: "restaurant-outline" },
   { id: "more", label: "More", icon: "grid-outline" }
 ];
@@ -117,6 +121,7 @@ function AppContent() {
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} />
+    : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} />
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
@@ -469,6 +474,168 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
   </Page>;
 }
 
+function DocumentRow({ document, notes, onDownload, onDelete, onLinkNote }: {
+  document: Document; notes: Note[]; onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void
+}) {
+  const [showNotePicker, setShowNotePicker] = useState(false);
+  const linkedNote = document.noteId ? notes.find((note) => note.id === document.noteId) : null;
+  return <View style={styles.planTaskBlock}>
+    <View style={styles.row}>
+      <View style={styles.rowCopy}>
+        <Text style={styles.rowTitle}>{document.name}</Text>
+        <Text style={styles.rowDetail}>{[formatFileSize(document.sizeBytes), document.status === "pending" ? "Uploading…" : document.contentType].filter(Boolean).join(" · ")}</Text>
+        {linkedNote ? <Text style={styles.rowDetail}>Linked to “{linkedNote.title || "Untitled note"}”</Text> : null}
+      </View>
+      <Pressable onPress={onDownload}><Ionicons name="download-outline" size={20} color={colors.text} /></Pressable>
+      <Pressable onPress={() => setShowNotePicker((prev) => !prev)}><Ionicons name="link-outline" size={20} color={linkedNote ? colors.green : colors.muted} /></Pressable>
+      <Pressable onPress={onDelete}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+    </View>
+    {showNotePicker ? <View style={styles.subtaskList}>
+      <Pressable style={styles.checkRow} onPress={() => { onLinkNote(null); setShowNotePicker(false); }}>
+        <Ionicons name={!document.noteId ? "radio-button-on" : "radio-button-off"} size={18} color={colors.muted} />
+        <Text style={styles.checkText}>No linked note</Text>
+      </Pressable>
+      {notes.map((note) => <Pressable key={note.id} style={styles.checkRow} onPress={() => { onLinkNote(note.id); setShowNotePicker(false); }}>
+        <Ionicons name={document.noteId === note.id ? "radio-button-on" : "radio-button-off"} size={18} color={colors.muted} />
+        <Text style={styles.checkText}>{note.title || "Untitled note"}</Text>
+      </Pressable>)}
+    </View> : null}
+  </View>;
+}
+
+function DocumentsScreen({ notes }: { notes: Note[] }) {
+  const [data, setData] = useState<DocumentsData | null>(null);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const result = await api.documents();
+      setData(result);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to load documents");
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const showError = (title: string, cause: unknown) => Alert.alert(title, cause instanceof Error ? cause.message : "Unknown error");
+
+  const createFolder = async () => {
+    if (!newFolderName.trim()) return;
+    try {
+      await api.createDocumentFolder(newFolderName.trim(), currentFolderId);
+      setNewFolderName("");
+      await load();
+    } catch (cause) { showError("Could not create folder", cause); }
+  };
+
+  const deleteFolder = (folderId: string) => {
+    Alert.alert("Delete folder?", "It must be empty.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: async () => {
+        try { await api.deleteDocumentFolder(folderId); await load(); }
+        catch (cause) { showError("Could not delete folder", cause); }
+      }
+    }]);
+  };
+
+  const uploadDocument = async () => {
+    const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
+    if (picked.canceled || !picked.assets?.[0]) return;
+    const asset = picked.assets[0];
+    setUploading(true);
+    try {
+      const { documentId, uploadUrl } = await api.requestDocumentUploadUrl({
+        name: asset.name,
+        contentType: asset.mimeType || "application/octet-stream",
+        sizeBytes: asset.size || 0,
+        folderId: currentFolderId
+      });
+      // In MEMORY_DB (test/preview) mode the server returns a placeholder URL
+      // rather than a real signed GCS URL — only a real deployment with
+      // GCS_BUCKET configured issues an http(s) signed URL this PUT reaches.
+      if (/^https?:\/\//.test(uploadUrl)) {
+        await FileSystem.uploadAsync(uploadUrl, asset.uri, {
+          httpMethod: "PUT",
+          headers: { "Content-Type": asset.mimeType || "application/octet-stream" }
+        });
+      }
+      await api.confirmDocumentUpload(documentId);
+      await load();
+    } catch (cause) {
+      showError("Upload failed", cause);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const downloadDocument = async (documentId: string) => {
+    try {
+      const { url } = await api.documentDownloadUrl(documentId);
+      await Linking.openURL(url);
+    } catch (cause) { showError("Could not open document", cause); }
+  };
+
+  const deleteDocument = (documentId: string) => {
+    Alert.alert("Delete document?", "This cannot be undone.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: async () => {
+        try { await api.deleteDocument(documentId); await load(); }
+        catch (cause) { showError("Could not delete document", cause); }
+      }
+    }]);
+  };
+
+  const linkNote = async (documentId: string, noteId: string | null) => {
+    try { await api.updateDocument(documentId, { noteId }); await load(); }
+    catch (cause) { showError("Could not link note", cause); }
+  };
+
+  if (!data) {
+    return <Page><Title eyebrow="DOCUMENTS">Household documents</Title>
+      {error ? <Text style={styles.formError}>{error}</Text> : <ActivityIndicator color={colors.green} />}
+    </Page>;
+  }
+
+  const subfolders = childFolders(data.folders, currentFolderId);
+  const documents = documentsInFolder(data.documents, currentFolderId);
+  const breadcrumb = folderPath(data.folders, currentFolderId);
+
+  return <Page>
+    <Title eyebrow="DOCUMENTS">Household documents</Title>
+    <Text style={styles.muted}>Shared with your whole household — deeds, patta, tax receipts and other property documents.</Text>
+    <View style={styles.documentsBreadcrumbRow}>
+      <Pressable onPress={() => setCurrentFolderId(null)}><Text style={[styles.documentsBreadcrumbText, !currentFolderId && styles.documentsBreadcrumbActive]}>All documents</Text></Pressable>
+      {breadcrumb.map((folder) => <View key={folder.id} style={styles.documentsBreadcrumbItem}>
+        <Text style={styles.muted}> / </Text>
+        <Pressable onPress={() => setCurrentFolderId(folder.id)}><Text style={[styles.documentsBreadcrumbText, currentFolderId === folder.id && styles.documentsBreadcrumbActive]}>{folder.name}</Text></Pressable>
+      </View>)}
+    </View>
+    <Card>
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={newFolderName} onChangeText={setNewFolderName} placeholder="New folder name" />
+        <Pressable style={styles.secondarySmall} onPress={() => void createFolder()}><Text style={styles.secondaryButtonText}>Add folder</Text></Pressable>
+      </View>
+      <Pressable style={styles.primaryButton} onPress={() => void uploadDocument()} disabled={uploading}>
+        <Text style={styles.primaryButtonText}>{uploading ? "Uploading…" : "Upload a document"}</Text>
+      </Pressable>
+    </Card>
+    {subfolders.length ? <Card>{subfolders.map((folder) => <View key={folder.id} style={styles.row}>
+      <Pressable style={styles.rowCopy} onPress={() => setCurrentFolderId(folder.id)}><Text style={styles.rowTitle}>{folder.name}</Text></Pressable>
+      <Pressable onPress={() => deleteFolder(folder.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+    </View>)}</Card> : null}
+    <Card>{documents.length
+      ? documents.map((document) => <DocumentRow
+          key={document.id} document={document} notes={notes}
+          onDownload={() => void downloadDocument(document.id)}
+          onDelete={() => deleteDocument(document.id)}
+          onLinkNote={(noteId) => void linkNote(document.id, noteId)}
+        />)
+      : <Text style={styles.muted}>No documents in this folder yet.</Text>}</Card>
+  </Page>;
+}
+
 function More({ state, user, households, onSelect, onSignOut }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void> }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
@@ -494,6 +661,7 @@ const styles = StyleSheet.create({
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
+  documentsBreadcrumbRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", paddingVertical: 6 }, documentsBreadcrumbItem: { flexDirection: "row", alignItems: "center" }, documentsBreadcrumbText: { color: colors.muted, fontWeight: "700" }, documentsBreadcrumbActive: { color: colors.text },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" }
 });

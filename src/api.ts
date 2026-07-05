@@ -1,4 +1,4 @@
-import type { Household, HouseholdAccess, HouseholdState, PrivateData, User } from "./types";
+import type { Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://famelo.net").replace(/\/$/, "");
 
@@ -44,5 +44,19 @@ export const api = {
   }),
   savePlans: (plans: PrivateData["plans"]) => request<{ ok: boolean }>("/api/private-data/plans", {
     method: "PUT", body: JSON.stringify(plans)
-  })
+  }),
+  documents: () => request<DocumentsData>("/api/documents"),
+  createDocumentFolder: (name: string, parentId: string | null) => request<DocumentFolder>("/api/documents/folders", {
+    method: "POST", body: JSON.stringify({ name, parentId })
+  }),
+  deleteDocumentFolder: (folderId: string) => request<{ ok: boolean }>(`/api/documents/folders/${folderId}`, { method: "DELETE" }),
+  requestDocumentUploadUrl: (params: { name: string; contentType: string; sizeBytes: number; folderId: string | null; noteId?: string | null }) =>
+    request<{ documentId: string; uploadUrl: string; expiresAt: number }>("/api/documents/upload-url", {
+      method: "POST", body: JSON.stringify(params)
+    }),
+  confirmDocumentUpload: (documentId: string) => request<Document>(`/api/documents/${documentId}/confirm`, { method: "POST" }),
+  documentDownloadUrl: (documentId: string) => request<{ url: string; expiresAt: number }>(`/api/documents/${documentId}/download-url`),
+  updateDocument: (documentId: string, patch: { name?: string; description?: string; folderId?: string | null; noteId?: string | null }) =>
+    request<Document>(`/api/documents/${documentId}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteDocument: (documentId: string) => request<{ ok: boolean }>(`/api/documents/${documentId}`, { method: "DELETE" })
 };
