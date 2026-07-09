@@ -113,3 +113,13 @@ test("app.json configures the expo-image-picker permission plugin", () => {
   const hasImagePickerPlugin = plugins.some((plugin) => Array.isArray(plugin) && plugin[0] === "expo-image-picker");
   assert.ok(hasImagePickerPlugin, "expected expo-image-picker plugin configuration in app.json");
 });
+
+test("app.json configures the FamilyLoop app icon for iOS, Android, and web", () => {
+  const appJson = JSON.parse(fs.readFileSync(new URL("../app.json", import.meta.url), "utf8"));
+  assert.equal(appJson.expo.icon, "./assets/icon.png");
+  assert.equal(appJson.expo.android.adaptiveIcon.foregroundImage, "./assets/adaptive-icon.png");
+  assert.equal(appJson.expo.web.favicon, "./assets/favicon.png");
+  for (const relativePath of [appJson.expo.icon, appJson.expo.android.adaptiveIcon.foregroundImage, appJson.expo.web.favicon]) {
+    assert.ok(fs.existsSync(new URL(`../${relativePath}`, import.meta.url)), `expected ${relativePath} to exist`);
+  }
+});
