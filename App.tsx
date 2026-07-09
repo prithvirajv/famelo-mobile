@@ -19,7 +19,7 @@ import {
   timeToMinutes, minutesToTime, snapMinutes, comparePlannedToActual
 } from "./src/planLogic";
 import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
-import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { ActualLog, Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -332,20 +332,24 @@ function formatPlanDayLabel(dateKey: string): string {
   return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
-function formatActualComparison(task: PlanTask, dateKey: string): string | null {
-  const actual = task.actuals?.[dateKey];
-  if (!actual) return null;
-  const { startDeltaMinutes, durationDeltaMinutes } = comparePlannedToActual({
-    plannedStartTime: task.startTime,
-    plannedDurationMinutes: task.durationMinutes || 30,
-    actualStartTime: actual.startTime,
-    actualEndTime: actual.endTime
-  });
-  const parts = [`Actual ${actual.startTime || "?"}–${actual.endTime || "?"}`];
-  if (startDeltaMinutes) parts.push(`started ${Math.abs(startDeltaMinutes)} min ${startDeltaMinutes > 0 ? "late" : "early"}`);
-  if (durationDeltaMinutes) parts.push(`ran ${Math.abs(durationDeltaMinutes)} min ${durationDeltaMinutes > 0 ? "over" : "under"}`);
-  if (actual.note) parts.push(actual.note);
-  return parts.join(" · ");
+function describeLinkedActualLogs(task: PlanTask, linkedLogs: ActualLog[]): string {
+  if (!linkedLogs.length) return "";
+  if (linkedLogs.length === 1) {
+    const [log] = linkedLogs;
+    if (!log) return "";
+    const { startDeltaMinutes, durationDeltaMinutes } = comparePlannedToActual({
+      plannedStartTime: task.startTime,
+      plannedDurationMinutes: task.durationMinutes || 30,
+      actualStartTime: log.startTime,
+      actualEndTime: log.endTime
+    });
+    const parts = [`Actual ${log.startTime || "?"}–${log.endTime || "?"}`];
+    if (startDeltaMinutes) parts.push(`started ${Math.abs(startDeltaMinutes)} min ${startDeltaMinutes > 0 ? "late" : "early"}`);
+    if (durationDeltaMinutes) parts.push(`ran ${Math.abs(durationDeltaMinutes)} min ${durationDeltaMinutes > 0 ? "over" : "under"}`);
+    if (log.note) parts.push(log.note);
+    return parts.join(" · ");
+  }
+  return `Overlaps: ${linkedLogs.map((log) => log.note).join(", ")}`;
 }
 
 function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void> }) {
@@ -356,6 +360,11 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
   const [recurrence, setRecurrence] = useState<PlanRecurrence>("none");
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [subtaskDrafts, setSubtaskDrafts] = useState<Record<string, string>>({});
+  const [editingLogId, setEditingLogId] = useState<string | null>(null);
+  const [logStart, setLogStart] = useState("");
+  const [logEnd, setLogEnd] = useState("");
+  const [logNote, setLogNote] = useState("");
+  const [logLinkedTaskIds, setLogLinkedTaskIds] = useState<string[]>([]);
 
   const grouped = groupPlanTasksByBucket(privateData.plans.tasks);
   const tasks = bucket === "daily"
@@ -364,6 +373,9 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
         .slice()
         .sort((a, b) => (timeToMinutes(a.startTime) ?? Infinity) - (timeToMinutes(b.startTime) ?? Infinity))
     : grouped[bucket];
+  const logsToday = privateData.plans.actualLogs?.[selectedDate] || [];
+
+  const saveTasks = (nextTasks: PlanTask[]) => onSave({ tasks: nextTasks, actualLogs: privateData.plans.actualLogs });
 
   const addTask = async () => {
     if (!title.trim()) return;
@@ -375,7 +387,7 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
         ? { startTime: startTime.trim() || undefined, durationMinutes, recurrence, completedDates: [] }
         : { done: false })
     };
-    await onSave({ tasks: [...privateData.plans.tasks, task] });
+    await saveTasks([...privateData.plans.tasks, task]);
     setTitle("");
     setStartTime("");
     setDurationMinutes(30);
@@ -383,72 +395,92 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
   };
 
   const toggleTask = async (taskId: string) => {
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => {
-        if (task.id !== taskId) return task;
-        return task.bucket === "daily" ? toggleDailyTaskDoneOnDate(task, selectedDate) : { ...task, done: !task.done };
-      })
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => {
+      if (task.id !== taskId) return task;
+      return task.bucket === "daily" ? toggleDailyTaskDoneOnDate(task, selectedDate) : { ...task, done: !task.done };
+    }));
   };
 
   const deleteTask = async (taskId: string) => {
-    await onSave({ tasks: privateData.plans.tasks.filter((task) => task.id !== taskId) });
+    await saveTasks(privateData.plans.tasks.filter((task) => task.id !== taskId));
   };
 
   const adjustDuration = async (taskId: string, delta: number) => {
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => task.id === taskId
-        ? { ...task, durationMinutes: Math.max(15, snapMinutes((task.durationMinutes || 30) + delta)) }
-        : task)
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId
+      ? { ...task, durationMinutes: Math.max(15, snapMinutes((task.durationMinutes || 30) + delta)) }
+      : task));
   };
 
   const changeStartTime = async (taskId: string, value: string) => {
-    await onSave({ tasks: privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, startTime: value.trim() || undefined } : task) });
-  };
-
-  const changeActual = async (taskId: string, patch: { startTime?: string; endTime?: string; note?: string }) => {
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => {
-        if (task.id !== taskId) return task;
-        const actuals = { ...(task.actuals || {}) };
-        actuals[selectedDate] = { ...actuals[selectedDate], ...patch };
-        return { ...task, actuals };
-      })
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, startTime: value.trim() || undefined } : task));
   };
 
   const addSubtask = async (taskId: string) => {
     const text = (subtaskDrafts[taskId] || "").trim();
     if (!text) return;
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => task.id === taskId
-        ? { ...task, subtasks: [...(task.subtasks || []), { id: `sub-${Date.now()}`, text, done: false }] }
-        : task)
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId
+      ? { ...task, subtasks: [...(task.subtasks || []), { id: `sub-${Date.now()}`, text, done: false }] }
+      : task));
     setSubtaskDrafts((prev) => ({ ...prev, [taskId]: "" }));
   };
 
   const toggleSubtask = async (taskId: string, subtaskId: string) => {
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => task.id === taskId
-        ? { ...task, subtasks: (task.subtasks || []).map((subtask) => subtask.id === subtaskId ? { ...subtask, done: !subtask.done } : subtask) }
-        : task)
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId
+      ? { ...task, subtasks: (task.subtasks || []).map((subtask) => subtask.id === subtaskId ? { ...subtask, done: !subtask.done } : subtask) }
+      : task));
   };
 
   const deleteSubtask = async (taskId: string, subtaskId: string) => {
-    await onSave({
-      tasks: privateData.plans.tasks.map((task) => task.id === taskId
-        ? { ...task, subtasks: (task.subtasks || []).filter((subtask) => subtask.id !== subtaskId) }
-        : task)
-    });
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId
+      ? { ...task, subtasks: (task.subtasks || []).filter((subtask) => subtask.id !== subtaskId) }
+      : task));
   };
 
   const shiftDay = (delta: number) => {
     const next = new Date(`${selectedDate}T00:00:00`);
     next.setDate(next.getDate() + delta);
     setSelectedDate(next.toISOString().slice(0, 10));
+    resetLogForm();
+  };
+
+  const resetLogForm = () => {
+    setEditingLogId(null);
+    setLogStart("");
+    setLogEnd("");
+    setLogNote("");
+    setLogLinkedTaskIds([]);
+  };
+
+  const startEditLog = (log: ActualLog) => {
+    setEditingLogId(log.id);
+    setLogStart(log.startTime);
+    setLogEnd(log.endTime);
+    setLogNote(log.note);
+    setLogLinkedTaskIds(log.linkedTaskIds || []);
+  };
+
+  const toggleLinkedTask = (taskId: string) => {
+    setLogLinkedTaskIds((prev) => prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]);
+  };
+
+  const saveLog = async () => {
+    if (!logStart.trim() || !logEnd.trim() || !logNote.trim()) return;
+    const actualLogs = { ...(privateData.plans.actualLogs || {}) };
+    const logs = actualLogs[selectedDate] || [];
+    actualLogs[selectedDate] = editingLogId
+      ? logs.map((log) => log.id === editingLogId
+          ? { ...log, startTime: logStart.trim(), endTime: logEnd.trim(), note: logNote.trim(), linkedTaskIds: logLinkedTaskIds }
+          : log)
+      : [...logs, { id: `actual-${Date.now()}`, startTime: logStart.trim(), endTime: logEnd.trim(), note: logNote.trim(), linkedTaskIds: logLinkedTaskIds }];
+    await onSave({ tasks: privateData.plans.tasks, actualLogs });
+    resetLogForm();
+  };
+
+  const deleteLog = async (logId: string) => {
+    const actualLogs = { ...(privateData.plans.actualLogs || {}) };
+    actualLogs[selectedDate] = (actualLogs[selectedDate] || []).filter((log) => log.id !== logId);
+    await onSave({ tasks: privateData.plans.tasks, actualLogs });
+    if (editingLogId === logId) resetLogForm();
   };
 
   return <Page><Title eyebrow="PLAN">Daily, weekly and monthly tasks</Title>
@@ -505,12 +537,11 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, -15)}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
         </View>}
-        {bucket === "daily" && <View style={styles.actionRow}>
-          <TextInput style={[styles.input, { flex: 1 }]} value={task.actuals?.[selectedDate]?.startTime || ""} onChangeText={(value) => void changeActual(task.id, { startTime: value })} placeholder="Actual start (HH:MM)" />
-          <TextInput style={[styles.input, { flex: 1 }]} value={task.actuals?.[selectedDate]?.endTime || ""} onChangeText={(value) => void changeActual(task.id, { endTime: value })} placeholder="Actual end (HH:MM)" />
-        </View>}
-        {bucket === "daily" && <TextInput style={styles.input} value={task.actuals?.[selectedDate]?.note || ""} onChangeText={(value) => void changeActual(task.id, { note: value })} placeholder="What did you actually work on? (if different)" />}
-        {bucket === "daily" && formatActualComparison(task, selectedDate) && <Text style={styles.rowDetail}>{formatActualComparison(task, selectedDate)}</Text>}
+        {bucket === "daily" && (() => {
+          const linkedLogs = logsToday.filter((log) => log.linkedTaskIds.includes(task.id));
+          const label = describeLinkedActualLogs(task, linkedLogs);
+          return label ? <Text style={styles.rowDetail}>{label}</Text> : null;
+        })()}
         <View style={styles.subtaskList}>
           {(task.subtasks || []).map((subtask) => <View key={subtask.id} style={styles.checkRow}>
             <Pressable onPress={() => void toggleSubtask(task.id, subtask.id)}><Ionicons name={subtask.done ? "checkbox" : "square-outline"} size={20} color={subtask.done ? colors.green : colors.muted} /></Pressable>
@@ -524,6 +555,38 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
         </View>
       </View>;
     }) : <Text style={styles.muted}>No {bucket} tasks yet.</Text>}</Card>
+    {bucket === "daily" && <Card>
+      <Text style={styles.rowTitle}>{editingLogId ? "Edit what actually happened" : "Log what actually happened"} ({formatPlanDayLabel(selectedDate)})</Text>
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={logStart} onChangeText={setLogStart} placeholder="Start (HH:MM)" />
+        <TextInput style={[styles.input, { flex: 1 }]} value={logEnd} onChangeText={setLogEnd} placeholder="End (HH:MM)" />
+      </View>
+      <TextInput style={styles.input} value={logNote} onChangeText={setLogNote} placeholder="What did you actually do?" />
+      {tasks.length > 0 && <View style={styles.subtaskList}>
+        <Text style={styles.rowDetail}>Link to planned task(s) — optional</Text>
+        {tasks.map((task) => <Pressable key={task.id} style={styles.checkRow} onPress={() => toggleLinkedTask(task.id)}>
+          <Ionicons name={logLinkedTaskIds.includes(task.id) ? "checkbox" : "square-outline"} size={20} color={logLinkedTaskIds.includes(task.id) ? colors.green : colors.muted} />
+          <Text style={styles.checkText}>{task.title}</Text>
+        </Pressable>)}
+      </View>}
+      <View style={styles.actionRow}>
+        <Pressable style={styles.primaryButton} onPress={() => void saveLog()}><Text style={styles.primaryButtonText}>{editingLogId ? "Save changes" : "Log it"}</Text></Pressable>
+        {editingLogId && <Pressable style={styles.secondarySmall} onPress={resetLogForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>}
+        {editingLogId && <Pressable style={styles.secondarySmall} onPress={() => void deleteLog(editingLogId)}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Delete</Text></Pressable>}
+      </View>
+      {logsToday.length > 0 && <View style={styles.subtaskList}>
+        {logsToday.map((log) => {
+          const linkedTitles = log.linkedTaskIds.map((id) => tasks.find((task) => task.id === id)?.title).filter(Boolean);
+          return <Pressable key={log.id} style={styles.row} onPress={() => startEditLog(log)}>
+            <View style={styles.rowCopy}>
+              <Text style={styles.rowTitle}>{log.note}</Text>
+              <Text style={styles.rowDetail}>{log.startTime}–{log.endTime}{linkedTitles.length ? ` · ${linkedTitles.join(", ")}` : ""}</Text>
+            </View>
+            <Pressable onPress={() => void deleteLog(log.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+          </Pressable>;
+        })}
+      </View>}
+    </Card>}
   </Page>;
 }
 

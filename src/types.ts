@@ -32,7 +32,6 @@ export type JournalEntry = {
 export type PlanBucket = "daily" | "weekly" | "monthly";
 export type PlanRecurrence = "none" | "daily" | "weekdays" | "weekly" | "monthly";
 export type PlanSubtask = { id: string; text: string; done: boolean };
-export type PlanActualLog = { startTime?: string; endTime?: string; note?: string };
 export type PlanTask = {
   id: string; title: string; notes: string; bucket: PlanBucket; anchorDate: string; createdAt: string;
   subtasks?: PlanSubtask[];
@@ -40,10 +39,11 @@ export type PlanTask = {
   done?: boolean;
   // Daily-bucket-only fields:
   startTime?: string; durationMinutes?: number; recurrence?: PlanRecurrence; completedDates?: string[];
-  // Actual start/end time logged per occurrence date, for planned-vs-actual retrospection.
-  actuals?: Record<string, PlanActualLog>;
 };
-export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[] } };
+// An independent log entry of what actually happened on a given day, optionally
+// linking to zero, one, or several planned tasks it relates to.
+export type ActualLog = { id: string; startTime: string; endTime: string; note: string; linkedTaskIds: string[] };
+export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[]; actualLogs?: Record<string, ActualLog[]> } };
 
 export type DocumentStatus = "pending" | "ready";
 export type WealthItemType = "asset" | "liability";
