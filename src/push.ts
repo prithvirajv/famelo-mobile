@@ -5,8 +5,8 @@ import Constants from "expo-constants";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api } from "./api";
 
-const TOKEN_STORAGE_KEY = "famelo:push-token";
-const PERMISSION_DENIED_KEY = "famelo:push-permission-denied";
+const TOKEN_STORAGE_KEY = "familyloop:push-token";
+const PERMISSION_DENIED_KEY = "familyloop:push-permission-denied";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -26,7 +26,7 @@ export async function registerPushToken(): Promise<void> {
     if (!Device.isDevice) return;
     const projectId = resolveProjectId();
     if (!projectId) {
-      console.warn("Famelo push: no EAS projectId configured in app.json, skipping registration");
+      console.warn("FamilyLoop push: no EAS projectId configured in app.json, skipping registration");
       return;
     }
 
@@ -50,6 +50,6 @@ export async function registerPushToken(): Promise<void> {
     await api.registerPushDevice(token.data, Platform.OS);
     await AsyncStorage.setItem(TOKEN_STORAGE_KEY, token.data);
   } catch (error) {
-    console.warn("Famelo push registration failed:", error instanceof Error ? error.message : error);
+    console.warn("FamilyLoop push registration failed:", error instanceof Error ? error.message : error);
   }
 }

@@ -67,3 +67,27 @@ export function minutesToTime(totalMinutes: number): string {
 export function snapMinutes(value: number, step = 15): number {
   return Math.round(value / step) * step;
 }
+
+export interface PlannedVsActualDelta {
+  startDeltaMinutes: number | null;
+  durationDeltaMinutes: number | null;
+}
+
+// Compares a task's planned schedule against what was actually logged for one
+// occurrence. Deltas are signed minute counts (positive = started later / ran
+// longer than planned); either delta is null when there isn't enough data.
+export function comparePlannedToActual({ plannedStartTime, plannedDurationMinutes, actualStartTime, actualEndTime }: {
+  plannedStartTime: string | undefined;
+  plannedDurationMinutes: number | undefined;
+  actualStartTime: string | undefined;
+  actualEndTime: string | undefined;
+}): PlannedVsActualDelta {
+  const plannedStart = timeToMinutes(plannedStartTime);
+  const actualStart = timeToMinutes(actualStartTime);
+  const actualEnd = timeToMinutes(actualEndTime);
+  const startDeltaMinutes = plannedStart != null && actualStart != null ? actualStart - plannedStart : null;
+  const durationDeltaMinutes = actualStart != null && actualEnd != null && plannedDurationMinutes != null
+    ? (actualEnd - actualStart) - plannedDurationMinutes
+    : null;
+  return { startDeltaMinutes, durationDeltaMinutes };
+}

@@ -32,6 +32,7 @@ export type JournalEntry = {
 export type PlanBucket = "daily" | "weekly" | "monthly";
 export type PlanRecurrence = "none" | "daily" | "weekdays" | "weekly" | "monthly";
 export type PlanSubtask = { id: string; text: string; done: boolean };
+export type PlanActualLog = { startTime?: string; endTime?: string; note?: string };
 export type PlanTask = {
   id: string; title: string; notes: string; bucket: PlanBucket; anchorDate: string; createdAt: string;
   subtasks?: PlanSubtask[];
@@ -39,6 +40,8 @@ export type PlanTask = {
   done?: boolean;
   // Daily-bucket-only fields:
   startTime?: string; durationMinutes?: number; recurrence?: PlanRecurrence; completedDates?: string[];
+  // Actual start/end time logged per occurrence date, for planned-vs-actual retrospection.
+  actuals?: Record<string, PlanActualLog>;
 };
 export type PrivateData = { journal: { entries: JournalEntry[] }; plans: { tasks: PlanTask[] } };
 

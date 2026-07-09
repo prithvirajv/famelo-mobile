@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
-  timeToMinutes, minutesToTime, snapMinutes
+  timeToMinutes, minutesToTime, snapMinutes, comparePlannedToActual
 } from "../src/planLogic.ts";
 
 test("groupPlanTasksByBucket sorts tasks into daily, weekly, and monthly groups", () => {
@@ -79,4 +79,21 @@ test("timeToMinutes and minutesToTime convert both directions", () => {
 test("snapMinutes rounds to the nearest step", () => {
   assert.equal(snapMinutes(52, 15), 45);
   assert.equal(snapMinutes(58, 15), 60);
+});
+
+test("comparePlannedToActual reports signed start and duration deltas against the plan", () => {
+  const late = comparePlannedToActual({ plannedStartTime: "09:00", plannedDurationMinutes: 30, actualStartTime: "09:15", actualEndTime: "09:45" });
+  assert.equal(late.startDeltaMinutes, 15);
+  assert.equal(late.durationDeltaMinutes, 0);
+
+  const overran = comparePlannedToActual({ plannedStartTime: "09:00", plannedDurationMinutes: 30, actualStartTime: "09:00", actualEndTime: "09:50" });
+  assert.equal(overran.startDeltaMinutes, 0);
+  assert.equal(overran.durationDeltaMinutes, 20);
+});
+
+test("comparePlannedToActual returns null deltas when there isn't enough data", () => {
+  assert.deepEqual(
+    comparePlannedToActual({ plannedStartTime: "09:00", plannedDurationMinutes: 30, actualStartTime: undefined, actualEndTime: undefined }),
+    { startDeltaMinutes: null, durationDeltaMinutes: null }
+  );
 });

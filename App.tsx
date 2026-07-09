@@ -16,7 +16,7 @@ import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstima
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
-  timeToMinutes, minutesToTime, snapMinutes
+  timeToMinutes, minutesToTime, snapMinutes, comparePlannedToActual
 } from "./src/planLogic";
 import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
 import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
@@ -71,7 +71,7 @@ function AppContent() {
       setPrivateData(nextPrivateData);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) setUser(null);
-      else setError(cause instanceof Error ? cause.message : "Unable to load Famelo");
+      else setError(cause instanceof Error ? cause.message : "Unable to load FamilyLoop");
     } finally { setLoading(false); }
   }, []);
 
@@ -130,7 +130,7 @@ function AppContent() {
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
     <View style={styles.header}>
-      <View><Text style={styles.brand}>Famelo</Text><Text style={styles.household}>{selected?.name || state.household.name}</Text></View>
+      <View><Text style={styles.brand}>FamilyLoop</Text><Text style={styles.household}>{selected?.name || state.household.name}</Text></View>
       {saving ? <ActivityIndicator color={colors.green} /> : <View style={styles.saved}><Ionicons name="cloud-done-outline" size={18} color={colors.green} /><Text style={styles.savedText}>Saved</Text></View>}
     </View>
     {error ? <Pressable style={styles.error} onPress={() => setError("")}><Text style={styles.errorText}>{error}</Text></Pressable> : null}
@@ -332,6 +332,22 @@ function formatPlanDayLabel(dateKey: string): string {
   return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
+function formatActualComparison(task: PlanTask, dateKey: string): string | null {
+  const actual = task.actuals?.[dateKey];
+  if (!actual) return null;
+  const { startDeltaMinutes, durationDeltaMinutes } = comparePlannedToActual({
+    plannedStartTime: task.startTime,
+    plannedDurationMinutes: task.durationMinutes || 30,
+    actualStartTime: actual.startTime,
+    actualEndTime: actual.endTime
+  });
+  const parts = [`Actual ${actual.startTime || "?"}–${actual.endTime || "?"}`];
+  if (startDeltaMinutes) parts.push(`started ${Math.abs(startDeltaMinutes)} min ${startDeltaMinutes > 0 ? "late" : "early"}`);
+  if (durationDeltaMinutes) parts.push(`ran ${Math.abs(durationDeltaMinutes)} min ${durationDeltaMinutes > 0 ? "over" : "under"}`);
+  if (actual.note) parts.push(actual.note);
+  return parts.join(" · ");
+}
+
 function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void> }) {
   const [bucket, setBucket] = useState<PlanBucket>("daily");
   const [title, setTitle] = useState("");
@@ -389,6 +405,17 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
 
   const changeStartTime = async (taskId: string, value: string) => {
     await onSave({ tasks: privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, startTime: value.trim() || undefined } : task) });
+  };
+
+  const changeActual = async (taskId: string, patch: { startTime?: string; endTime?: string; note?: string }) => {
+    await onSave({
+      tasks: privateData.plans.tasks.map((task) => {
+        if (task.id !== taskId) return task;
+        const actuals = { ...(task.actuals || {}) };
+        actuals[selectedDate] = { ...actuals[selectedDate], ...patch };
+        return { ...task, actuals };
+      })
+    });
   };
 
   const addSubtask = async (taskId: string) => {
@@ -478,6 +505,12 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, -15)}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
         </View>}
+        {bucket === "daily" && <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={task.actuals?.[selectedDate]?.startTime || ""} onChangeText={(value) => void changeActual(task.id, { startTime: value })} placeholder="Actual start (HH:MM)" />
+          <TextInput style={[styles.input, { flex: 1 }]} value={task.actuals?.[selectedDate]?.endTime || ""} onChangeText={(value) => void changeActual(task.id, { endTime: value })} placeholder="Actual end (HH:MM)" />
+        </View>}
+        {bucket === "daily" && <TextInput style={styles.input} value={task.actuals?.[selectedDate]?.note || ""} onChangeText={(value) => void changeActual(task.id, { note: value })} placeholder="What did you actually work on? (if different)" />}
+        {bucket === "daily" && formatActualComparison(task, selectedDate) && <Text style={styles.rowDetail}>{formatActualComparison(task, selectedDate)}</Text>}
         <View style={styles.subtaskList}>
           {(task.subtasks || []).map((subtask) => <View key={subtask.id} style={styles.checkRow}>
             <Pressable onPress={() => void toggleSubtask(task.id, subtask.id)}><Ionicons name={subtask.done ? "checkbox" : "square-outline"} size={20} color={subtask.done ? colors.green : colors.muted} /></Pressable>

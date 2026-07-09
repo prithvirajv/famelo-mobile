@@ -1,17 +1,17 @@
 {
   "expo": {
-    "name": "Famelo",
-    "slug": "famelo-mobile",
+    "name": "FamilyLoop",
+    "slug": "familyloop-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "scheme": "famelo",
+    "scheme": "familyloop",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "net.famelo.mobile"
+      "bundleIdentifier": "net.familyloop.mobile"
     },
     "android": {
-      "package": "net.famelo.mobile",
+      "package": "net.familyloop.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#17233f"
       }
@@ -21,12 +21,12 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Famelo uses your photos to attach them to journal entries."
+          "photosPermission": "FamilyLoop uses your photos to attach them to journal entries."
         }
       ]
     ],
     "extra": {
-      "apiUrl": "https://famelo.net"
+      "apiUrl": "https://familyloop.net"
     }
   }
 }

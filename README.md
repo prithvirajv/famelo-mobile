@@ -1,6 +1,6 @@
-# Famelo Mobile
+# FamilyLoop Mobile
 
-Native iOS and Android companion for [Famelo](https://famelo.net), built with React Native and Expo. This repository is intentionally separate from the Famelo web/backend repository.
+Native iOS and Android companion for [FamilyLoop](https://familyloop.net), built with React Native and Expo. This repository is intentionally separate from the FamilyLoop web/backend repository.
 
 ## Included
 
@@ -8,7 +8,7 @@ Native iOS and Android companion for [Famelo](https://famelo.net), built with Re
 - Household selection
 - Household dashboard
 - Budget, calendar, notes, meals and account views
-- Shared state from the existing Famelo API
+- Shared state from the existing FamilyLoop API
 - Native checklist completion with server persistence
 - Pull-to-refresh, loading, error and session-expiry handling
 - EAS build profiles for internal testing and store releases
@@ -47,4 +47,4 @@ Apple distribution requires an Apple Developer Program account. Google Play dist
 
 ## Architecture
 
-The native app talks directly to the HTTPS Famelo API. The API keeps the signed, HttpOnly session cookie and owns PostgreSQL persistence. No credentials or household data are bundled into the application binary.
+The native app talks directly to the HTTPS FamilyLoop API. The API keeps the signed, HttpOnly session cookie and owns PostgreSQL persistence. No credentials or household data are bundled into the application binary.

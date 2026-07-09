@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 
-test("mobile API uses the production Famelo endpoint by default", () => {
+test("mobile API uses the production FamilyLoop endpoint by default", () => {
   const source = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
-  assert.match(source, /https:\/\/famelo\.net/);
+  assert.match(source, /https:\/\/familyloop\.net/);
   assert.match(source, /credentials: "include"/);
 });
 
