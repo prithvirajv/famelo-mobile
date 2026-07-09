@@ -16,7 +16,7 @@ import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstima
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
-  timeToMinutes, snapMinutes
+  timeToMinutes, minutesToTime, snapMinutes
 } from "./src/planLogic";
 import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
 import type { Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
@@ -226,14 +226,16 @@ function Calendar({ state, access, onSave }: { state: HouseholdState; access: Ho
 function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
   const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
   const slots = ["Breakfast", "Lunch", "Dinner", "Snack"];
-  const [day, setDay] = useState("Monday"); const [slot, setSlot] = useState("Breakfast"); const [recipeId, setRecipeId] = useState(state.meals.recipes[0]?.id || ""); const [servings, setServings] = useState("3");
+  const [day, setDay] = useState("Monday"); const [slot, setSlot] = useState("Breakfast"); const [recipeId, setRecipeId] = useState(state.meals.recipes[0]?.id || ""); const [customMeal, setCustomMeal] = useState(""); const [servings, setServings] = useState("3");
   const current = state.meals.plannedWeek.filter((meal) => (!meal.month || meal.month === state.budget.month) && Number(meal.week || 1) === 1);
   const weekDayDates = firstWeekDayDates(state.budget.month);
   const plan = async () => {
-    const recipe = state.meals.recipes.find((item) => item.id === recipeId); if (!recipe) return;
-    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week: 1, day, slot, recipeId, meal: recipe.name, servings: Math.max(1, Number(servings || 3)) };
+    const recipe = state.meals.recipes.find((item) => item.id === recipeId);
+    const mealName = recipe ? recipe.name : customMeal.trim();
+    if (!mealName) return Alert.alert("Meal name needed", "Choose a recipe or type a meal name.");
+    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week: 1, day, slot, recipeId: recipe?.id || "", meal: mealName, servings: Math.max(1, Number(servings || 3)) };
     const existing = slot === "Snack" ? -1 : next.meals.plannedWeek.findIndex((item) => (!item.month || item.month === state.budget.month) && Number(item.week || 1) === 1 && item.day === day && (item.slot || "Dinner") === slot);
-    if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${recipe.name} planned for ${day} ${slot}.`; await onSave(next);
+    if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${mealName} planned for ${day} ${slot}.`; await onSave(next);
   };
   const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week 1`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
   const postGroceries = async () => {
@@ -250,7 +252,7 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card><View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
     <Text style={styles.label}>Day</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
     <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>
-    <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => setRecipeId(recipe.id)}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
+    <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => { setRecipeId(recipe.id); setCustomMeal(""); }}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={customMeal} onChangeText={(text) => { setCustomMeal(text); setRecipeId(""); }} placeholder="Or type any meal (no recipe)" /><TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
   </Card>{weekDayDates.map(({ day: mealDay, date }) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text><Text style={styles.muted}>{formatShortDate(date)}</Text>{slots.flatMap((mealSlot) => { const items = current.filter((item) => item.day === mealDay && (item.slot || "Dinner") === mealSlot); return items.length ? items.map((item, index) => <Row key={`${mealSlot}-${item.recipeId}-${index}`} title={item.meal} detail={`${mealSlot} · ${item.servings} servings`} />) : [<Pressable key={`${mealSlot}-open`} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>]; })}</Card>)}</Page>;
 }
 
@@ -439,7 +441,9 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
           <TextInput style={[styles.input, { flex: 1 }]} value={startTime} onChangeText={setStartTime} placeholder="Start time (HH:MM, optional)" />
         </View>
         <View style={styles.actionRow}>
-          <Text style={[styles.rowDetail, { flex: 1 }]}>Duration: {durationMinutes} min</Text>
+          <Text style={[styles.rowDetail, { flex: 1 }]}>
+            Duration: {durationMinutes} min{startTime.trim() && timeToMinutes(startTime.trim()) != null ? ` · Ends ${minutesToTime((timeToMinutes(startTime.trim()) as number) + durationMinutes)}` : ""}
+          </Text>
           <Pressable style={styles.planStepperButton} onPress={() => setDurationMinutes((minutes) => Math.max(15, minutes - 15))}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
           <Pressable style={styles.planStepperButton} onPress={() => setDurationMinutes((minutes) => minutes + 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
         </View>
@@ -457,7 +461,13 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
             <Text style={[styles.rowTitle, done && styles.done]}>{task.title}</Text>
             <Text style={styles.rowDetail}>
               {bucket === "daily"
-                ? [task.startTime || "Unscheduled", `${task.durationMinutes || 30} min`, planRecurrenceLabels[task.recurrence || "none"]].join(" · ")
+                ? [
+                    task.startTime && timeToMinutes(task.startTime) != null
+                      ? `${task.startTime}–${minutesToTime((timeToMinutes(task.startTime) as number) + Number(task.durationMinutes || 30))}`
+                      : "Unscheduled",
+                    `${task.durationMinutes || 30} min`,
+                    planRecurrenceLabels[task.recurrence || "none"]
+                  ].join(" · ")
                 : task.anchorDate}
             </Text>
           </Pressable>
