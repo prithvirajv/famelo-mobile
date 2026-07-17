@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryListFor, groceryEstimateAmount } from "../src/planningLogic.ts";
+import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryListFor, groceryEstimateAmount, recurringBudgetSetAside, nextRecurringBudgetDueDate } from "../src/planningLogic.ts";
 
 test("checking a child marks the parent done once every sibling is done", () => {
   const checklist = [
@@ -65,4 +65,16 @@ test("groceryEstimateAmount scales with the actual grocery list instead of a fix
   const recipes = [{ id: "pizza-night", name: "Pizza night", ingredients: ["pizza dough", "mozzarella", "sauce", "salad greens"], calories: 700, protein: 30 }];
   assert.equal(groceryEstimateAmount([], recipes), 0);
   assert.equal(groceryEstimateAmount([{ day: "Monday", slot: "Breakfast", meal: "Pizza night", recipeId: "pizza-night", servings: 3 }], recipes), 28);
+});
+
+test("recurringBudgetSetAside divides annual and quarterly bills across remaining months", () => {
+  assert.equal(nextRecurringBudgetDueDate({ amount: 1200, frequency: "yearly", dueDate: "2026-12-15" }, "2026-07"), "2026-12-15");
+  assert.deepEqual(recurringBudgetSetAside({ amount: 1200, frequency: "yearly", dueDate: "2026-12-15" }, "2026-07"), {
+    amountDue: 1200,
+    frequency: "yearly",
+    nextDueDate: "2026-12-15",
+    monthsRemaining: 6,
+    monthlyAmount: 200
+  });
+  assert.equal(recurringBudgetSetAside({ amount: 600, frequency: "quarterly", dueDate: "2026-09-30" }, "2026-07").monthlyAmount, 200);
 });

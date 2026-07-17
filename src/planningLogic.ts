@@ -50,3 +50,62 @@ const GROCERY_ITEM_ESTIMATE = 7;
 export function groceryEstimateAmount(plannedMeals: PlannedMeal[], recipes: Recipe[]): number {
   return groceryListFor(plannedMeals, recipes).length * GROCERY_ITEM_ESTIMATE;
 }
+
+const recurringBudgetFrequencyMonths = {
+  monthly: 1,
+  quarterly: 3,
+  yearly: 12
+};
+
+function dateKeyToMonthKey(value: string): string {
+  return String(value || "").slice(0, 7);
+}
+
+function dateFromDateKey(value: string): Date | null {
+  const [year, month, day] = String(value || "").split("-").map(Number);
+  if (!year || !month || !day) return null;
+  const date = new Date(year, month - 1, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function dateKeyFromParts(year: number, monthIndex: number, day: number): string {
+  const firstOfTargetMonth = new Date(year, monthIndex, 1);
+  const targetYear = firstOfTargetMonth.getFullYear();
+  const targetMonthIndex = firstOfTargetMonth.getMonth();
+  const lastDay = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
+  const clampedDay = Math.min(Math.max(1, Number(day || 1)), lastDay);
+  return `${targetYear}-${String(targetMonthIndex + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
+}
+
+function addMonthsToDateKey(value: string, months: number): string {
+  const date = dateFromDateKey(value);
+  if (!date) return "";
+  return dateKeyFromParts(date.getFullYear(), date.getMonth() + months, date.getDate());
+}
+
+export function nextRecurringBudgetDueDate(bill: { frequency?: string; dueDate?: string }, selectedMonth: string): string {
+  if (!bill?.dueDate || !selectedMonth) return "";
+  const frequency = bill.frequency === "monthly" || bill.frequency === "quarterly" || bill.frequency === "yearly" ? bill.frequency : "yearly";
+  const interval = recurringBudgetFrequencyMonths[frequency];
+  let cursor = /^\d{4}-\d{2}-\d{2}$/.test(bill.dueDate) ? bill.dueDate : `${selectedMonth}-01`;
+  while (dateKeyToMonthKey(cursor).localeCompare(selectedMonth) < 0) cursor = addMonthsToDateKey(cursor, interval);
+  return cursor;
+}
+
+export function recurringBudgetSetAside(bill: { amount?: number; frequency?: string; dueDate?: string }, selectedMonth: string) {
+  const frequency = bill.frequency === "monthly" || bill.frequency === "quarterly" || bill.frequency === "yearly" ? bill.frequency : "yearly";
+  const amountDue = Math.max(0, Number(bill.amount || 0));
+  const nextDueDate = nextRecurringBudgetDueDate({ ...bill, frequency }, selectedMonth);
+  const [selectedYear, selectedMonthNumber] = selectedMonth.split("-").map(Number);
+  const [dueYear, dueMonthNumber] = dateKeyToMonthKey(nextDueDate).split("-").map(Number);
+  const monthsRemaining = selectedYear && selectedMonthNumber && dueYear && dueMonthNumber
+    ? Math.max(1, (dueYear - selectedYear) * 12 + (dueMonthNumber - selectedMonthNumber) + 1)
+    : 1;
+  return {
+    amountDue,
+    frequency,
+    nextDueDate,
+    monthsRemaining,
+    monthlyAmount: Number((amountDue / monthsRemaining).toFixed(2))
+  };
+}

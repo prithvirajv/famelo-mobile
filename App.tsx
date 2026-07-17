@@ -12,7 +12,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
-import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstimateAmount } from "./src/planningLogic";
+import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstimateAmount, recurringBudgetSetAside } from "./src/planningLogic";
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
@@ -194,7 +194,13 @@ function Budget({ state }: { state: HouseholdState }) {
   const spentByLine = useMemo(() => Object.fromEntries(state.transactions.reduce((map, item) => map.set(item.lineId, (map.get(item.lineId) || 0) + Number(item.amount)), new Map<string, number>())), [state.transactions]);
   return <Page><Title eyebrow="BUDGET">{state.budget.month}</Title><Card><Text style={styles.cardTitle}>Monthly income</Text><Text style={styles.heroValue}>{money(state.budget.income, state.household.currency)}</Text></Card>
     {state.budget.categories.map((category) => <Card key={category.name}><View style={styles.categoryHeader}><View style={[styles.dot, { backgroundColor: category.color }]} /><Text style={styles.cardTitle}>{category.name}</Text></View>
-      {category.lines.map((line) => <Row key={line.id} title={line.name} detail={line.dueDay ? `Due day ${line.dueDay}` : "No due date"} value={`${money(spentByLine[line.id] || 0, state.household.currency)} / ${money(line.planned, state.household.currency)}`} />)}</Card>)}
+      {category.lines.map((line) => {
+        const recurring = line.recurringBill?.enabled ? recurringBudgetSetAside(line.recurringBill, state.budget.month) : null;
+        const detail = recurring
+          ? `${recurring.frequency} · due ${recurring.nextDueDate} · set aside ${money(recurring.monthlyAmount, state.household.currency)}/mo`
+          : line.dueDay ? `Due day ${line.dueDay}` : "No due date";
+        return <Row key={line.id} title={line.name} detail={detail} value={`${money(spentByLine[line.id] || 0, state.household.currency)} / ${money(recurring?.monthlyAmount ?? line.planned, state.household.currency)}`} />;
+      })}</Card>)}
   </Page>;
 }
 

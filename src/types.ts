@@ -1,6 +1,7 @@
 export type User = { id: string; email: string; name: string; isAdmin: boolean };
 export type Household = { id: string; name: string; role: string; country: string; currency: string; selected: boolean };
-export type BudgetLine = { id: string; name: string; planned: number; dueDay?: number };
+export type RecurringBudgetBill = { enabled: boolean; amount: number; frequency: "monthly" | "quarterly" | "yearly"; dueDate: string };
+export type BudgetLine = { id: string; name: string; planned: number; dueDay?: number; recurringBill?: RecurringBudgetBill };
 export type BudgetCategory = { name: string; color: string; lines: BudgetLine[] };
 export type Transaction = { date: string; payee: string; lineId: string; amount: number; memo?: string };
 export type CalendarEvent = { id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string };
