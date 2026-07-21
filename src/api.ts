@@ -38,6 +38,9 @@ export const api = {
   registerPushDevice: (token: string, platform: string) => request<{ ok: boolean }>("/api/push-devices", {
     method: "POST", body: JSON.stringify({ token, platform })
   }),
+  inviteFriend: (name: string, email: string, inviterName: string) => request<{ ok: boolean; email: unknown }>("/api/friends/invite", {
+    method: "POST", body: JSON.stringify({ name, email, inviterName })
+  }),
   privateData: () => request<PrivateData>("/api/private-data"),
   saveJournal: (journal: PrivateData["journal"]) => request<{ ok: boolean }>("/api/private-data/journal", {
     method: "PUT", body: JSON.stringify(journal)

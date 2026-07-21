@@ -19,7 +19,15 @@ import {
   timeToMinutes, minutesToTime, snapMinutes, comparePlannedToActual
 } from "./src/planLogic";
 import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
-import type { ActualLog, Document, DocumentsData, Household, HouseholdAccess, HouseholdState, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import {
+  uniqueId, computeBillSplitAmounts, netBalancesByPerson, settleUpPersonIous, friendsWithoutEmailFromIous
+} from "./src/iouLogic";
+import type { BillSplitParticipant, NetBalanceGroup } from "./src/iouLogic";
+import {
+  monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth
+} from "./src/reportsLogic";
+import type { ReportScope } from "./src/reportsLogic";
+import type { ActualLog, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -40,6 +48,14 @@ function money(value: number, currency = "USD") {
   return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 0 }).format(value || 0);
 }
 
+// Unlike money() above (rounds to whole currency units), this always shows
+// exact cents - needed anywhere a user must match a precise split to a
+// total (bill-splitting), since rounded numbers can make a correct split
+// look "impossible" (same rounding bug already found and fixed on web).
+function exactMoney(value: number, currency = "USD") {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
+}
+
 function mobileAssetValue(asset: NonNullable<HouseholdState["goals"]>["netWorth"] extends infer N ? N extends { assets: Array<infer A> } ? A : never : never) {
   return asset.assetClass === "stock" ? Number(asset.shares || 0) * Number(asset.price || 0) : Number(asset.value || 0);
 }
@@ -52,6 +68,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -115,7 +132,9 @@ function AppContent() {
 
   const selected = households.find((item) => item.selected);
   const activePrivateData = privateData || { journal: { entries: [] }, plans: { tasks: [] } };
-  const page = tab === "home" ? <Home state={state} />
+  const page = subScreen === "sharedExpenses" ? <SharedExpenses state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "reports" ? <Reports state={state} onBack={() => setSubScreen(null)} />
+    : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
@@ -125,7 +144,8 @@ function AppContent() {
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
-      }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }} />;
+      }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
+      onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")} />;
 
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
@@ -847,10 +867,345 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void> }) {
+function SubScreenHeader({ title, onBack }: { title: string; onBack: () => void }) {
+  return <View style={styles.subScreenHeader}>
+    <Pressable style={styles.subScreenBack} onPress={onBack}><Ionicons name="arrow-back" size={22} color={colors.text} /></Pressable>
+    <Title eyebrow="MONEY">{title}</Title>
+  </View>;
+}
+
+async function inviteNewFriend(name: string, email: string, householdName: string, existing: Friend[]): Promise<Friend[]> {
+  const trimmedEmail = email.trim();
+  const trimmedName = name.trim();
+  if (!trimmedEmail) return existing;
+  const normalized = trimmedEmail.toLowerCase();
+  if (existing.some((friend) => friend.email.toLowerCase() === normalized)) return existing;
+  const friend: Friend = { id: uniqueId("friend"), name: trimmedName || trimmedEmail, email: trimmedEmail, invitedAt: "" };
+  try {
+    await api.inviteFriend(friend.name, friend.email, householdName);
+    friend.invitedAt = new Date().toISOString();
+  } catch { /* invite email is best-effort; the friend record is kept either way */ }
+  return [...existing, friend];
+}
+
+function SharedExpenses({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const ious = state.ious || [];
+  const friends = state.friends || [];
+  const currency = state.household.currency;
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  const [debtPerson, setDebtPerson] = useState("");
+  const [debtEmail, setDebtEmail] = useState("");
+  const [debtAmount, setDebtAmount] = useState("");
+  const [debtDirection, setDebtDirection] = useState<IouDirection>("i_owe");
+  const [debtReason, setDebtReason] = useState("");
+  const [debtDate, setDebtDate] = useState(today);
+
+  const [billReason, setBillReason] = useState("");
+  const [billAmount, setBillAmount] = useState("");
+  const [billDate, setBillDate] = useState(today);
+  const [splitType, setSplitType] = useState<"equal" | "exact" | "percentage">("equal");
+  const [splitRows, setSplitRows] = useState<Array<{ person: string; email: string; amount: string; percent: string }>>([{ person: "", email: "", amount: "", percent: "" }]);
+
+  const [settlingKey, setSettlingKey] = useState<string | null>(null);
+  const [settleAmount, setSettleAmount] = useState("");
+
+  const [newFriendName, setNewFriendName] = useState("");
+  const [newFriendEmail, setNewFriendEmail] = useState("");
+
+  const submitDebt = async () => {
+    const amount = Number(debtAmount);
+    if (!debtPerson.trim() || !(amount > 0)) return Alert.alert("Missing info", "Enter a person and a positive amount.");
+    const nextFriends = await inviteNewFriend(debtPerson, debtEmail, state.household.name, friends);
+    const nextIou: Iou = {
+      id: uniqueId("iou"), person: debtPerson.trim(), amount, direction: debtDirection,
+      reason: debtReason.trim(), date: debtDate || today(), accountId: "", settled: false, settledDate: ""
+    };
+    await onSave({ ...state, friends: nextFriends, ious: [...ious, nextIou] });
+    setDebtPerson(""); setDebtEmail(""); setDebtAmount(""); setDebtReason("");
+  };
+
+  const updateSplitRow = (index: number, patch: Partial<{ person: string; email: string; amount: string; percent: string }>) => {
+    setSplitRows((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  };
+  const addSplitRow = () => setSplitRows((prev) => [...prev, { person: "", email: "", amount: "", percent: "" }]);
+  const removeSplitRow = (index: number) => setSplitRows((prev) => prev.length > 1 ? prev.filter((_, rowIndex) => rowIndex !== index) : prev);
+
+  const splitParticipants: BillSplitParticipant[] = splitRows.map((row) => ({ amount: Number(row.amount) || 0, percent: Number(row.percent) || 0 }));
+  const splitResult = computeBillSplitAmounts(splitType, Number(billAmount) || 0, splitParticipants);
+
+  const submitSplitBill = async () => {
+    const total = Number(billAmount);
+    const namedRows = splitRows.filter((row) => row.person.trim());
+    if (!billReason.trim() || !(total > 0) || !namedRows.length) return Alert.alert("Missing info", "Enter what it was for, the total bill, and at least one friend.");
+    if (!splitResult.ok) return Alert.alert("Can't split", splitResult.error);
+    let nextFriends = friends;
+    const newIous: Iou[] = [];
+    for (const row of splitRows) {
+      if (!row.person.trim()) continue;
+      const index = splitRows.indexOf(row);
+      const friendAmount = splitResult.friendAmounts[index] ?? 0;
+      nextFriends = await inviteNewFriend(row.person, row.email, state.household.name, nextFriends);
+      newIous.push({
+        id: uniqueId("iou"), person: row.person.trim(), amount: friendAmount, direction: "owed_to_me",
+        reason: billReason.trim(), date: billDate || today(), accountId: "", settled: false, settledDate: ""
+      });
+    }
+    await onSave({ ...state, friends: nextFriends, ious: [...ious, ...newIous] });
+    setBillReason(""); setBillAmount(""); setSplitRows([{ person: "", email: "", amount: "", percent: "" }]); setSplitType("equal");
+  };
+
+  const balances = netBalancesByPerson(ious);
+
+  const confirmSettleUp = async (personKey: string) => {
+    const amount = Number(settleAmount);
+    if (!(amount > 0)) return Alert.alert("Missing info", "Enter a positive amount to settle.");
+    const result = settleUpPersonIous(ious, personKey, amount, today(), () => uniqueId("iou"));
+    if (!result.ok) return Alert.alert("Can't settle up", result.error);
+    await onSave({ ...state, ious: result.ious });
+    setSettlingKey(null); setSettleAmount("");
+  };
+
+  const knownNames = new Set(friends.map((friend) => friend.name.trim().toLowerCase()));
+  const virtualFriends: Friend[] = friendsWithoutEmailFromIous(ious, knownNames).map((name) => ({ id: "", name, email: "", invitedAt: "" }));
+  const friendRows = [...friends, ...virtualFriends].sort((a, b) => a.name.localeCompare(b.name));
+
+  const submitAddFriend = async () => {
+    if (!newFriendName.trim()) return;
+    const nextFriends = await inviteNewFriend(newFriendName, newFriendEmail, state.household.name, friends);
+    await onSave({ ...state, friends: nextFriends });
+    setNewFriendName(""); setNewFriendEmail("");
+  };
+
+  const updateFriendEmail = async (name: string, email: string) => {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) return;
+    const key = name.trim().toLowerCase();
+    const existing = friends.find((friend) => friend.name.trim().toLowerCase() === key);
+    if (existing && existing.email.toLowerCase() === trimmedEmail.toLowerCase()) return;
+    let nextFriends: Friend[];
+    if (existing) {
+      let invitedAt = existing.invitedAt;
+      try { await api.inviteFriend(existing.name, trimmedEmail, state.household.name); invitedAt = new Date().toISOString(); } catch { /* best-effort */ }
+      nextFriends = friends.map((friend) => friend.id === existing.id ? { ...friend, email: trimmedEmail, invitedAt } : friend);
+    } else {
+      nextFriends = await inviteNewFriend(name, trimmedEmail, state.household.name, friends);
+    }
+    await onSave({ ...state, friends: nextFriends });
+  };
+
+  return <Page>
+    <SubScreenHeader title="Shared Expenses" onBack={onBack} />
+
+    <Card>
+      <Text style={styles.cardTitle}>Record a debt</Text>
+      <Text style={styles.label}>Person</Text>
+      <TextInput style={styles.input} value={debtPerson} onChangeText={setDebtPerson} placeholder="Jordan" />
+      <Text style={styles.label}>Email (optional, invites new friends)</Text>
+      <TextInput style={styles.input} value={debtEmail} onChangeText={setDebtEmail} placeholder="jordan@example.com" autoCapitalize="none" keyboardType="email-address" />
+      <Text style={styles.label}>Amount</Text>
+      <TextInput style={styles.input} value={debtAmount} onChangeText={setDebtAmount} placeholder="0.00" keyboardType="decimal-pad" />
+      <View style={styles.choiceRow}>
+        <Pressable style={[styles.choice, debtDirection === "i_owe" && styles.choiceActive]} onPress={() => setDebtDirection("i_owe")}><Text style={[styles.choiceText, debtDirection === "i_owe" && styles.choiceTextActive]}>I owe them</Text></Pressable>
+        <Pressable style={[styles.choice, debtDirection === "owed_to_me" && styles.choiceActive]} onPress={() => setDebtDirection("owed_to_me")}><Text style={[styles.choiceText, debtDirection === "owed_to_me" && styles.choiceTextActive]}>They owe me</Text></Pressable>
+      </View>
+      <Text style={styles.label}>Reason (optional)</Text>
+      <TextInput style={styles.input} value={debtReason} onChangeText={setDebtReason} placeholder="What was it for" />
+      <Text style={styles.label}>Date</Text>
+      <TextInput style={styles.input} value={debtDate} onChangeText={setDebtDate} placeholder="YYYY-MM-DD" />
+      <Pressable style={styles.primaryButton} onPress={() => void submitDebt()}><Text style={styles.primaryButtonText}>Add debt</Text></Pressable>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Split a bill with friends</Text>
+      <Text style={styles.muted}>Enter the total bill including your own share — only your friends' shares become debts.</Text>
+      <Text style={styles.label}>What for</Text>
+      <TextInput style={styles.input} value={billReason} onChangeText={setBillReason} placeholder="Dinner, groceries..." />
+      <Text style={styles.label}>Total bill (including your share)</Text>
+      <TextInput style={styles.input} value={billAmount} onChangeText={setBillAmount} placeholder="0.00" keyboardType="decimal-pad" />
+      <Text style={styles.label}>Date</Text>
+      <TextInput style={styles.input} value={billDate} onChangeText={setBillDate} placeholder="YYYY-MM-DD" />
+      <View style={styles.choiceRow}>
+        {(["equal", "exact", "percentage"] as const).map((type) => <Pressable key={type} style={[styles.choice, splitType === type && styles.choiceActive]} onPress={() => setSplitType(type)}>
+          <Text style={[styles.choiceText, splitType === type && styles.choiceTextActive]}>{type === "equal" ? "Equal" : type === "exact" ? "Exact amounts" : "Percentage"}</Text>
+        </Pressable>)}
+      </View>
+      {splitRows.map((row, index) => <View key={index} style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={row.person} onChangeText={(value) => updateSplitRow(index, { person: value })} placeholder="Friend's name" />
+        {splitType === "percentage"
+          ? <TextInput style={[styles.input, { width: 80 }]} value={row.percent} onChangeText={(value) => updateSplitRow(index, { percent: value })} placeholder="%" keyboardType="decimal-pad" />
+          : splitType === "equal"
+          ? <View style={[styles.input, { width: 100, justifyContent: "center" }]}><Text style={styles.rowTitle}>{exactMoney(splitResult.ok ? (splitResult.friendAmounts[index] ?? 0) : 0, currency)}</Text></View>
+          : <TextInput style={[styles.input, { width: 100 }]} value={row.amount} onChangeText={(value) => updateSplitRow(index, { amount: value })} placeholder="0.00" keyboardType="decimal-pad" />}
+        <Pressable style={styles.planStepperButton} onPress={() => removeSplitRow(index)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+      </View>)}
+      <Pressable style={styles.secondarySmall} onPress={addSplitRow}><Text style={styles.secondaryButtonText}>+ Add another person</Text></Pressable>
+      <View style={[styles.row, { borderBottomWidth: 0 }]}>
+        <Text style={styles.rowTitle}>Your remaining share</Text>
+        <Text style={[styles.rowValue, splitResult.ok && splitResult.payerAmount < 0 && { color: colors.coral }]}>{splitResult.ok ? exactMoney(splitResult.payerAmount, currency) : "—"}</Text>
+      </View>
+      {!splitResult.ok ? <Text style={styles.formError}>{splitResult.error}</Text> : null}
+      <Pressable style={styles.primaryButton} onPress={() => void submitSplitBill()}><Text style={styles.primaryButtonText}>Split and add</Text></Pressable>
+    </Card>
+
+    {balances.length
+      ? balances.map((group) => <IouBalanceCard key={group.key} group={group} currency={currency}
+          settling={settlingKey === group.key} settleAmount={settleAmount} onSettleAmountChange={setSettleAmount}
+          onToggleSettle={() => {
+            if (settlingKey === group.key) { setSettlingKey(null); return; }
+            setSettlingKey(group.key); setSettleAmount(group.net ? Math.abs(group.net).toFixed(2) : "");
+          }}
+          onConfirmSettle={() => void confirmSettleUp(group.key)}
+        />)
+      : <Card><Text style={styles.muted}>No shared expenses yet</Text></Card>}
+
+    <Card>
+      <Text style={styles.cardTitle}>Friends</Text>
+      <Text style={styles.muted}>Everyone you've split a debt or expense with — add an email any time to send them an invite.</Text>
+      <Text style={styles.label}>Name</Text>
+      <TextInput style={styles.input} value={newFriendName} onChangeText={setNewFriendName} placeholder="Jordan" />
+      <Text style={styles.label}>Email (optional)</Text>
+      <TextInput style={styles.input} value={newFriendEmail} onChangeText={setNewFriendEmail} placeholder="jordan@example.com" autoCapitalize="none" keyboardType="email-address" />
+      <Pressable style={styles.secondarySmall} onPress={() => void submitAddFriend()}><Text style={styles.secondaryButtonText}>Add friend</Text></Pressable>
+      {friendRows.length
+        ? friendRows.map((friend, index) => <FriendListRow key={friend.id || `${friend.name}-${index}`} friend={friend} onEmailChange={(email) => void updateFriendEmail(friend.name, email)} />)
+        : <Text style={styles.muted}>No friends yet</Text>}
+    </Card>
+  </Page>;
+}
+
+function IouBalanceCard({ group, currency, settling, settleAmount, onSettleAmountChange, onToggleSettle, onConfirmSettle }: {
+  group: NetBalanceGroup; currency: string; settling: boolean; settleAmount: string;
+  onSettleAmountChange: (value: string) => void; onToggleSettle: () => void; onConfirmSettle: () => void;
+}) {
+  const isSettled = group.direction === "settled";
+  const headline = isSettled ? "All settled up" : group.direction === "owed_to_me" ? `${group.label} owes you ${exactMoney(Math.abs(group.net), currency)}` : `You owe ${group.label} ${exactMoney(Math.abs(group.net), currency)}`;
+  return <Card>
+    <View style={styles.iouPersonHead}>
+      <Text style={styles.cardTitle}>{group.label}</Text>
+      {!isSettled ? <Pressable style={styles.secondarySmall} onPress={onToggleSettle}><Text style={styles.secondaryButtonText}>{settling ? "Cancel" : "Settle up"}</Text></Pressable> : null}
+    </View>
+    <Text style={[styles.rowTitle, { fontSize: 17, marginTop: 6 }, !isSettled && group.direction === "i_owe" && { color: colors.coral }, !isSettled && group.direction === "owed_to_me" && { color: colors.green }]}>{headline}</Text>
+    <Text style={styles.muted}>{group.records.length} record{group.records.length === 1 ? "" : "s"}</Text>
+    {settling ? <View style={[styles.actionRow, { marginTop: 10 }]}>
+      <TextInput style={[styles.input, { flex: 1 }]} value={settleAmount} onChangeText={onSettleAmountChange} keyboardType="decimal-pad" placeholder="Amount to settle" />
+      <Pressable style={styles.secondarySmall} onPress={onConfirmSettle}><Text style={styles.secondaryButtonText}>Confirm</Text></Pressable>
+    </View> : null}
+  </Card>;
+}
+
+function FriendListRow({ friend, onEmailChange }: { friend: Friend; onEmailChange: (email: string) => void }) {
+  const [draft, setDraft] = useState(friend.email);
+  return <View style={styles.householdRow}>
+    <View style={styles.rowCopy}>
+      <Text style={styles.rowTitle}>{friend.name}</Text>
+      <Text style={styles.rowDetail}>{friend.invitedAt ? "Invited" : friend.email ? "Not yet invited" : "No email yet"}</Text>
+    </View>
+    <TextInput style={[styles.input, { width: 160, height: 42 }]} value={draft} onChangeText={setDraft} placeholder="Add email to invite" autoCapitalize="none" keyboardType="email-address" onEndEditing={() => onEmailChange(draft)} />
+  </View>;
+}
+
+function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void }) {
+  const currency = state.household.currency;
+  const currentMonth = state.budget.month;
+  const [scopeType, setScopeType] = useState<"month" | "range" | "year">("month");
+  const [scopeMonth, setScopeMonth] = useState(currentMonth);
+  const [rangeStart, setRangeStart] = useState(currentMonth + "-01");
+  const [rangeEnd, setRangeEnd] = useState(today());
+  const [scopeYear, setScopeYear] = useState(String(new Date(currentMonth + "-01").getFullYear()));
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+
+  function today() { return new Date().toISOString().slice(0, 10); }
+
+  const scope: ReportScope = scopeType === "month" ? { type: "month", month: scopeMonth }
+    : scopeType === "range" ? { type: "range", start: rangeStart, end: rangeEnd }
+    : { type: "year", year: Number(scopeYear) || new Date().getFullYear() };
+  const monthKeys = monthKeysForScope(scope, currentMonth);
+
+  const categories = reportCategoriesForScope(state.budget.categories, state.transactions, monthKeys);
+  const budgetVsActual = budgetVsActualByCategory(state.budget.categories, state.transactions, monthKeys);
+  const budgetVsActualByCategoryTotals = new Map<string, { planned: number; actual: number; variance: number }>();
+  budgetVsActual.forEach((row) => {
+    const existing = budgetVsActualByCategoryTotals.get(row.category) || { planned: 0, actual: 0, variance: 0 };
+    budgetVsActualByCategoryTotals.set(row.category, { planned: existing.planned + row.planned, actual: existing.actual + row.actual, variance: existing.variance + row.variance });
+  });
+  const tagGroups = groupTransactionsByTag(state.transactions);
+  const cashFlow = cashFlowByMonth(state.transactions, monthKeys);
+  const maxCashFlow = Math.max(...cashFlow.map((month) => Math.max(month.income, month.expenses)), 1);
+
+  return <Page>
+    <SubScreenHeader title="Reports" onBack={onBack} />
+
+    <Card>
+      <Text style={styles.cardTitle}>Scope</Text>
+      <View style={styles.choiceRow}>
+        {(["month", "range", "year"] as const).map((type) => <Pressable key={type} style={[styles.choice, scopeType === type && styles.choiceActive]} onPress={() => setScopeType(type)}>
+          <Text style={[styles.choiceText, scopeType === type && styles.choiceTextActive]}>{type === "month" ? "Month" : type === "range" ? "Range" : "Year"}</Text>
+        </Pressable>)}
+      </View>
+      {scopeType === "month" ? <><Text style={styles.label}>Month (YYYY-MM)</Text><TextInput style={styles.input} value={scopeMonth} onChangeText={setScopeMonth} placeholder="2026-07" /></>
+        : scopeType === "range" ? <>
+          <Text style={styles.label}>Start (YYYY-MM-DD)</Text><TextInput style={styles.input} value={rangeStart} onChangeText={setRangeStart} placeholder="2026-01-01" />
+          <Text style={styles.label}>End (YYYY-MM-DD)</Text><TextInput style={styles.input} value={rangeEnd} onChangeText={setRangeEnd} placeholder="2026-07-21" />
+        </>
+        : <><Text style={styles.label}>Year</Text><TextInput style={styles.input} value={scopeYear} onChangeText={setScopeYear} placeholder="2026" keyboardType="number-pad" /></>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Category report</Text>
+      {categories.length ? categories.map((category) => <View key={category.name} style={styles.planTaskBlock}>
+        <Pressable style={styles.categoryHeader} onPress={() => setExpandedCategory(expandedCategory === category.name ? null : category.name)}>
+          <View style={[styles.dot, { backgroundColor: category.color }]} />
+          <Text style={[styles.rowTitle, { flex: 1 }]}>{category.name}</Text>
+          <Text style={styles.rowValue}>{money(category.value, currency)}</Text>
+          <Ionicons name={expandedCategory === category.name ? "chevron-up" : "chevron-down"} size={18} color={colors.muted} />
+        </Pressable>
+        {expandedCategory === category.name ? <View style={styles.subtaskList}>
+          {category.lines.length ? category.lines.map((line) => <View key={line.name} style={styles.reportSubcategoryRow}>
+            <Text style={styles.rowDetail}>{line.name}</Text>
+            <Text style={styles.rowDetail}>{money(line.value, currency)}</Text>
+          </View>) : <Text style={styles.muted}>No subcategory spend</Text>}
+        </View> : null}
+      </View>) : <Text style={styles.muted}>No spend in this period</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Budget vs Expense</Text>
+      {budgetVsActualByCategoryTotals.size
+        ? [...budgetVsActualByCategoryTotals.entries()].map(([category, totals]) => <Row key={category} title={category}
+            detail={`Planned ${money(totals.planned, currency)} · Actual ${money(totals.actual, currency)}`}
+            value={`${totals.variance >= 0 ? "+" : ""}${money(totals.variance, currency)}`} />)
+        : <Text style={styles.muted}>No budget or spend in this period</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Group by tag</Text>
+      {tagGroups.length ? tagGroups.map((group) => <Row key={group.key} title={group.label} detail={`${group.transactions.length} transaction${group.transactions.length === 1 ? "" : "s"}`} value={money(group.total, currency)} />) : <Text style={styles.muted}>No tagged transactions</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Cash flow</Text>
+      {cashFlow.length ? <View style={styles.cashFlowChart}>
+        {cashFlow.map((month) => <View key={month.month} style={styles.cashFlowColumn}>
+          <View style={styles.cashFlowBars}>
+            <View style={[styles.cashFlowBar, { height: Math.max(4, (month.income / maxCashFlow) * 100), backgroundColor: colors.green }]} />
+            <View style={[styles.cashFlowBar, { height: Math.max(4, (month.expenses / maxCashFlow) * 100), backgroundColor: colors.coral }]} />
+          </View>
+          <Text style={styles.cashFlowLabel}>{month.month.slice(5)}</Text>
+        </View>)}
+      </View> : <Text style={styles.muted}>No data in this period</Text>}
+      <View style={styles.choiceRow}>
+        <View style={styles.cashFlowLegendItem}><View style={[styles.dot, { backgroundColor: colors.green }]} /><Text style={styles.rowDetail}>Income</Text></View>
+        <View style={styles.cashFlowLegendItem}><View style={[styles.dot, { backgroundColor: colors.coral }]} /><Text style={styles.rowDetail}>Expenses</Text></View>
+      </View>
+    </Card>
+  </Page>;
+}
+
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Card><Text style={styles.cardTitle}>Household wealth</Text><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Card><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Card><Text style={styles.cardTitle}>Household wealth</Text><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Card><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
@@ -874,5 +1229,9 @@ const styles = StyleSheet.create({
   dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
   documentsBreadcrumbRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", paddingVertical: 6 }, documentsBreadcrumbItem: { flexDirection: "row", alignItems: "center" }, documentsBreadcrumbText: { color: colors.muted, fontWeight: "700" }, documentsBreadcrumbActive: { color: colors.text },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
-  authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" }
+  authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" },
+  subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
+  iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  reportSubcategoryRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
+  cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 }
 });

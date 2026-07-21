@@ -3,7 +3,7 @@ export type Household = { id: string; name: string; role: string; country: strin
 export type RecurringBudgetBill = { enabled: boolean; amount: number; frequency: "monthly" | "quarterly" | "yearly"; dueDate: string };
 export type BudgetLine = { id: string; name: string; planned: number; dueDay?: number; recurringBill?: RecurringBudgetBill };
 export type BudgetCategory = { name: string; color: string; lines: BudgetLine[] };
-export type Transaction = { date: string; payee: string; lineId: string; amount: number; memo?: string };
+export type Transaction = { date: string; payee: string; lineId: string; amount: number; memo?: string; tags?: string[] };
 export type CalendarEvent = { id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string };
 export type Chore = { id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string; recurrence?: string };
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
@@ -15,6 +15,12 @@ export type WealthAsset = { id?: string; name: string; value: number; assetClass
 export type WealthLiability = { id?: string; name: string; value: number };
 export type DebtPayment = { id?: string; date: string; amount: number; interest: number; principal: number; extra: number };
 export type Debt = { id?: string; name: string; balance: number; rate: number; minimum: number; termMonths?: number; assetId?: string; payments?: DebtPayment[] };
+export type IouDirection = "i_owe" | "owed_to_me";
+export type Iou = {
+  id: string; person: string; amount: number; direction: IouDirection; reason: string; date: string;
+  accountId: string; settled: boolean; settledDate: string;
+};
+export type Friend = { id: string; name: string; email: string; invitedAt: string };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string };
   budget: { month: string; income: number; categories: BudgetCategory[] };
@@ -23,6 +29,8 @@ export type HouseholdState = {
   notes: { entries: Note[] };
   meals: { recipes: Recipe[]; plannedWeek: PlannedMeal[]; savedWeeks?: string[]; nutritionGoals?: { calories: number; protein: number }; selectedWeekByMonth?: Record<string, number>; feedback?: string; groceryEstimate?: number };
   goals?: { sinkingFunds?: unknown[]; debts?: Debt[]; netWorth?: { assets: WealthAsset[]; liabilities: WealthLiability[] } };
+  ious?: Iou[];
+  friends?: Friend[];
 };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
