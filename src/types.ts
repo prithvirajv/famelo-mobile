@@ -102,7 +102,7 @@ export type HouseholdState = {
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
 export type JournalEntry = {
   id: string; entryDate: string; title: string; body: string; mood: string; tags: string[];
-  photos: JournalPhoto[]; createdAt: string; updatedAt: string;
+  photos: JournalPhoto[]; createdAt: string; updatedAt: string; gratitude?: string;
 };
 export type PlanBucket = "daily" | "weekly" | "monthly";
 export type PlanRecurrence = "none" | "daily" | "weekdays" | "weekly" | "monthly";

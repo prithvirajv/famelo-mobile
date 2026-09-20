@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryListFor, groceryEstimateAmount, recurringBudgetSetAside, nextRecurringBudgetDueDate } from "../src/planningLogic.ts";
+import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryListFor, groceryEstimateAmount, recurringBudgetSetAside, nextRecurringBudgetDueDate, mealWeeksForMonth, currentMealWeekNumber, weekDayDatesForWeek } from "../src/planningLogic.ts";
 
 test("checking a child marks the parent done once every sibling is done", () => {
   const checklist = [
@@ -47,6 +47,42 @@ test("firstWeekDayDates returns seven Monday-anchored days for the given month",
   assert.equal(days[0].date.getDay(), 1);
   assert.equal(formatShortDate(days[0].date), "Jun 29");
   assert.equal(formatShortDate(days[2].date), "Jul 1");
+});
+
+test("mealWeeksForMonth splits a month into Monday-anchored weeks with unclamped real-span labels", () => {
+  const weeks = mealWeeksForMonth("2026-07");
+  assert.equal(weeks[0].number, 1);
+  // July 2026 starts on a Wednesday, so week 1's real Monday-Sunday span spills back into June -
+  // the label reflects that real span rather than clamping to "Jul 1-Jul 5", which would
+  // misrepresent the 7-day week the grid actually renders underneath it.
+  assert.equal(weeks[0].label, "Jun 29–Jul 5");
+  assert.equal(weeks[0].start.getDay(), 1, "each week should start on a Monday");
+});
+
+test("mealWeeksForMonth week start dates advance by exactly 7 days", () => {
+  const weeks = mealWeeksForMonth("2026-07");
+  for (let index = 1; index < weeks.length; index += 1) {
+    const diffDays = (weeks[index].start.getTime() - weeks[index - 1].start.getTime()) / 86400000;
+    assert.equal(diffDays, 7);
+  }
+});
+
+test("currentMealWeekNumber returns the week containing today's date", () => {
+  const weeks = mealWeeksForMonth("2026-07");
+  // July 14 2026 falls in week 3 (Jul 13-Jul 19).
+  assert.equal(currentMealWeekNumber("2026-07", new Date(2026, 6, 14)), 3);
+  assert.equal(weeks.find((week) => week.number === 3)?.label, "Jul 13–Jul 19");
+});
+
+test("currentMealWeekNumber falls back to week 1 when today isn't in the given month", () => {
+  assert.equal(currentMealWeekNumber("2026-07", new Date(2026, 8, 1)), 1);
+});
+
+test("weekDayDatesForWeek returns the correct 7-day span for a week past the first", () => {
+  const days = weekDayDatesForWeek("2026-07", 3);
+  assert.equal(days.length, 7);
+  assert.equal(formatShortDate(days[0].date), "Jul 13");
+  assert.equal(formatShortDate(days[6].date), "Jul 19");
 });
 
 test("groceryListFor deduplicates ingredients across planned meals and ignores unplanned recipes", () => {

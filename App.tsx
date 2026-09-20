@@ -12,7 +12,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
-import { applyChecklistToggle, firstWeekDayDates, formatShortDate, groceryEstimateAmount, recurringBudgetSetAside } from "./src/planningLogic";
+import { applyChecklistToggle, formatShortDate, groceryEstimateAmount, recurringBudgetSetAside, mealWeeksForMonth, currentMealWeekNumber, weekDayDatesForWeek } from "./src/planningLogic";
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
@@ -27,11 +27,12 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment
 } from "./src/wealthLogic";
+import { ensurePaycheckOccurrencesGenerated } from "./src/paychecksLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -72,7 +73,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -140,6 +141,7 @@ function AppContent() {
     : subScreen === "reports" ? <Reports state={state} onBack={() => setSubScreen(null)} />
     : subScreen === "wealth" ? <Wealth state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
+    : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
@@ -152,7 +154,7 @@ function AppContent() {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} />;
 
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
@@ -259,18 +261,32 @@ function Calendar({ state, access, onSave }: { state: HouseholdState; access: Ho
 function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
   const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
   const slots = ["Breakfast", "Lunch", "Dinner", "Snack"];
+  // Defaults to whichever week actually contains today (not always week 1) - opening this screen
+  // on, say, the 20th of the month used to show/plan into a permanently empty week 1 on mobile,
+  // the same bug already fixed on web. Remembers the last-viewed week per month in shared state
+  // (selectedWeekByMonth), same field web already uses, so switching away and back keeps it.
+  const weeks = mealWeeksForMonth(state.budget.month);
+  const [week, setWeek] = useState(() => state.meals.selectedWeekByMonth?.[state.budget.month] ?? currentMealWeekNumber(state.budget.month));
   const [day, setDay] = useState("Monday"); const [slot, setSlot] = useState("Breakfast"); const [recipeId, setRecipeId] = useState(state.meals.recipes[0]?.id || ""); const [customMeal, setCustomMeal] = useState(""); const [servings, setServings] = useState("3");
-  const current = state.meals.plannedWeek.filter((meal) => (!meal.month || meal.month === state.budget.month) && Number(meal.week || 1) === 1);
-  const weekDayDates = firstWeekDayDates(state.budget.month);
+  const current = state.meals.plannedWeek.filter((meal) => (!meal.month || meal.month === state.budget.month) && Number(meal.week || 1) === week);
+  const weekDayDates = weekDayDatesForWeek(state.budget.month, week);
+
+  const selectWeek = async (nextWeek: number) => {
+    setWeek(nextWeek);
+    const next = structuredClone(state);
+    next.meals.selectedWeekByMonth = { ...next.meals.selectedWeekByMonth, [state.budget.month]: nextWeek };
+    await onSave(next);
+  };
+
   const plan = async () => {
     const recipe = state.meals.recipes.find((item) => item.id === recipeId);
     const mealName = recipe ? recipe.name : customMeal.trim();
     if (!mealName) return Alert.alert("Meal name needed", "Choose a recipe or type a meal name.");
-    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week: 1, day, slot, recipeId: recipe?.id || "", meal: mealName, servings: Math.max(1, Number(servings || 3)) };
-    const existing = slot === "Snack" ? -1 : next.meals.plannedWeek.findIndex((item) => (!item.month || item.month === state.budget.month) && Number(item.week || 1) === 1 && item.day === day && (item.slot || "Dinner") === slot);
+    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week, day, slot, recipeId: recipe?.id || "", meal: mealName, servings: Math.max(1, Number(servings || 3)) };
+    const existing = slot === "Snack" ? -1 : next.meals.plannedWeek.findIndex((item) => (!item.month || item.month === state.budget.month) && Number(item.week || 1) === week && item.day === day && (item.slot || "Dinner") === slot);
     if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${mealName} planned for ${day} ${slot}.`; await onSave(next);
   };
-  const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week 1`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
+  const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week ${week}`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
   const postGroceries = async () => {
     const next = structuredClone(state);
     const line = next.budget.categories.flatMap((category) => category.lines).find((item) => item.name.toLowerCase().includes("grocer"));
@@ -282,7 +298,10 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     next.meals.feedback = `${money(amount, state.household.currency)} posted to Groceries.`;
     await onSave(next);
   };
-  return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card><View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
+  return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card>
+    <Text style={styles.label}>Week</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{weeks.map((item) => <Pressable key={item.number} style={[styles.choice, week === item.number && styles.choiceActive]} onPress={() => void selectWeek(item.number)}><Text style={[styles.choiceText, week === item.number && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</ScrollView>
+    <View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
     <Text style={styles.label}>Day</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
     <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>
     <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => { setRecipeId(recipe.id); setCustomMeal(""); }}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={customMeal} onChangeText={(text) => { setCustomMeal(text); setRecipeId(""); }} placeholder="Or type any meal (no recipe)" /><TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
@@ -301,19 +320,23 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
 }
 
 function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (journal: PrivateData["journal"]) => Promise<void> }) {
-  const [title, setTitle] = useState(""); const [body, setBody] = useState(""); const [mood, setMood] = useState("");
+  const [title, setTitle] = useState(""); const [body, setBody] = useState(""); const [mood, setMood] = useState(""); const [gratitude, setGratitude] = useState("");
   const entries = [...privateData.journal.entries].sort((a, b) => b.entryDate.localeCompare(a.entryDate));
 
   const addEntry = async () => {
-    if (!title.trim() && !body.trim()) return;
+    if (!title.trim() && !body.trim() && !gratitude.trim()) return;
     const now = new Date().toISOString();
-    const entry: JournalEntry = { id: `journal-${Date.now()}`, entryDate: now.slice(0, 10), title: title.trim(), body: body.trim(), mood, tags: [], photos: [], createdAt: now, updatedAt: now };
+    const entry: JournalEntry = { id: `journal-${Date.now()}`, entryDate: now.slice(0, 10), title: title.trim(), body: body.trim(), mood, tags: [], photos: [], createdAt: now, updatedAt: now, gratitude: gratitude.trim() };
     await onSave({ entries: [...privateData.journal.entries, entry] });
-    setTitle(""); setBody(""); setMood("");
+    setTitle(""); setBody(""); setMood(""); setGratitude("");
   };
 
   const deleteEntry = async (entryId: string) => {
     await onSave({ entries: privateData.journal.entries.filter((entry) => entry.id !== entryId) });
+  };
+
+  const updateGratitude = async (entryId: string, value: string) => {
+    await onSave({ entries: privateData.journal.entries.map((entry) => entry.id === entryId ? { ...entry, gratitude: value } : entry) });
   };
 
   const addPhoto = async (entryId: string) => {
@@ -339,6 +362,8 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
         {journalMoods.map((item) => <Pressable key={item} style={[styles.choice, mood === item && styles.choiceActive]} onPress={() => setMood(mood === item ? "" : item)}><Text style={[styles.choiceText, mood === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}
       </ScrollView>
       <TextInput style={[styles.input, styles.multilineInput]} value={body} onChangeText={setBody} placeholder="What happened today?" multiline />
+      <Text style={styles.label}>🙏 Grateful for</Text>
+      <TextInput style={styles.input} value={gratitude} onChangeText={setGratitude} placeholder="One thing you're grateful for today" />
       <Pressable style={styles.primaryButton} onPress={() => void addEntry()}><Text style={styles.primaryButtonText}>Add entry</Text></Pressable>
     </Card>
     {entries.map((entry) => <Card key={entry.id}>
@@ -348,6 +373,7 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
       </View>
       <Text style={styles.muted}>{entry.entryDate}{entry.mood ? ` · ${entry.mood}` : ""}</Text>
       {entry.body ? <Text style={styles.noteBody}>{entry.body}</Text> : null}
+      <TextInput style={[styles.input, { marginTop: 6 }]} defaultValue={entry.gratitude || ""} onEndEditing={(event) => void updateGratitude(entry.id, event.nativeEvent.text)} placeholder="🙏 Grateful for..." />
       {entry.photos.length ? <ScrollView horizontal style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
       <Pressable style={styles.secondarySmall} onPress={() => void addPhoto(entry.id)}><Text style={styles.secondaryButtonText}>+ Add photo</Text></Pressable>
     </Card>)}
@@ -1290,6 +1316,37 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     setPayingDebtId(null); setPaymentAmount("");
   };
 
+  // Out of scope for this pass: auto-contribution (roundup/percent-of-paycheck),
+  // which needs its own watermarked processing against transactions/paycheck
+  // occurrences to avoid double-crediting - manual contributions only for now.
+  const sinkingFunds = state.goals?.sinkingFunds || [];
+  const [newFundName, setNewFundName] = useState("");
+  const [newFundTarget, setNewFundTarget] = useState("");
+  const [newFundDate, setNewFundDate] = useState("");
+  const [contributingFundIndex, setContributingFundIndex] = useState<number | null>(null);
+  const [contributionAmount, setContributionAmount] = useState("");
+
+  const submitAddFund = async () => {
+    if (!newFundName.trim()) return Alert.alert("Missing info", "Enter a goal name.");
+    const fund: SinkingFund = { name: newFundName.trim(), target: Math.max(0, Number(newFundTarget) || 0), saved: 0, targetDate: newFundDate };
+    await onSave({ ...state, goals: { ...state.goals, sinkingFunds: [...sinkingFunds, fund] } });
+    setNewFundName(""); setNewFundTarget(""); setNewFundDate("");
+  };
+
+  const deleteFund = (index: number) => {
+    Alert.alert("Delete this goal?", "This cannot be undone.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: () => void onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.filter((_, itemIndex) => itemIndex !== index) } })
+    }]);
+  };
+
+  const confirmContribution = async (index: number) => {
+    const amount = Number(contributionAmount);
+    if (!(amount > 0)) return Alert.alert("Missing info", "Enter a positive contribution amount.");
+    const nextFunds = sinkingFunds.map((fund, itemIndex) => itemIndex === index ? { ...fund, saved: Math.max(0, Number(fund.saved || 0) + amount) } : fund);
+    await onSave({ ...state, goals: { ...state.goals, sinkingFunds: nextFunds } });
+    setContributingFundIndex(null); setContributionAmount("");
+  };
+
   const [newItemKind, setNewItemKind] = useState<"asset" | "liability">("asset");
   const [newItemName, setNewItemName] = useState("");
   const [newItemValue, setNewItemValue] = useState("");
@@ -1384,6 +1441,36 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
             : <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => { setPayingDebtId(debt.id || String(index)); setPaymentAmount(""); }}><Text style={styles.secondaryButtonText}>Record EMI payment</Text></Pressable>}
         </View>;
       }) : <Text style={styles.muted}>No debts tracked</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Savings goals</Text>
+      {sinkingFunds.length ? sinkingFunds.map((fund, index) => {
+        const progress = Math.min(100, Math.round((Number(fund.saved || 0) / Math.max(Number(fund.target || 0), 1)) * 100));
+        const isContributing = contributingFundIndex === index;
+        return <View key={`${fund.name}-${index}`} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
+          <View style={styles.iouPersonHead}>
+            <Text style={styles.rowTitle}>{fund.name}</Text>
+            <Pressable onPress={() => deleteFund(index)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+          </View>
+          <Text style={styles.rowDetail}>{money(fund.saved, currency)} of {money(fund.target, currency)}{fund.targetDate ? ` · by ${fund.targetDate}` : ""}</Text>
+          <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${progress}%` }]} /></View>
+          <Text style={styles.muted}>{progress}% saved · {money(Math.max(0, fund.target - fund.saved), currency)} remaining</Text>
+          {isContributing
+            ? <View style={[styles.actionRow, { marginTop: 8 }]}>
+                <TextInput style={[styles.input, { flex: 1 }]} value={contributionAmount} onChangeText={setContributionAmount} keyboardType="decimal-pad" placeholder="Amount to add" />
+                <Pressable style={styles.secondarySmall} onPress={() => void confirmContribution(index)}><Text style={styles.secondaryButtonText}>Confirm</Text></Pressable>
+              </View>
+            : <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => { setContributingFundIndex(index); setContributionAmount(""); }}><Text style={styles.secondaryButtonText}>Add to savings</Text></Pressable>}
+        </View>;
+      }) : <Text style={styles.muted}>No savings goals yet</Text>}
+      <Text style={[styles.label, { marginTop: 14 }]}>Add a goal</Text>
+      <TextInput style={styles.input} value={newFundName} onChangeText={setNewFundName} placeholder="Vacation fund" />
+      <Text style={styles.label}>Target amount</Text>
+      <TextInput style={styles.input} value={newFundTarget} onChangeText={setNewFundTarget} placeholder="0.00" keyboardType="decimal-pad" />
+      <Text style={styles.label}>Target date (optional)</Text>
+      <TextInput style={styles.input} value={newFundDate} onChangeText={setNewFundDate} placeholder="YYYY-MM-DD" />
+      <Pressable style={styles.secondarySmall} onPress={() => void submitAddFund()}><Text style={styles.secondaryButtonText}>Add goal</Text></Pressable>
     </Card>
 
     <Card>
@@ -1486,10 +1573,137 @@ function Bills({ state, onBack, onOpenBudget }: { state: HouseholdState; onBack:
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void }) {
+const PAYCHECK_RECURRENCE_LABELS: Record<PaycheckRecurrence, string> = { once: "One-time", bonus: "Bonus", weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly" };
+
+// Out of scope for this pass: assigning a paycheck to specific bills
+// (assignedLineIds) - the paycheck/occurrence CRUD and materialization below
+// is the core of the screen; bill-assignment can follow as its own change.
+function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const currency = state.household.currency;
+  const accounts = state.accounts || [];
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  // Materializes/self-heals occurrence rows on every visit to this screen (same
+  // convention as the web app's ensurePaycheckOccurrencesGenerated, which runs on
+  // every render) - only actually saves when something changed, so this settles
+  // after one pass instead of looping.
+  useEffect(() => {
+    const result = ensurePaycheckOccurrencesGenerated(state.paychecks || [], state.paycheckOccurrences || [], () => uniqueId("paycheck-occurrence"));
+    const paychecksChanged = JSON.stringify(result.paychecks) !== JSON.stringify(state.paychecks || []);
+    const occurrencesChanged = JSON.stringify(result.paycheckOccurrences) !== JSON.stringify(state.paycheckOccurrences || []);
+    if (paychecksChanged || occurrencesChanged) void onSave({ ...state, paychecks: result.paychecks, paycheckOccurrences: result.paycheckOccurrences });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.paychecks, state.paycheckOccurrences]);
+
+  const paychecks = state.paychecks || [];
+  const occurrences = state.paycheckOccurrences || [];
+  const currentMonth = state.budget.month;
+  const monthOccurrences = occurrences.filter((occurrence) => occurrence.date.slice(0, 7) === currentMonth).sort((a, b) => a.date.localeCompare(b.date));
+
+  const [newName, setNewName] = useState("");
+  const [newAmount, setNewAmount] = useState("");
+  const [newDate, setNewDate] = useState(today);
+  const [newRecurrence, setNewRecurrence] = useState<PaycheckRecurrence>("once");
+  const [newEndDate, setNewEndDate] = useState("");
+  const [newDepositAccountId, setNewDepositAccountId] = useState("");
+
+  const submitAddPaycheck = async () => {
+    if (!newName.trim() || !(Number(newAmount) > 0) || !newDate) return Alert.alert("Missing info", "Enter a name, a positive amount, and a date.");
+    const paycheck: Paycheck = {
+      id: uniqueId("paycheck"), name: newName.trim(), date: newDate, amount: Number(newAmount),
+      recurrence: newRecurrence, endDate: newEndDate || undefined, assignedLineIds: [], depositAccountId: newDepositAccountId || undefined
+    };
+    await onSave({ ...state, paychecks: [...paychecks, paycheck] });
+    setNewName(""); setNewAmount(""); setNewEndDate(""); setNewDepositAccountId(""); setNewRecurrence("once");
+  };
+
+  const deletePaycheck = (paycheckId: string) => {
+    Alert.alert("Delete this paycheck?", "Its individual pay dates will be removed too. This cannot be undone.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: () => void onSave({
+        ...state, paychecks: paychecks.filter((paycheck) => paycheck.id !== paycheckId),
+        paycheckOccurrences: occurrences.filter((occurrence) => occurrence.seriesId !== paycheckId)
+      })
+    }]);
+  };
+
+  const deleteOccurrence = (occurrenceId: string) => {
+    void onSave({ ...state, paycheckOccurrences: occurrences.filter((occurrence) => occurrence.id !== occurrenceId) });
+  };
+
+  const updateOccurrenceAmount = (occurrenceId: string, value: string) => {
+    const amount = Number(value);
+    if (!(amount >= 0)) return;
+    void onSave({ ...state, paycheckOccurrences: occurrences.map((occurrence) => occurrence.id === occurrenceId ? { ...occurrence, amount } : occurrence) });
+  };
+
+  return <Page>
+    <SubScreenHeader title="Paycheck/Income" onBack={onBack} />
+
+    <Card>
+      <Text style={styles.cardTitle}>This month's pay dates</Text>
+      {monthOccurrences.length
+        ? monthOccurrences.map((occurrence) => {
+            const paycheck = paychecks.find((item) => item.id === occurrence.seriesId);
+            return <View key={occurrence.id} style={styles.row}>
+              <View style={styles.rowCopy}>
+                <Text style={styles.rowTitle}>{paycheck?.name || "Paycheck"}</Text>
+                <Text style={styles.rowDetail}>{occurrence.date}</Text>
+              </View>
+              <TextInput style={[styles.input, { width: 100, height: 42 }]} defaultValue={String(occurrence.amount)} onEndEditing={(event) => updateOccurrenceAmount(occurrence.id, event.nativeEvent.text)} keyboardType="decimal-pad" />
+              <Pressable style={styles.planStepperButton} onPress={() => deleteOccurrence(occurrence.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+            </View>;
+          })
+        : <Text style={styles.muted}>No pay dates this month</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>All paychecks</Text>
+      {paychecks.length ? paychecks.map((paycheck) => <View key={paycheck.id} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{paycheck.name}</Text>
+          <Text style={styles.rowDetail}>{PAYCHECK_RECURRENCE_LABELS[paycheck.recurrence || "once"]} · Since {paycheck.date}{paycheck.endDate ? ` · Ends ${paycheck.endDate}` : ""}</Text>
+        </View>
+        <Text style={styles.rowValue}>{money(paycheck.amount, currency)}</Text>
+        <Pressable style={styles.planStepperButton} onPress={() => deletePaycheck(paycheck.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+      </View>) : <Text style={styles.muted}>No paychecks yet</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Add paycheck/income</Text>
+      <Text style={styles.label}>Name</Text>
+      <TextInput style={styles.input} value={newName} onChangeText={setNewName} placeholder="Jordan's salary" />
+      <Text style={styles.label}>Amount</Text>
+      <TextInput style={styles.input} value={newAmount} onChangeText={setNewAmount} placeholder="0.00" keyboardType="decimal-pad" />
+      <Text style={styles.label}>Date</Text>
+      <TextInput style={styles.input} value={newDate} onChangeText={setNewDate} placeholder="YYYY-MM-DD" />
+      <Text style={styles.label}>Repeats</Text>
+      <View style={styles.choiceRow}>
+        {(Object.keys(PAYCHECK_RECURRENCE_LABELS) as PaycheckRecurrence[]).map((value) => <Pressable key={value} style={[styles.choice, newRecurrence === value && styles.choiceActive]} onPress={() => setNewRecurrence(value)}>
+          <Text style={[styles.choiceText, newRecurrence === value && styles.choiceTextActive]}>{PAYCHECK_RECURRENCE_LABELS[value]}</Text>
+        </Pressable>)}
+      </View>
+      {newRecurrence !== "once" && newRecurrence !== "bonus" ? <View>
+        <Text style={styles.label}>End date (optional)</Text>
+        <TextInput style={styles.input} value={newEndDate} onChangeText={setNewEndDate} placeholder="YYYY-MM-DD" />
+      </View> : null}
+      {accounts.length ? <View>
+        <Text style={styles.label}>Deposit account (optional)</Text>
+        <View style={styles.choiceRow}>
+          <Pressable style={[styles.choice, !newDepositAccountId && styles.choiceActive]} onPress={() => setNewDepositAccountId("")}><Text style={[styles.choiceText, !newDepositAccountId && styles.choiceTextActive]}>Not linked</Text></Pressable>
+          {accounts.filter((account) => account.type !== "credit_card").map((account) => <Pressable key={account.id} style={[styles.choice, newDepositAccountId === account.id && styles.choiceActive]} onPress={() => setNewDepositAccountId(account.id)}>
+            <Text style={[styles.choiceText, newDepositAccountId === account.id && styles.choiceTextActive]}>{account.name}</Text>
+          </Pressable>)}
+        </View>
+      </View> : null}
+      <Pressable style={styles.primaryButton} onPress={() => void submitAddPaycheck()}><Text style={styles.primaryButtonText}>Add paycheck</Text></Pressable>
+    </Card>
+  </Page>;
+}
+
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
