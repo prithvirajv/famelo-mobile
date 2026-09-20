@@ -24,10 +24,14 @@ import {
 } from "./src/iouLogic";
 import type { BillSplitParticipant, NetBalanceGroup } from "./src/iouLogic";
 import {
-  monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth
+  monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { ActualLog, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import {
+  isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment
+} from "./src/wealthLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -68,7 +72,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -134,6 +138,8 @@ function AppContent() {
   const activePrivateData = privateData || { journal: { entries: [] }, plans: { tasks: [] } };
   const page = subScreen === "sharedExpenses" ? <SharedExpenses state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "reports" ? <Reports state={state} onBack={() => setSubScreen(null)} />
+    : subScreen === "wealth" ? <Wealth state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
@@ -145,7 +151,8 @@ function AppContent() {
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
-      onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")} />;
+      onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} />;
 
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
@@ -1202,10 +1209,287 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void }) {
+const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
+const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];
+
+// Out of scope for this pass (see the mobile catch-up plan): stock/fund holdings
+// management with live price refresh, multi-currency display, and debt-to-budget-line
+// auto-EMI linking - this screen covers accounts/balances, plain net-worth rows, and
+// manual debt payoff tracking only.
+function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const currency = state.household.currency;
+  const today = () => new Date().toISOString().slice(0, 10);
+  const accounts = state.accounts || [];
+  const debts = state.goals?.debts || [];
+  const netWorthAssets = state.goals?.netWorth?.assets || [];
+  const netWorthLiabilities = state.goals?.netWorth?.liabilities || [];
+  const plainAssets = netWorthAssets.filter((asset) => !isHoldingAssetClass(asset.assetClass));
+  const holdingAssets = netWorthAssets.filter((asset) => isHoldingAssetClass(asset.assetClass));
+
+  const currentMonth = state.budget.month;
+  const trendMonths = computeTrailingMonthKeys(currentMonth, 6);
+  const trend = computeNetWorthTrend(state, trendMonths);
+  const maxTrend = Math.max(...trend.map((point) => Math.abs(point.value)), 1);
+  const netWorthNow = computeNetWorthAtDate(state, today());
+
+  const balances = accountsWithBalances(state, today());
+  const accountsByType = ACCOUNT_TYPE_ORDER.map((type) => ({ type, items: balances.filter((account) => account.type === type) })).filter((group) => group.items.length);
+
+  const [newAccountName, setNewAccountName] = useState("");
+  const [newAccountType, setNewAccountType] = useState<AccountType>("checking");
+  const [newAccountOpening, setNewAccountOpening] = useState("");
+
+  const submitAddAccount = async () => {
+    if (!newAccountName.trim()) return Alert.alert("Missing info", "Enter an account name.");
+    const account: Account = {
+      id: uniqueId("account"), name: newAccountName.trim(), type: newAccountType,
+      openingBalance: Number(newAccountOpening) || 0, netWorthAssetId: "", netWorthLiabilityId: "", createdAt: today()
+    };
+    await onSave({ ...state, accounts: [...accounts, account] });
+    setNewAccountName(""); setNewAccountOpening("");
+  };
+
+  const closeAccount = (accountId: string) => {
+    Alert.alert("Close this account?", "New transactions after today will be blocked, but you can still backdate entries.", [{ text: "Cancel" }, {
+      text: "Close", onPress: () => void onSave({ ...state, accounts: accounts.map((account) => account.id === accountId ? { ...account, closedAt: today() } : account) })
+    }]);
+  };
+
+  const deleteAccount = (accountId: string) => {
+    Alert.alert("Delete this account?", "This cannot be undone. Its linked net worth entry (if any) will be removed too.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: () => void onSave({
+        ...state, accounts: accounts.filter((account) => account.id !== accountId),
+        goals: state.goals ? {
+          ...state.goals,
+          netWorth: state.goals.netWorth ? {
+            assets: state.goals.netWorth.assets.filter((asset) => !accounts.find((account) => account.id === accountId && account.netWorthAssetId === asset.id)),
+            liabilities: state.goals.netWorth.liabilities.filter((liability) => !accounts.find((account) => account.id === accountId && account.netWorthLiabilityId === liability.id))
+          } : state.goals.netWorth
+        } : state.goals
+      })
+    }]);
+  };
+
+  const [payingDebtId, setPayingDebtId] = useState<string | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState("");
+
+  const confirmDebtPayment = async (debt: Debt) => {
+    const amount = Number(paymentAmount);
+    if (!(amount > 0)) return Alert.alert("Missing info", "Enter a positive payment amount.");
+    const result = applyDebtPayment(debt, amount, today(), () => uniqueId("payment"));
+    if (!result) return Alert.alert("Already paid off", "This debt has no remaining balance.");
+    const nextDebts = debts.map((item) => item === debt ? result.debt : item);
+    // A debt linked to a net-worth liability by id stays in sync one-way (debt -> liability),
+    // same as the web app - the liability's own .value is never independently editable once linked.
+    // Guarded on a truthy debt.id: the one-time web-side migration that assigns matching ids to
+    // every debt/liability pair only runs when the household has opened the web app at least once,
+    // so an un-migrated household can have several debts AND liabilities all missing an id - without
+    // this guard, `undefined === undefined` would match the debt to the first id-less liability found.
+    const nextLiabilities = debt.id ? netWorthLiabilities.map((liability) => liability.id === debt.id ? { ...liability, value: result.debt.balance } : liability) : netWorthLiabilities;
+    await onSave({ ...state, goals: { ...state.goals, debts: nextDebts, netWorth: state.goals?.netWorth ? { ...state.goals.netWorth, liabilities: nextLiabilities } : state.goals?.netWorth } });
+    setPayingDebtId(null); setPaymentAmount("");
+  };
+
+  const [newItemKind, setNewItemKind] = useState<"asset" | "liability">("asset");
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemValue, setNewItemValue] = useState("");
+  const [newItemAssetClass, setNewItemAssetClass] = useState<"cash" | "property" | "other">("cash");
+
+  const submitAddNetWorthItem = async () => {
+    if (!newItemName.trim() || !state.goals) return Alert.alert("Missing info", "Enter a name.");
+    const value = Number(newItemValue) || 0;
+    const netWorth = state.goals.netWorth || { assets: [], liabilities: [] };
+    const nextNetWorth = newItemKind === "asset"
+      ? { ...netWorth, assets: [...netWorth.assets, { id: uniqueId("asset"), name: newItemName.trim(), value, assetClass: newItemAssetClass }] }
+      : { ...netWorth, liabilities: [...netWorth.liabilities, { id: uniqueId("liability"), name: newItemName.trim(), value }] };
+    await onSave({ ...state, goals: { ...state.goals, netWorth: nextNetWorth } });
+    setNewItemName(""); setNewItemValue("");
+  };
+
+  const deleteNetWorthItem = (kind: "asset" | "liability", id: string) => {
+    if (!state.goals?.netWorth) return;
+    Alert.alert(`Delete this ${kind}?`, "This cannot be undone.", [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: () => void onSave({
+        ...state, goals: {
+          ...state.goals, netWorth: {
+            assets: kind === "asset" ? state.goals!.netWorth!.assets.filter((item) => item.id !== id) : state.goals!.netWorth!.assets,
+            liabilities: kind === "liability" ? state.goals!.netWorth!.liabilities.filter((item) => item.id !== id) : state.goals!.netWorth!.liabilities
+          }
+        }
+      })
+    }]);
+  };
+
+  return <Page>
+    <SubScreenHeader title="Wealth" onBack={onBack} />
+
+    <Card>
+      <Text style={styles.cardTitle}>Net worth</Text>
+      <Text style={styles.heroValue}>{money(netWorthNow, currency)}</Text>
+      <Text style={styles.muted}>Trailing 6 months</Text>
+      <View style={styles.cashFlowChart}>
+        {trend.map((point) => <View key={point.month} style={styles.cashFlowColumn}>
+          <View style={styles.cashFlowBars}><View style={[styles.cashFlowBar, { height: Math.max(4, (Math.abs(point.value) / maxTrend) * 100), backgroundColor: point.value >= 0 ? colors.green : colors.coral }]} /></View>
+          <Text style={styles.cashFlowLabel}>{point.month.slice(5)}</Text>
+        </View>)}
+      </View>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Accounts</Text>
+      {accountsByType.length
+        ? accountsByType.map((group) => <View key={group.type}>
+            <Text style={[styles.label, { marginTop: 10 }]}>{ACCOUNT_TYPE_LABELS[group.type]}</Text>
+            {group.items.map((account) => <View key={account.id} style={styles.row}>
+              <View style={styles.rowCopy}>
+                <Text style={styles.rowTitle}>{account.name}{account.closedAt ? " (closed)" : ""}</Text>
+                <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}</Text>
+              </View>
+              <Text style={[styles.rowValue, account.type === "credit_card" && account.balance > 0 && { color: colors.coral }]}>{money(account.balance, currency)}</Text>
+              {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : null}
+              <Pressable style={styles.planStepperButton} onPress={() => deleteAccount(account.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+            </View>)}
+          </View>)
+        : <Text style={styles.muted}>No accounts yet</Text>}
+      <Text style={[styles.label, { marginTop: 14 }]}>Add account</Text>
+      <TextInput style={styles.input} value={newAccountName} onChangeText={setNewAccountName} placeholder="Checking" />
+      <View style={styles.choiceRow}>
+        {ACCOUNT_TYPE_ORDER.map((type) => <Pressable key={type} style={[styles.choice, newAccountType === type && styles.choiceActive]} onPress={() => setNewAccountType(type)}>
+          <Text style={[styles.choiceText, newAccountType === type && styles.choiceTextActive]}>{ACCOUNT_TYPE_LABELS[type]}</Text>
+        </Pressable>)}
+      </View>
+      <Text style={styles.label}>Opening balance</Text>
+      <TextInput style={styles.input} value={newAccountOpening} onChangeText={setNewAccountOpening} placeholder="0.00" keyboardType="decimal-pad" />
+      <Pressable style={styles.secondarySmall} onPress={() => void submitAddAccount()}><Text style={styles.secondaryButtonText}>Add account</Text></Pressable>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Debt payoff tracker</Text>
+      {debts.length ? debts.map((debt, index) => {
+        const progress = debtPayoffProgressPercent(debt);
+        const isPaying = payingDebtId === (debt.id || String(index));
+        return <View key={debt.id || index} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
+          <View style={styles.iouPersonHead}>
+            <Text style={styles.rowTitle}>{debt.name}</Text>
+            <Text style={styles.rowValue}>{money(debt.balance, currency)}</Text>
+          </View>
+          <Text style={styles.rowDetail}>{debt.rate}% APR · {money(debt.minimum, currency)}/mo minimum</Text>
+          <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${progress}%` }]} /></View>
+          <Text style={styles.muted}>{progress}% paid off</Text>
+          {isPaying
+            ? <View style={[styles.actionRow, { marginTop: 8 }]}>
+                <TextInput style={[styles.input, { flex: 1 }]} value={paymentAmount} onChangeText={setPaymentAmount} keyboardType="decimal-pad" placeholder="Payment amount" />
+                <Pressable style={styles.secondarySmall} onPress={() => void confirmDebtPayment(debt)}><Text style={styles.secondaryButtonText}>Confirm</Text></Pressable>
+              </View>
+            : <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => { setPayingDebtId(debt.id || String(index)); setPaymentAmount(""); }}><Text style={styles.secondaryButtonText}>Record EMI payment</Text></Pressable>}
+        </View>;
+      }) : <Text style={styles.muted}>No debts tracked</Text>}
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Other assets &amp; liabilities</Text>
+      <Text style={styles.muted}>Stock and fund holdings aren't editable here yet — use the web app to manage those.</Text>
+      {plainAssets.length ? <Text style={[styles.label, { marginTop: 10 }]}>Assets</Text> : null}
+      {plainAssets.map((asset, index) => <Pressable key={asset.id || index} onLongPress={() => asset.id && deleteNetWorthItem("asset", asset.id)}>
+        <Row title={asset.name} detail={asset.assetClass || "other"} value={money(assetValue(asset), currency)} />
+      </Pressable>)}
+      {holdingAssets.length ? <Text style={styles.muted}>{holdingAssets.length} stock/fund holding{holdingAssets.length === 1 ? "" : "s"} (view on web)</Text> : null}
+      {netWorthLiabilities.length ? <Text style={[styles.label, { marginTop: 10 }]}>Liabilities</Text> : null}
+      {netWorthLiabilities.map((liability, index) => <Pressable key={liability.id || index} onLongPress={() => liability.id && deleteNetWorthItem("liability", liability.id)}>
+        <Row title={liability.name} detail="Liability" value={money(Number(liability.value || 0), currency)} />
+      </Pressable>)}
+      <Text style={[styles.label, { marginTop: 14 }]}>Add asset or liability</Text>
+      <View style={styles.choiceRow}>
+        <Pressable style={[styles.choice, newItemKind === "asset" && styles.choiceActive]} onPress={() => setNewItemKind("asset")}><Text style={[styles.choiceText, newItemKind === "asset" && styles.choiceTextActive]}>Asset</Text></Pressable>
+        <Pressable style={[styles.choice, newItemKind === "liability" && styles.choiceActive]} onPress={() => setNewItemKind("liability")}><Text style={[styles.choiceText, newItemKind === "liability" && styles.choiceTextActive]}>Liability</Text></Pressable>
+      </View>
+      <TextInput style={styles.input} value={newItemName} onChangeText={setNewItemName} placeholder="Name" />
+      {newItemKind === "asset" ? <View style={styles.choiceRow}>
+        {(["cash", "property", "other"] as const).map((assetClass) => <Pressable key={assetClass} style={[styles.choice, newItemAssetClass === assetClass && styles.choiceActive]} onPress={() => setNewItemAssetClass(assetClass)}>
+          <Text style={[styles.choiceText, newItemAssetClass === assetClass && styles.choiceTextActive]}>{assetClass === "cash" ? "Cash" : assetClass === "property" ? "Property" : "Other"}</Text>
+        </Pressable>)}
+      </View> : null}
+      <Text style={styles.label}>Value</Text>
+      <TextInput style={styles.input} value={newItemValue} onChangeText={setNewItemValue} placeholder="0.00" keyboardType="decimal-pad" />
+      <Pressable style={styles.secondarySmall} onPress={() => void submitAddNetWorthItem()}><Text style={styles.secondaryButtonText}>Add {newItemKind}</Text></Pressable>
+      <Text style={styles.muted}>Long-press a row to delete it.</Text>
+    </Card>
+  </Page>;
+}
+
+type BillRow = { id: string; name: string; category: string; color: string; planned: number; dueDay: number; paid: boolean };
+
+// A bill isn't its own object - it's just a budget line with dueDay set (see
+// billsRows() on web, "Bills are the lines in your Budget with a due date
+// set"). No add/edit UI here either, for the same reason: open Budget to add
+// a new one or change an amount.
+function billsRows(state: HouseholdState): BillRow[] {
+  const dismissed = state.budget.dismissedReminders?.[state.budget.month] || [];
+  const rows: BillRow[] = [];
+  state.budget.categories.forEach((category) => {
+    category.lines.forEach((line) => {
+      if (!line.dueDay) return;
+      const spent = spentByLineInMonth(state.transactions, line.id, state.budget.month);
+      const planned = Number(line.planned || 0);
+      rows.push({
+        id: line.id, name: line.name, category: category.name, color: category.color, planned, dueDay: line.dueDay,
+        paid: spent >= planned || dismissed.includes(`bill:${line.id}`)
+      });
+    });
+  });
+  return rows.sort((a, b) => a.dueDay - b.dueDay);
+}
+
+function Bills({ state, onBack, onOpenBudget }: { state: HouseholdState; onBack: () => void; onOpenBudget: () => void }) {
+  const currency = state.household.currency;
+  const today = new Date().getDate();
+  const [filter, setFilter] = useState<"all" | "due" | "overdue">("all");
+  const allBills = billsRows(state);
+  const filtered = allBills.filter((bill) => {
+    if (filter === "due") return !bill.paid && bill.dueDay >= today && bill.dueDay - today <= 7;
+    if (filter === "overdue") return !bill.paid && bill.dueDay < today;
+    return true;
+  });
+  const byCategory = new Map<string, { name: string; color: string; total: number }>();
+  allBills.forEach((bill) => {
+    const existing = byCategory.get(bill.category) || { name: bill.category, color: bill.color, total: 0 };
+    existing.total += bill.planned;
+    byCategory.set(bill.category, existing);
+  });
+  const categoryBreakdown = [...byCategory.values()].sort((a, b) => b.total - a.total);
+  const maxCategory = Math.max(1, ...categoryBreakdown.map((category) => category.total));
+
+  return <Page>
+    <SubScreenHeader title="Bills" onBack={onBack} />
+    <Card>
+      <View style={styles.choiceRow}>
+        {([["all", "All"], ["due", "Due soon"], ["overdue", "Overdue"]] as const).map(([value, label]) => <Pressable key={value} style={[styles.choice, filter === value && styles.choiceActive]} onPress={() => setFilter(value)}>
+          <Text style={[styles.choiceText, filter === value && styles.choiceTextActive]}>{label}</Text>
+        </Pressable>)}
+      </View>
+      {filtered.length ? filtered.map((bill) => <Row key={bill.id} title={bill.name}
+        detail={`${bill.category} · Due day ${bill.dueDay}${bill.paid ? " · Paid" : bill.dueDay < today ? " · Overdue" : ""}`}
+        value={money(bill.planned, currency)} />) : <Text style={styles.muted}>No bills match this filter.</Text>}
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>By category</Text>
+      {categoryBreakdown.length ? categoryBreakdown.map((category) => <View key={category.name} style={{ marginBottom: 10 }}>
+        <View style={styles.iouPersonHead}><Text style={styles.rowDetail}>{category.name}</Text><Text style={styles.rowDetail}>{money(category.total, currency)}</Text></View>
+        <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.round((category.total / maxCategory) * 100)}%`, backgroundColor: category.color }]} /></View>
+      </View>) : <Text style={styles.muted}>No recurring bills yet.</Text>}
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>Add or edit a bill</Text>
+      <Text style={styles.muted}>Bills are the lines in your Budget with a due date set — open Budget to add a new one or change an amount.</Text>
+      <Pressable style={styles.secondarySmall} onPress={onOpenBudget}><Text style={styles.secondaryButtonText}>Open Budget →</Text></Pressable>
+    </Card>
+  </Page>;
+}
+
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Card><Text style={styles.cardTitle}>Household wealth</Text><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Card><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
@@ -1233,5 +1517,6 @@ const styles = StyleSheet.create({
   subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
   iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   reportSubcategoryRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
-  cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 }
+  cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
+  progressTrack: { height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: "hidden", marginTop: 8 }, progressFill: { height: 8, borderRadius: 4, backgroundColor: colors.green }
 });
