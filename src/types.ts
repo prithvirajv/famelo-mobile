@@ -18,7 +18,7 @@ export type CalendarEvent = {
 };
 export type Chore = { id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string; recurrence?: string };
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
-export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string };
+export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string; createdAt?: string };
 export type Recipe = { id: string; name: string; ingredients: string[]; calories: number; protein: number };
 export type HouseholdAccess = { canManage: boolean; members: Array<{ name: string; email: string; role: string; status: string; isOwner: boolean }> };
 export type PlannedMeal = { month?: string; week?: number; day: string; slot?: string; meal: string; recipeId?: string; servings: number };

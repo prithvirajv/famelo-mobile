@@ -97,6 +97,18 @@ test("Calendar reminders support a repeat recurrence, matching web's advance-on-
   assert.match(body, /onSave\(next\)/);
 });
 
+test("Notes support real CRUD (add/edit/pin/archive/delete/checklist-add), not just checklist toggling", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+  assert.match(types, /createdAt\?: string/);
+  const body = extractFunctionSource(app, "Notes");
+  assert.match(body, /trashed: true/, "delete should soft-delete via trashed, matching web");
+  assert.match(body, /pinned: !entry\.pinned/);
+  assert.match(body, /archived: !entry\.archived/);
+  assert.match(body, /checklist: \[\.\.\.entry\.checklist,/, "should support adding a new checklist item, not just toggling existing ones");
+  assertOnlyWholeStateSaves(body, "Notes");
+});
+
 test("Documents track expiry date and last-opened metadata, matching web", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");

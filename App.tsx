@@ -342,15 +342,111 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   </Card>{weekDayDates.map(({ day: mealDay, date }) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text><Text style={styles.muted}>{formatShortDate(date)}</Text>{slots.flatMap((mealSlot) => { const items = current.filter((item) => item.day === mealDay && (item.slot || "Dinner") === mealSlot); return items.length ? items.map((item, index) => <Row key={`${mealSlot}-${item.recipeId}-${index}`} title={item.meal} detail={`${mealSlot} · ${item.servings} servings`} />) : [<Pressable key={`${mealSlot}-open`} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>]; })}</Card>)}</Page>;
 }
 
+const noteColorOptions = [
+  { value: "#ffffff", label: "White" },
+  { value: "#fff7d6", label: "Yellow" },
+  { value: "#eef7ff", label: "Blue" },
+  { value: "#eaf8ef", label: "Green" },
+  { value: "#fff0ee", label: "Coral" }
+];
+
+function sortNotes(notes: Note[]): Note[] {
+  return [...notes].sort((a, b) => Number(b.pinned) - Number(a.pinned) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
 function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
-  const notes = state.notes.entries.filter((note) => !note.trashed && !note.archived);
+  const [addTitle, setAddTitle] = useState(""); const [addBody, setAddBody] = useState(""); const [addColor, setAddColor] = useState("#ffffff");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState(""); const [editBody, setEditBody] = useState(""); const [editColor, setEditColor] = useState("#ffffff");
+  const [checklistDrafts, setChecklistDrafts] = useState<Record<string, string>>({});
+  const [showArchived, setShowArchived] = useState(false);
+
+  const notes = sortNotes(state.notes.entries.filter((note) => !note.trashed && !note.archived));
+  const archivedNotes = sortNotes(state.notes.entries.filter((note) => !note.trashed && note.archived));
+
+  const saveNotes = (entries: Note[]) => onSave({ ...state, notes: { ...state.notes, entries } });
+
+  const addNote = async () => {
+    if (!addTitle.trim() && !addBody.trim()) return;
+    const note: Note = { id: `note-${Date.now()}`, title: addTitle.trim(), body: addBody.trim(), checklist: [], pinned: false, archived: false, trashed: false, color: addColor, createdAt: new Date().toISOString() };
+    await saveNotes([...state.notes.entries, note]);
+    setAddTitle(""); setAddBody(""); setAddColor("#ffffff");
+  };
+
+  const startEdit = (note: Note) => { setEditingId(note.id); setEditTitle(note.title); setEditBody(note.body); setEditColor(note.color || "#ffffff"); };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = async () => {
+    const noteId = editingId;
+    if (!noteId) return;
+    await saveNotes(state.notes.entries.map((entry) => entry.id === noteId ? { ...entry, title: editTitle.trim(), body: editBody.trim(), color: editColor } : entry));
+    setEditingId(null);
+  };
+
+  const togglePin = (note: Note) => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, pinned: !entry.pinned } : entry));
+  const toggleArchive = (note: Note) => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, archived: !entry.archived } : entry));
+  const deleteNote = (note: Note) => {
+    Alert.alert("Delete note?", note.title || "Untitled note", [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, trashed: true } : entry)) }]);
+  };
+
   const toggle = (note: Note, itemId: string) => {
     const current = note.checklist.find((item) => item.id === itemId);
     if (!current) return;
     const nextChecklist = applyChecklistToggle(note.checklist, itemId, !current.done);
-    onSave({ ...state, notes: { ...state.notes, entries: state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, checklist: nextChecklist } : entry) } });
+    void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, checklist: nextChecklist } : entry));
   };
-  return <Page><Title eyebrow="NOTES">Household notes</Title>{notes.map((note) => <View key={note.id} style={[styles.note, { backgroundColor: note.color || colors.surface }]}><View style={styles.noteHeader}><Text style={styles.noteTitle}>{note.title}</Text>{note.pinned ? <Ionicons name="pin" size={18} color={colors.gold} /> : null}</View>{note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}{note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => void toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}</View>)}</Page>;
+
+  const addChecklistItem = (note: Note) => {
+    const text = (checklistDrafts[note.id] || "").trim();
+    if (!text) return;
+    void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, checklist: [...entry.checklist, { id: `item-${Date.now()}`, text, done: false }] } : entry));
+    setChecklistDrafts((prev) => ({ ...prev, [note.id]: "" }));
+  };
+
+  const renderColorChips = (selected: string, onSelect: (value: string) => void) => (
+    <View style={styles.choiceRow}>{noteColorOptions.map((option) => <Pressable key={option.value} style={[styles.colorSwatch, { backgroundColor: option.value }, selected === option.value && styles.colorSwatchActive]} onPress={() => onSelect(option.value)} accessibilityLabel={option.label} />)}</View>
+  );
+
+  const renderNote = (note: Note) => {
+    if (editingId === note.id) {
+      return <View key={note.id} style={[styles.note, { backgroundColor: editColor || colors.surface }]}>
+        <TextInput style={styles.input} value={editTitle} onChangeText={setEditTitle} placeholder="Title" />
+        <TextInput style={[styles.input, styles.multilineInput]} value={editBody} onChangeText={setEditBody} placeholder="Note" multiline />
+        {renderColorChips(editColor, setEditColor)}
+        <View style={styles.actionRow}>
+          <Pressable style={styles.primaryButton} onPress={() => void saveEdit()}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={cancelEdit}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+        </View>
+      </View>;
+    }
+    return <View key={note.id} style={[styles.note, { backgroundColor: note.color || colors.surface }]}>
+      <View style={styles.noteHeader}>
+        <Pressable style={styles.rowCopy} onPress={() => startEdit(note)}><Text style={styles.noteTitle}>{note.title || "Untitled note"}</Text></Pressable>
+        <Pressable onPress={() => togglePin(note)}><Ionicons name={note.pinned ? "pin" : "pin-outline"} size={18} color={note.pinned ? colors.gold : colors.muted} /></Pressable>
+        <Pressable onPress={() => toggleArchive(note)}><Ionicons name={note.archived ? "arrow-undo-outline" : "archive-outline"} size={18} color={colors.muted} /></Pressable>
+        <Pressable onPress={() => deleteNote(note)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>
+      {note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}
+      {note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={checklistDrafts[note.id] || ""} onChangeText={(value) => setChecklistDrafts((prev) => ({ ...prev, [note.id]: value }))} placeholder="Add checklist item" onSubmitEditing={() => addChecklistItem(note)} />
+        <Pressable style={styles.secondarySmall} onPress={() => addChecklistItem(note)}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+      </View>
+    </View>;
+  };
+
+  return <Page><Title eyebrow="NOTES">Household notes</Title>
+    <Card>
+      <TextInput style={styles.input} value={addTitle} onChangeText={setAddTitle} placeholder="Title" />
+      <TextInput style={[styles.input, styles.multilineInput]} value={addBody} onChangeText={setAddBody} placeholder="Note" multiline />
+      {renderColorChips(addColor, setAddColor)}
+      <Pressable style={styles.primaryButton} onPress={() => void addNote()}><Text style={styles.primaryButtonText}>Add note</Text></Pressable>
+    </Card>
+    {notes.map(renderNote)}
+    {archivedNotes.length ? <>
+      <Pressable style={styles.secondarySmall} onPress={() => setShowArchived((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showArchived ? "Hide" : "Show"} archived ({archivedNotes.length})</Text></Pressable>
+      {showArchived ? archivedNotes.map(renderNote) : null}
+    </> : null}
+  </Page>;
 }
 
 function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (journal: PrivateData["journal"]) => Promise<void> }) {
@@ -1789,7 +1885,8 @@ const styles = StyleSheet.create({
   metricGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, metric: { width: "48%", minHeight: 96, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderTopWidth: 4, borderRadius: 8, padding: 13 }, metricLabel: { color: colors.muted, fontSize: 12, fontWeight: "800", textTransform: "uppercase" }, metricValue: { color: colors.text, fontWeight: "800", fontSize: 22, marginTop: 8 },
   row: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: 10 }, rowCopy: { flex: 1 }, rowTitle: { color: colors.text, fontWeight: "700", fontSize: 15 }, rowDetail: { color: colors.muted, fontSize: 12, marginTop: 3 }, rowValue: { color: colors.text, fontWeight: "800", fontSize: 13, maxWidth: "43%", textAlign: "right" }, badge: { color: colors.green, backgroundColor: colors.greenSoft, fontWeight: "700", fontSize: 11, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 12, overflow: "hidden" },
   categoryHeader: { flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 4 }, dot: { height: 20, width: 5, borderRadius: 3 },
-  note: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 16 }, noteHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, noteTitle: { color: colors.text, fontWeight: "800", fontSize: 20 }, noteBody: { color: colors.text, marginVertical: 10, lineHeight: 21 }, checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 }, checkRowChild: { marginLeft: 24 }, checkText: { flex: 1, color: colors.text, fontSize: 15 }, done: { textDecorationLine: "line-through", color: colors.muted },
+  note: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 16 }, noteHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 }, noteTitle: { color: colors.text, fontWeight: "800", fontSize: 20 }, noteBody: { color: colors.text, marginVertical: 10, lineHeight: 21 }, checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 }, checkRowChild: { marginLeft: 24 }, checkText: { flex: 1, color: colors.text, fontSize: 15 }, done: { textDecorationLine: "line-through", color: colors.muted },
+  colorSwatch: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: colors.border }, colorSwatchActive: { borderWidth: 3, borderColor: colors.green },
   journalPhotoRow: { marginTop: 10 }, journalPhoto: { width: 72, height: 72, borderRadius: 8, marginRight: 8 },
   multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
