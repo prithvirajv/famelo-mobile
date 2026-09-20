@@ -83,6 +83,20 @@ test("Paychecks is reachable from More, materializes occurrences on load, and sa
   assertOnlyWholeStateSaves(body, "Paychecks");
 });
 
+test("Calendar reminders support a repeat recurrence, matching web's advance-on-complete pattern", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+  assert.match(types, /recurrence\?: ReminderRecurrence/);
+  const body = extractFunctionSource(app, "Calendar");
+  assert.match(body, /advanceReminderDate/);
+  assert.match(body, /isReminderComplete/);
+  // Calendar predates the onSave({ ...state, ... }) literal convention used by newer screens -
+  // it already clones the full state up front (structuredClone(state)) and saves that clone,
+  // which is the same whole-state guarantee, just written differently.
+  assert.match(body, /structuredClone\(state\)/);
+  assert.match(body, /onSave\(next\)/);
+});
+
 test("Plan tasks can link to a savings goal, matching web's legacy weekly/monthly goalName field", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");

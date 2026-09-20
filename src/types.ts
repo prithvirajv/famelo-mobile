@@ -8,7 +8,14 @@ export type Transaction = {
   date: string; payee: string; lineId: string; amount: number; memo?: string; tags?: string[];
   accountId?: string; orderNumber?: string; splits?: TransactionSplit[]; categoryName?: string; subcategoryName?: string;
 };
-export type CalendarEvent = { id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string };
+export type ReminderRecurrence = "once" | "weekly" | "monthly" | "yearly";
+// recurrence/completedBy only apply to type: "reminder" events (matches web's app.js) - a
+// completed recurring reminder self-advances to its next due date and clears completedBy
+// (see advanceReminderDate in calendarLogic.ts), rather than tracking per-occurrence history.
+export type CalendarEvent = {
+  id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string;
+  recurrence?: ReminderRecurrence; completedBy?: string[];
+};
 export type Chore = { id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string; recurrence?: string };
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
 export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string };
