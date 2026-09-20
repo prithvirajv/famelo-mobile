@@ -18,7 +18,7 @@ import {
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
   timeToMinutes, minutesToTime, snapMinutes, comparePlannedToActual
 } from "./src/planLogic";
-import { formatFileSize, folderPath, childFolders, documentsInFolder } from "./src/documentsLogic";
+import { formatFileSize, folderPath, childFolders, documentsInFolder, documentExpiryBadge, documentOpenedLabel } from "./src/documentsLogic";
 import {
   uniqueId, computeBillSplitAmounts, netBalancesByPerson, settleUpPersonIous, friendsWithoutEmailFromIous
 } from "./src/iouLogic";
@@ -149,7 +149,7 @@ function AppContent() {
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} sinkingFundNames={(state.goals?.sinkingFunds || []).map((fund) => fund.name)} />
-    : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} />
+    : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} viewerName={user.name} />
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
@@ -697,16 +697,19 @@ function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateD
   </Page>;
 }
 
-function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, onDownload, onDelete, onLinkNote, onMove, onLinkWealth }: {
-  document: Document; notes: Note[]; folders: DocumentsData["folders"]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[];
+function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, viewerName, onDownload, onDelete, onLinkNote, onMove, onLinkWealth, onChangeExpiry }: {
+  document: Document; notes: Note[]; folders: DocumentsData["folders"]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[]; viewerName: string;
   onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void;
-  onLinkWealth: (wealthItemType: WealthItemType | null, wealthItemId: string | null) => void
+  onLinkWealth: (wealthItemType: WealthItemType | null, wealthItemId: string | null) => void; onChangeExpiry: (expiryDate: string | null) => void
 }) {
   const [showNotePicker, setShowNotePicker] = useState(false);
+  const [expiryDraft, setExpiryDraft] = useState(document.expiryDate || "");
   const linkedNote = document.noteId ? notes.find((note) => note.id === document.noteId) : null;
   const linkedWealthItem = document.wealthItemId
     ? (document.wealthItemType === "liability" ? wealthLiabilities : wealthAssets).find((item) => item.id === document.wealthItemId)
     : null;
+  const expiryBadge = documentExpiryBadge(document.expiryDate);
+  const expiryToneColor = expiryBadge?.tone === "danger" ? colors.coral : expiryBadge?.tone === "warning" ? colors.gold : colors.muted;
 
   const promptMove = () => {
     const options = [
@@ -732,8 +735,17 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
       <View style={styles.rowCopy}>
         <Text style={styles.rowTitle}>{document.name}</Text>
         <Text style={styles.rowDetail}>{[formatFileSize(document.sizeBytes), document.status === "pending" ? "Uploading…" : document.contentType].filter(Boolean).join(" · ")}</Text>
+        <Text style={styles.rowDetail}>{documentOpenedLabel(document.lastOpenedAt, document.lastOpenedByName, viewerName)}</Text>
         {linkedNote ? <Text style={styles.rowDetail}>Linked to “{linkedNote.title || "Untitled note"}”</Text> : null}
         {linkedWealthItem ? <Text style={styles.rowDetail}>Tagged to {document.wealthItemType === "liability" ? "Liability" : "Asset"}: {linkedWealthItem.name}</Text> : null}
+        {expiryBadge ? <Text style={[styles.rowDetail, { color: expiryToneColor }]}>{expiryBadge.label}</Text> : null}
+        <View style={styles.actionRow}>
+          <TextInput
+            style={[styles.input, { flex: 1 }]} value={expiryDraft} onChangeText={setExpiryDraft}
+            placeholder="Expiry date (YYYY-MM-DD)"
+            onEndEditing={() => onChangeExpiry(expiryDraft.trim() || null)}
+          />
+        </View>
       </View>
       <Pressable onPress={promptMove}><Ionicons name="folder-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={onDownload}><Ionicons name="download-outline" size={20} color={colors.text} /></Pressable>
@@ -754,7 +766,7 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
   </View>;
 }
 
-function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: Note[]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[] }) {
+function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }: { notes: Note[]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[]; viewerName: string }) {
   const [data, setData] = useState<DocumentsData | null>(null);
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -857,7 +869,16 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
     try {
       const { url } = await api.documentDownloadUrl(documentId);
       await Linking.openURL(url);
+      // Separate from the download-url fetch above on purpose - only this explicit
+      // open/download click counts as "opened" (matches web's /api/documents/:id/open).
+      await api.openDocument(documentId);
+      await load();
     } catch (cause) { showError("Could not open document", cause); }
+  };
+
+  const changeExpiry = async (documentId: string, expiryDate: string | null) => {
+    try { await api.updateDocument(documentId, { expiryDate }); await load(); }
+    catch (cause) { showError("Could not update expiry date", cause); }
   };
 
   const deleteDocument = (documentId: string) => {
@@ -937,12 +958,13 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities }: { notes: No
     <Card>{documents.length
       ? documents.map((document) => <DocumentRow
           key={document.id} document={document} notes={notes} folders={data.folders}
-          wealthAssets={wealthAssets} wealthLiabilities={wealthLiabilities}
+          wealthAssets={wealthAssets} wealthLiabilities={wealthLiabilities} viewerName={viewerName}
           onDownload={() => void downloadDocument(document.id)}
           onDelete={() => deleteDocument(document.id)}
           onLinkNote={(noteId) => void linkNote(document.id, noteId)}
           onMove={(folderId) => void moveDocument(document.id, folderId)}
           onLinkWealth={(wealthItemType, wealthItemId) => void linkWealthItem(document.id, wealthItemType, wealthItemId)}
+          onChangeExpiry={(expiryDate) => void changeExpiry(document.id, expiryDate)}
         />)
       : <Text style={styles.muted}>No documents in this folder yet.</Text>}</Card>
   </Page>;

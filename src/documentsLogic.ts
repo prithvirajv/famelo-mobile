@@ -30,6 +30,31 @@ export function documentsInFolder(documents: Document[], folderId: string | null
   return documents.filter((document) => (document.folderId || null) === (folderId || null));
 }
 
+function dateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+export type DocumentExpiryBadge = { label: string; tone: "danger" | "warning" | "neutral" };
+
+// Color-coded the same way web's documentExpiryBadge is: the closer the expiration, the more
+// urgent the tone, so a household scanning Documents can spot an about-to-lapse insurance
+// policy or lease without opening each file.
+export function documentExpiryBadge(expiryDate: string | null | undefined, today: Date = new Date()): DocumentExpiryBadge | null {
+  if (!expiryDate) return null;
+  const days = Math.ceil((new Date(`${expiryDate}T00:00:00`).getTime() - new Date(`${dateKey(today)}T00:00:00`).getTime()) / 86400000);
+  if (days < 0) return { label: `Expired ${Math.abs(days)}d ago`, tone: "danger" };
+  if (days <= 30) return { label: `Expires in ${days}d`, tone: "danger" };
+  if (days <= 90) return { label: `Expires in ${days}d`, tone: "warning" };
+  return { label: `Expires ${expiryDate}`, tone: "neutral" };
+}
+
+export function documentOpenedLabel(lastOpenedAt: string | null | undefined, lastOpenedByName: string | null | undefined, viewerName: string | undefined): string {
+  if (!lastOpenedAt) return "Not opened yet";
+  const isYou = Boolean(lastOpenedByName) && lastOpenedByName === viewerName;
+  const who = isYou ? "You" : lastOpenedByName || "Someone";
+  return `${who} opened · ${new Date(lastOpenedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
 export function wouldCreateFolderCycle(folders: DocumentFolder[], folderId: string, newParentId: string | null): boolean {
   if (!newParentId) return false;
   if (folderId === newParentId) return true;

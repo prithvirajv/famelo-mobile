@@ -141,5 +141,10 @@ export type Document = {
   wealthItemType: WealthItemType | null; wealthItemId: string | null;
   name: string; description: string; contentType: string; sizeBytes: number | null;
   status: DocumentStatus; createdAt: string; updatedAt: string;
+  // Set by POST /api/documents/:id/open, distinct from the download-url fetch that also runs in
+  // the background to rasterize thumbnails - only an explicit Open/Download click counts, matching
+  // Google Drive's "You opened" semantics (see app.js's comment on the same endpoint).
+  lastOpenedBy?: string | null; lastOpenedByName?: string | null; lastOpenedAt?: string | null;
+  expiryDate?: string | null;
 };
 export type DocumentsData = { folders: DocumentFolder[]; documents: Document[] };

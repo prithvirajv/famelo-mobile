@@ -97,6 +97,22 @@ test("Calendar reminders support a repeat recurrence, matching web's advance-on-
   assert.match(body, /onSave\(next\)/);
 });
 
+test("Documents track expiry date and last-opened metadata, matching web", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+  assert.match(types, /expiryDate\?: string \| null/);
+  assert.match(types, /lastOpenedAt\?: string \| null/);
+  assert.match(api, /openDocument:/);
+  assert.match(api, /\/api\/documents\/\$\{documentId\}\/open/);
+  const documentRow = extractFunctionSource(app, "DocumentRow");
+  assert.match(documentRow, /documentExpiryBadge/);
+  assert.match(documentRow, /documentOpenedLabel/);
+  const screen = extractFunctionSource(app, "DocumentsScreen");
+  assert.match(screen, /api\.openDocument/);
+  assert.match(screen, /expiryDate/);
+});
+
 test("Plan tasks can link to a savings goal, matching web's legacy weekly/monthly goalName field", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
