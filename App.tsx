@@ -31,7 +31,7 @@ import type { Account, AccountType, ActualLog, ChoreRecurrence, Debt, Document, 
 import { advanceChoreDate, advanceReminderDate, choreCadenceLabels, isReminderComplete } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated } from "./src/paychecksLogic";
 
@@ -1464,10 +1464,10 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
 const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
 const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];
 
-// Out of scope for this pass (see the mobile catch-up plan): stock/fund holdings
-// management with live price refresh, multi-currency display, and debt-to-budget-line
-// auto-EMI linking - this screen covers accounts/balances, plain net-worth rows, and
-// manual debt payoff tracking only.
+// Stock/fund holdings are shown read-only (grouped, with gain/loss when a cost basis is
+// set) but not editable here. Out of scope for this pass (see the mobile catch-up plan):
+// adding/editing individual holdings, live price refresh, multi-currency display, and
+// debt-to-budget-line auto-EMI linking.
 function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
   const currency = state.household.currency;
   const today = () => new Date().toISOString().slice(0, 10);
@@ -1476,7 +1476,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
   const netWorthAssets = state.goals?.netWorth?.assets || [];
   const netWorthLiabilities = state.goals?.netWorth?.liabilities || [];
   const plainAssets = netWorthAssets.filter((asset) => !isHoldingAssetClass(asset.assetClass));
-  const holdingAssets = netWorthAssets.filter((asset) => isHoldingAssetClass(asset.assetClass));
+  const holdingGroups = groupStockHoldings(netWorthAssets);
 
   const currentMonth = state.budget.month;
   const trendMonths = computeTrailingMonthKeys(currentMonth, 6);
@@ -1700,13 +1700,32 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     </Card>
 
     <Card>
+      <Text style={styles.cardTitle}>Stock &amp; fund holdings</Text>
+      <Text style={styles.muted}>Read-only here — add, edit, and refresh live prices from the web app.</Text>
+      {holdingGroups.length ? holdingGroups.map((group) => {
+        const groupTotal = group.items.reduce((sum, item) => sum + assetValue(item), 0);
+        const gainLoss = groupGainLoss(group.items);
+        return <View key={group.groupId} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
+          <View style={styles.iouPersonHead}>
+            <Text style={styles.rowTitle}>{group.groupName}</Text>
+            <Text style={styles.rowValue}>{money(groupTotal, currency)}</Text>
+          </View>
+          <Text style={styles.rowDetail}>{assetClassLabelForHoldings(group.items)} · {group.items.length} holding{group.items.length === 1 ? "" : "s"}{gainLoss.hasCostBasis ? ` · ${gainLoss.amount >= 0 ? "+" : ""}${money(gainLoss.amount, currency)} (${gainLoss.percent >= 0 ? "+" : ""}${gainLoss.percent.toFixed(1)}%)` : ""}</Text>
+          {group.items.map((item) => {
+            const itemGainLoss = holdingGainLoss(item);
+            const detail = [item.symbol ? `${item.symbol}${item.shares ? ` · ${item.shares} sh` : ""}` : null, itemGainLoss.hasCostBasis ? `${itemGainLoss.percent >= 0 ? "+" : ""}${itemGainLoss.percent.toFixed(1)}%` : null].filter(Boolean).join(" · ");
+            return <Row key={item.id || item.name} title={item.name} detail={detail} value={money(assetValue(item), currency)} />;
+          })}
+        </View>;
+      }) : <Text style={styles.muted}>No stock or fund holdings yet</Text>}
+    </Card>
+
+    <Card>
       <Text style={styles.cardTitle}>Other assets &amp; liabilities</Text>
-      <Text style={styles.muted}>Stock and fund holdings aren't editable here yet — use the web app to manage those.</Text>
       {plainAssets.length ? <Text style={[styles.label, { marginTop: 10 }]}>Assets</Text> : null}
       {plainAssets.map((asset, index) => <Pressable key={asset.id || index} onLongPress={() => asset.id && deleteNetWorthItem("asset", asset.id)}>
         <Row title={asset.name} detail={asset.assetClass || "other"} value={money(assetValue(asset), currency)} />
       </Pressable>)}
-      {holdingAssets.length ? <Text style={styles.muted}>{holdingAssets.length} stock/fund holding{holdingAssets.length === 1 ? "" : "s"} (view on web)</Text> : null}
       {netWorthLiabilities.length ? <Text style={[styles.label, { marginTop: 10 }]}>Liabilities</Text> : null}
       {netWorthLiabilities.map((liability, index) => <Pressable key={liability.id || index} onLongPress={() => liability.id && deleteNetWorthItem("liability", liability.id)}>
         <Row title={liability.name} detail="Liability" value={money(Number(liability.value || 0), currency)} />

@@ -119,6 +119,16 @@ test("Notes support real CRUD (add/edit/pin/archive/delete/checklist-add), not j
   assertOnlyWholeStateSaves(body, "Notes");
 });
 
+test("Wealth displays stock/fund holdings (grouped, with gain/loss) instead of just a bare count", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Wealth");
+  assert.match(body, /groupStockHoldings/);
+  assert.match(body, /assetClassLabelForHoldings/);
+  assert.match(body, /groupGainLoss/);
+  assert.match(body, /holdingGainLoss/);
+  assert.doesNotMatch(body, /view on web/, "should no longer just show a bare count deferring to web");
+});
+
 test("Documents track expiry date and last-opened metadata, matching web", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
