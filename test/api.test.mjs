@@ -97,6 +97,16 @@ test("Calendar reminders support a repeat recurrence, matching web's advance-on-
   assert.match(body, /onSave\(next\)/);
 });
 
+test("Calendar supports adding a chore (not just editing existing ones), deleting events/chores, and chore completion", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Calendar");
+  assert.match(body, /addKind/, "should support choosing to add a chore, not just a reminder");
+  assert.match(body, /next\.calendar\.chores\.push/);
+  assert.match(body, /deleteEvent/);
+  assert.match(body, /deleteChore/);
+  assert.match(body, /advanceChoreDate/);
+});
+
 test("Notes support real CRUD (add/edit/pin/archive/delete/checklist-add), not just checklist toggling", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");

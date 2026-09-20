@@ -16,7 +16,11 @@ export type CalendarEvent = {
   id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string;
   recurrence?: ReminderRecurrence; completedBy?: string[];
 };
-export type Chore = { id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string; recurrence?: string };
+export type ChoreRecurrence = "once" | "weekly" | "biweekly" | "triweekly" | "monthly" | "every3months" | "every4months" | "every6months" | "yearly";
+export type Chore = {
+  id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string;
+  recurrence?: ChoreRecurrence; completedBy?: string[];
+};
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
 export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string; createdAt?: string };
 export type Recipe = { id: string; name: string; ingredients: string[]; calories: number; protein: number };
