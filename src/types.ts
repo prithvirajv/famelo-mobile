@@ -112,6 +112,9 @@ export type PlanTask = {
   subtasks?: PlanSubtask[];
   // Weekly/monthly tasks use this plain boolean; daily tasks use completedDates instead (see below).
   done?: boolean;
+  // Weekly/monthly-only: links this task to a savings goal (state.goals.sinkingFunds[].name) -
+  // daily tasks don't get this on web either.
+  goalName?: string;
   // Daily-bucket-only fields:
   startTime?: string; durationMinutes?: number; recurrence?: PlanRecurrence; completedDates?: string[];
 };

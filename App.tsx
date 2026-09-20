@@ -147,7 +147,7 @@ function AppContent() {
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
-    : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} />
+    : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} sinkingFundNames={(state.goals?.sinkingFunds || []).map((fund) => fund.name)} />
     : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} />
     : tab === "meals" ? <Meals state={state} onSave={save} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
@@ -411,9 +411,10 @@ function describeLinkedActualLogs(task: PlanTask, linkedLogs: ActualLog[]): stri
   return `Overlaps: ${linkedLogs.map((log) => log.note).join(", ")}`;
 }
 
-function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void> }) {
+function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateData; onSave: (plans: PrivateData["plans"]) => Promise<void>; sinkingFundNames: string[] }) {
   const [bucket, setBucket] = useState<PlanBucket>("daily");
   const [title, setTitle] = useState("");
+  const [goalName, setGoalName] = useState("");
   const [startTime, setStartTime] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(30);
   const [recurrence, setRecurrence] = useState<PlanRecurrence>("none");
@@ -444,13 +445,18 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
       createdAt: new Date().toISOString(), subtasks: [],
       ...(bucket === "daily"
         ? { startTime: startTime.trim() || undefined, durationMinutes, recurrence, completedDates: [] }
-        : { done: false })
+        : { done: false, goalName: goalName || undefined })
     };
     await saveTasks([...privateData.plans.tasks, task]);
     setTitle("");
     setStartTime("");
     setDurationMinutes(30);
     setRecurrence("none");
+    setGoalName("");
+  };
+
+  const changeTaskGoal = async (taskId: string, nextGoalName: string) => {
+    await saveTasks(privateData.plans.tasks.map((task) => task.id === taskId ? { ...task, goalName: nextGoalName || undefined } : task));
   };
 
   const toggleTask = async (taskId: string) => {
@@ -569,6 +575,10 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
           {(["none", "daily", "weekdays", "weekly", "monthly"] as PlanRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, recurrence === item && styles.choiceActive]} onPress={() => setRecurrence(item)}><Text style={[styles.choiceText, recurrence === item && styles.choiceTextActive]}>{planRecurrenceLabels[item]}</Text></Pressable>)}
         </View>
       </>}
+      {bucket !== "daily" && sinkingFundNames.length > 0 && <View style={styles.choiceRow}>
+        <Pressable style={[styles.choice, !goalName && styles.choiceActive]} onPress={() => setGoalName("")}><Text style={[styles.choiceText, !goalName && styles.choiceTextActive]}>No goal</Text></Pressable>
+        {sinkingFundNames.map((name) => <Pressable key={name} style={[styles.choice, goalName === name && styles.choiceActive]} onPress={() => setGoalName(name)}><Text style={[styles.choiceText, goalName === name && styles.choiceTextActive]}>{name}</Text></Pressable>)}
+      </View>}
       <Pressable style={styles.primaryButton} onPress={() => void addTask()}><Text style={styles.primaryButtonText}>Add task</Text></Pressable>
     </Card>
     <Card>{tasks.length ? tasks.map((task) => {
@@ -586,7 +596,7 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
                     `${task.durationMinutes || 30} min`,
                     planRecurrenceLabels[task.recurrence || "none"]
                   ].join(" · ")
-                : task.anchorDate}
+                : [task.anchorDate, task.goalName].filter(Boolean).join(" · ")}
             </Text>
           </Pressable>
           <Pressable onPress={() => void deleteTask(task.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
@@ -595,6 +605,10 @@ function Plan({ privateData, onSave }: { privateData: PrivateData; onSave: (plan
           <TextInput style={[styles.input, { flex: 1 }]} value={task.startTime || ""} onChangeText={(value) => void changeStartTime(task.id, value)} placeholder="Start time (HH:MM)" />
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, -15)}><Text style={styles.secondaryButtonText}>-15</Text></Pressable>
           <Pressable style={styles.planStepperButton} onPress={() => void adjustDuration(task.id, 15)}><Text style={styles.secondaryButtonText}>+15</Text></Pressable>
+        </View>}
+        {bucket !== "daily" && sinkingFundNames.length > 0 && <View style={styles.choiceRow}>
+          <Pressable style={[styles.choice, !task.goalName && styles.choiceActive]} onPress={() => void changeTaskGoal(task.id, "")}><Text style={[styles.choiceText, !task.goalName && styles.choiceTextActive]}>No goal</Text></Pressable>
+          {sinkingFundNames.map((name) => <Pressable key={name} style={[styles.choice, task.goalName === name && styles.choiceActive]} onPress={() => void changeTaskGoal(task.id, name)}><Text style={[styles.choiceText, task.goalName === name && styles.choiceTextActive]}>{name}</Text></Pressable>)}
         </View>}
         {bucket === "daily" && (() => {
           const linkedLogs = logsToday.filter((log) => log.linkedTaskIds.includes(task.id));

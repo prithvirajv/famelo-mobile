@@ -82,3 +82,13 @@ test("Paychecks is reachable from More, materializes occurrences on load, and sa
   assert.match(body, /ensurePaycheckOccurrencesGenerated/);
   assertOnlyWholeStateSaves(body, "Paychecks");
 });
+
+test("Plan tasks can link to a savings goal, matching web's legacy weekly/monthly goalName field", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+  assert.match(types, /goalName\?: string/);
+  const body = extractFunctionSource(app, "Plan");
+  assert.match(body, /sinkingFundNames/);
+  assert.match(body, /changeTaskGoal/);
+  assert.match(body, /task\.goalName/);
+});
