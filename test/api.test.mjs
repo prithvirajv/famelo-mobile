@@ -180,7 +180,8 @@ test("Budget is editable: lines/categories/transactions save through whole-state
   assert.match(body, /onOpenPaychecks/);
   assert.doesNotMatch(body, /budget: \{ \.\.\.state\.budget, income/, "income is derived from paychecks (web overwrites it on every render) - never edit it directly");
   assert.match(app, /budgetIncomeFromPaychecks\(nextState\)/, "the shared save keeps budget.income in sync with paychecks, like web's per-render recompute");
-  assert.match(app, /tab === "budget" \? <Budget state=\{state\} onSave=\{save\}/);
+  assert.match(app, /tab === "budget" \? <Budget state=\{state\} members=\{/);
+  assert.match(app, /onSave=\{save\} onOpenPaychecks=/);
 });
 
 test("Wealth lets you record and delete transfers between accounts, newest-first, blocking closed accounts", () => {
@@ -473,4 +474,11 @@ test("Notes can be shared by email, public link, or with a FamilyLoop account, a
   const shared = extractFunctionSource(app, "SharedWithMe");
   for (const name of ["sharedWithMe", "toggleSharedNoteItem", "addSharedNoteItem", "deleteSharedNoteItem"]) assert.match(shared, new RegExp(`api\\.${name}\\(`));
   assert.match(extractFunctionSource(app, "Notes"), /<NoteSharePanel note=\{note\} \/>/);
+});
+
+test("Budget lines can be given an owner and filtered by member", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Budget");
+  assert.match(body, /filterCategoriesByOwner\(state\.budget\.categories, memberFilter\)/);
+  assert.match(body, /ownerId: lineOwner \|\| null/);
 });

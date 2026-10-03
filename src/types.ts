@@ -4,7 +4,7 @@ export type RecurringBudgetBill = { enabled: boolean; amount: number; frequency:
 export type BudgetLine = {
   id: string; name: string; planned: number; dueDay?: number | null; recurringBill?: RecurringBudgetBill;
   // Not edited on mobile yet, but preserved untouched on every save (all edits spread the existing line).
-  ownerId?: string; rolloverEnabled?: boolean; rolloverAmount?: number;
+  ownerId?: string | null; rolloverEnabled?: boolean; rolloverAmount?: number;
 };
 export type BudgetCategory = { name: string; color: string; lines: BudgetLine[] };
 export type TransactionSplit = { lineId: string; amount: number };

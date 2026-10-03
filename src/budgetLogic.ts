@@ -106,7 +106,7 @@ export function addLine(state: HouseholdState, categoryIndex: number): Household
   return updateCategories(state, (categories) => categories.map((item, index) => index === categoryIndex ? { ...item, lines: [...item.lines, line] } : item));
 }
 
-export function updateLine(state: HouseholdState, lineId: string, patch: { name?: string; planned?: number; dueDay?: number | null }): HouseholdState {
+export function updateLine(state: HouseholdState, lineId: string, patch: { name?: string; planned?: number; dueDay?: number | null; ownerId?: string | null }): HouseholdState {
   return updateCategories(state, (categories) => categories.map((category) => ({
     ...category,
     lines: category.lines.map((line) => line.id === lineId ? { ...line, ...patch } : line)
@@ -373,3 +373,11 @@ export function deleteRecurringExpense(state: HouseholdState, id: string): House
 }
 
 export const RECURRING_REPEAT_LABELS: Record<RecurringRepeat, string> = { weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly" };
+
+
+// Which budget lines a member filter shows: "all" shows everything; a member's email shows only the lines assigned to them (a line
+// with no owner belongs to the household and shows only under "all"). Categories left with no lines are dropped while filtering.
+export function filterCategoriesByOwner(categories: BudgetCategory[], ownerFilter: string): BudgetCategory[] {
+  if (ownerFilter === "all") return categories;
+  return categories.map((category) => ({ ...category, lines: category.lines.filter((line) => (line.ownerId || "") === ownerFilter) })).filter((category) => category.lines.length > 0);
+}

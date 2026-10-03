@@ -282,3 +282,22 @@ test("updating a recurring bill's end date drops unreviewed drafts past it; dele
   assert.deepEqual(gone.recurringExpenses, []);
   assert.equal(gone.transactionInboxDrafts.length, 4, "drafts already surfaced stay for review");
 });
+
+import { filterCategoriesByOwner } from "../src/budgetLogic.ts";
+
+test("filterCategoriesByOwner shows everything for 'all', only a member's own lines otherwise, and drops emptied categories", () => {
+  const categories = [
+    { name: "Home", color: "#1", lines: [{ id: "rent", name: "Rent", planned: 1, ownerId: "a@x.com" }, { id: "power", name: "Power", planned: 1 }] },
+    { name: "Fun", color: "#2", lines: [{ id: "games", name: "Games", planned: 1, ownerId: "b@x.com" }] }
+  ];
+  assert.equal(filterCategoriesByOwner(categories, "all"), categories);
+  assert.deepEqual(filterCategoriesByOwner(categories, "a@x.com").map((c) => [c.name, c.lines.map((l) => l.id)]), [["Home", ["rent"]]]);
+  assert.deepEqual(filterCategoriesByOwner(categories, "b@x.com").map((c) => c.name), ["Fun"]);
+  assert.deepEqual(filterCategoriesByOwner(categories, "nobody@x.com"), []);
+});
+
+test("updateLine can set and clear a line's owner", () => {
+  const owned = updateLine(baseState(), "rent", { ownerId: "a@x.com" });
+  assert.equal(owned.budget.categories[0].lines[0].ownerId, "a@x.com");
+  assert.equal(updateLine(owned, "rent", { ownerId: null }).budget.categories[0].lines[0].ownerId, null);
+});

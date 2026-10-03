@@ -48,7 +48,7 @@ import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePho
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
-import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -186,7 +186,7 @@ function AppContent() {
     : subScreen === "bankStream" ? <BankStream state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
-    : tab === "budget" ? <Budget state={state} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
+    : tab === "budget" ? <Budget state={state} members={(access?.members || []).filter((member) => member.status === "active").map((member) => ({ name: member.name, email: member.email }))} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "calendar" ? <Calendar state={state} access={access} user={user} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
@@ -286,7 +286,7 @@ function TagChips({ tags, suggestions, onChange }: { tags: string[]; suggestions
   </View>;
 }
 
-function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onOpenPaychecks: () => void }) {
+function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdState; members: Array<{ name: string; email: string }>; onSave: (next: HouseholdState) => Promise<void>; onOpenPaychecks: () => void }) {
   const currency = state.household.currency;
   const todayKey = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
   const allLines = allBudgetLines(state);
@@ -303,6 +303,8 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const [showAllTx, setShowAllTx] = useState(false);
   // Split editor: which ledger transaction is being split across categories, and its working rows (amounts kept as
   // text so typing "12." doesn't get rewritten under the user).
+  const [memberFilter, setMemberFilter] = useState("all");
+  const [lineOwner, setLineOwner] = useState("");
   const [txRepeat, setTxRepeat] = useState<"none" | RecurringRepeat>("none");
   const [txEndDate, setTxEndDate] = useState("");
   const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
@@ -320,13 +322,13 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   // The picked category can disappear (deleted line) - fall back to the first remaining one.
   useEffect(() => { if (!allLines.some((line) => line.id === txLineId)) setTxLineId(allLines[0]?.id || ""); }, [allLines.map((line) => line.id).join("|")]);
 
-  const beginLineEdit = (line: BudgetLine) => { setEditingLineId(line.id); setLineName(line.name); setLinePlanned(String(line.planned ?? 0)); setLineDueDay(line.dueDay ? String(line.dueDay) : ""); };
+  const beginLineEdit = (line: BudgetLine) => { setEditingLineId(line.id); setLineOwner(line.ownerId || ""); setLineName(line.name); setLinePlanned(String(line.planned ?? 0)); setLineDueDay(line.dueDay ? String(line.dueDay) : ""); };
   const saveLineEdit = async () => {
     if (!editingLineId) return;
     if (!lineName.trim()) return Alert.alert("Missing info", "Enter a name.");
     const dueDay = lineDueDay.trim() ? Math.round(Number(lineDueDay)) : null;
     if (dueDay !== null && !(dueDay >= 1 && dueDay <= 31)) return Alert.alert("Invalid due day", "Enter a day of the month from 1 to 31, or leave it blank.");
-    await onSave(updateLine(state, editingLineId, { name: lineName.trim(), planned: Math.max(0, Number(linePlanned) || 0), dueDay }));
+    await onSave(updateLine(state, editingLineId, { name: lineName.trim(), planned: Math.max(0, Number(linePlanned) || 0), dueDay, ownerId: lineOwner || null }));
     setEditingLineId(null);
   };
 
@@ -531,7 +533,11 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
       <Pressable style={styles.secondarySmall} onPress={() => setPendingDelete(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
     </Card> : null}
 
-    {state.budget.categories.map((category, categoryIndex) => <Card key={category.name}>
+    {members.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      <Pressable style={[styles.choice, memberFilter === "all" && styles.choiceActive]} onPress={() => setMemberFilter("all")}><Text style={[styles.choiceText, memberFilter === "all" && styles.choiceTextActive]}>Everyone</Text></Pressable>
+      {members.map((member) => <Pressable key={member.email} style={[styles.choice, memberFilter === member.email && styles.choiceActive]} onPress={() => setMemberFilter(member.email)}><Text style={[styles.choiceText, memberFilter === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}
+    </ScrollView> : null}
+    {filterCategoriesByOwner(state.budget.categories, memberFilter).map((category) => { const categoryIndex = state.budget.categories.findIndex((item) => item.name === category.name); return <Card key={category.name}>
       <View style={styles.categoryHeader}>
         <View style={[styles.dot, { backgroundColor: category.color }]} /><Text style={[styles.cardTitle, { flex: 1 }]}>{category.name}</Text>
         <Pressable onPress={() => requestDelete(`Remove ${category.name}?`, category.lines.map((line) => line.id), categoryIndex)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
@@ -542,7 +548,8 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         const baseDetail = recurring
           ? `${recurring.frequency} · due ${recurring.nextDueDate} · set aside ${money(recurring.monthlyAmount, currency)}/mo`
           : line.dueDay ? `Due day ${line.dueDay}` : "No due date";
-        const detail = Number(line.rolloverAmount || 0) > 0 ? `${baseDetail} · +${money(Number(line.rolloverAmount), currency)} rolled over` : baseDetail;
+        const ownerName = line.ownerId ? members.find((member) => member.email === line.ownerId)?.name || line.ownerId : "";
+        const detail = [Number(line.rolloverAmount || 0) > 0 ? `${baseDetail} · +${money(Number(line.rolloverAmount), currency)} rolled over` : baseDetail, ownerName].filter(Boolean).join(" · ");
         if (editingLineId === line.id) {
           return <View key={line.id} style={styles.planTaskBlock}>
             <TextInput style={styles.input} value={lineName} onChangeText={setLineName} placeholder="Subcategory name" />
@@ -550,6 +557,13 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
               <TextInput style={[styles.input, { flex: 1 }]} value={linePlanned} onChangeText={setLinePlanned} placeholder="Planned amount" keyboardType="decimal-pad" editable={!recurring} />
               <TextInput style={[styles.input, { flex: 1 }]} value={lineDueDay} onChangeText={setLineDueDay} placeholder="Due day (1-31)" keyboardType="number-pad" editable={!recurring} />
             </View>
+            {members.length ? <>
+              <Text style={styles.label}>Owner</Text>
+              <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+                <Pressable style={[styles.choice, !lineOwner && styles.choiceActive]} onPress={() => setLineOwner("")}><Text style={[styles.choiceText, !lineOwner && styles.choiceTextActive]}>Household</Text></Pressable>
+                {members.map((member) => <Pressable key={member.email} style={[styles.choice, lineOwner === member.email && styles.choiceActive]} onPress={() => setLineOwner(member.email)}><Text style={[styles.choiceText, lineOwner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}
+              </ScrollView>
+            </> : null}
             <Pressable style={[styles.choice, line.rolloverEnabled && styles.choiceActive]} onPress={() => void onSave(toggleRollover(state, line.id))} accessibilityLabel="Carry unspent balance into next month">
               <Text style={[styles.choiceText, line.rolloverEnabled && styles.choiceTextActive]}>{line.rolloverEnabled ? "✓ Carries unspent money into next month" : "Carry unspent money into next month"}</Text>
             </Pressable>
@@ -572,7 +586,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         return <Pressable key={line.id} onPress={() => beginLineEdit(line)}><Row title={line.name} detail={detail} value={`${money(spent, currency)} / ${money(recurring?.monthlyAmount ?? line.planned, currency)}`} /></Pressable>;
       })}
       <Pressable style={styles.secondarySmall} onPress={() => void onSave(addLine(state, categoryIndex))}><Text style={styles.secondaryButtonText}>+ Add subcategory</Text></Pressable>
-    </Card>)}
+    </Card>; })}
 
     <Card>
       <Text style={styles.cardTitle}>Add category</Text>
