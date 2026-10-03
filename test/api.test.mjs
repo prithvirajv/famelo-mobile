@@ -322,3 +322,18 @@ test("Budget can split a ledger transaction across categories, only saving a spl
   const reports = fs.readFileSync(new URL("../src/reportsLogic.ts", import.meta.url), "utf8");
   assert.match(reports, /transaction\.splits\.filter\(\(split\) => split\.lineId === lineId\)/, "spent totals must read through splits or a split transaction vanishes from the budget");
 });
+
+test("Tags are editable as chips on bank-stream rows and ledger transactions, with duplicate-proof entry and one-tap suggestions", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const chips = extractFunctionSource(app, "TagChips");
+  assert.match(chips, /addTagsDeduped\(tags, value\)/);
+  assert.match(chips, /removeTag\(tags, tag\)/);
+  assert.match(chips, /onEndEditing/);
+  const bankStream = extractFunctionSource(app, "BankStream");
+  assert.match(bankStream, /<TagChips tags=\{draft\.tags \|\| \[\]\}/);
+  assert.match(bankStream, /updateDraft\(state, id, \{ tags \}\)/);
+  const budget = extractFunctionSource(app, "Budget");
+  assert.match(budget, /<TagChips tags=\{item\.tags \|\| \[\]\}/);
+  assert.match(budget, /setTransactionTags\(state, index, tags\)/);
+  assert.match(budget, /addTagsDeduped\(\[\], txTags\)/, "the add form's typed tags dedupe too");
+});

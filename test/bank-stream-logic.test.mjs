@@ -369,3 +369,12 @@ test("moveDraftToTransfer needs an account on the draft and a different counterp
   assert.equal(moveDraftToTransfer(state, "y", "", "", () => "t").error, "Pick a different account.");
   assert.equal(moveDraftToTransfer(state, "gone", "card", "", () => "t").ok, false);
 });
+
+test("a draft's tags can be edited through updateDraft and carry onto the ledger transaction when accepted", () => {
+  const state = baseState({ transactionInboxDrafts: [{ id: "d1", payee: "Resort", amount: 300, date: "2026-07-02", lineId: "groceries", tags: ["Florida trip"] }] });
+  const tagged = updateDraft(state, "d1", { tags: ["Florida trip", "Beach"] });
+  assert.deepEqual(tagged.state.transactionInboxDrafts[0].tags, ["Florida trip", "Beach"]);
+  assert.deepEqual(updateDraft(tagged.state, "d1", { tags: [] }).state.transactionInboxDrafts[0].tags, []);
+  const accepted = acceptDraft(tagged.state, "d1");
+  assert.deepEqual(accepted.state.transactions[0].tags, ["Florida trip", "Beach"]);
+});

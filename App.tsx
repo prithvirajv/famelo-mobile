@@ -45,7 +45,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount } from "./src/bankStreamLogic";
 import type { DraftReview, ParsedBankRow } from "./src/bankStreamLogic";
-import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "./src/budgetLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -242,6 +242,30 @@ function Home({ state }: { state: HouseholdState }) {
   <Card><Text style={styles.cardTitle}>Recent transactions</Text>{state.transactions.slice(-4).reverse().map((item, index) => <Row key={`${item.date}-${item.payee}-${index}`} title={item.payee} detail={item.date} value={money(item.amount, state.household.currency)} />)}</Card></Page>;
 }
 
+// A row's tags as removable chips plus a "+ Add tag" box (comma-separated, duplicates ignored case-insensitively) and
+// one-tap suggestions from tags already used elsewhere - the phone stand-in for web's autocomplete list. Used on both
+// bank-stream rows and ledger rows; the caller decides how a change is saved. A tag is committed when the box loses focus
+// or Return is pressed (React Native fires onEndEditing for both).
+function TagChips({ tags, suggestions, onChange }: { tags: string[]; suggestions: string[]; onChange: (tags: string[]) => void }) {
+  const [text, setText] = useState("");
+  const commit = (value: string) => {
+    const next = addTagsDeduped(tags, value);
+    setText("");
+    if (next.length !== tags.length) onChange(next);
+  };
+  return <View>
+    <View style={styles.choiceRow}>
+      {tags.map((tag) => <Pressable key={tag} style={styles.tagChip} onPress={() => onChange(removeTag(tags, tag))} accessibilityLabel={`Remove tag ${tag}`}>
+        <Text style={styles.tagChipText}>{tag}  ×</Text>
+      </Pressable>)}
+      <TextInput style={styles.tagInput} value={text} onChangeText={setText} placeholder="+ Add tag" returnKeyType="done" autoCapitalize="none" onEndEditing={(event) => commit(event.nativeEvent.text)} />
+    </View>
+    {suggestions.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      {suggestions.map((tag) => <Pressable key={tag} style={styles.choice} onPress={() => commit(tag)}><Text style={styles.choiceText}>+ {tag}</Text></Pressable>)}
+    </ScrollView> : null}
+  </View>;
+}
+
 function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onOpenPaychecks: () => void }) {
   const currency = state.household.currency;
   const todayKey = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
@@ -311,7 +335,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     if (!/^\d{4}-\d{2}-\d{2}$/.test(txDate)) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
     const account = (state.accounts || []).find((item) => item.id === txAccountId);
     if (!accountAllowsDate(account, txDate)) return Alert.alert("Account is closed", `${account?.name || "That account"} is closed — pick a date on or before its close date, or choose a different account.`);
-    const input = { date: txDate, payee: txPayee.trim(), amount, lineId: txLineId, accountId: txAccountId, tags: parseTagsInput(txTags) };
+    const input = { date: txDate, payee: txPayee.trim(), amount, lineId: txLineId, accountId: txAccountId, tags: addTagsDeduped([], txTags) };
     if (editingTxIndex !== null) {
       const existing = state.transactions[editingTxIndex];
       if (!existing) return;
@@ -471,7 +495,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
 
     <Card>
       <Text style={styles.cardTitle}>Transactions</Text>
-      {orderedTransactions.length ? visibleTransactions.map(({ item, index }) => <View key={`${index}-${item.date}-${item.payee}`} style={styles.row}>
+      {orderedTransactions.length ? visibleTransactions.map(({ item, index }) => <View key={`${index}-${item.date}-${item.payee}`}><View style={styles.row}>
         <Pressable style={styles.rowCopy} onPress={() => beginTxEdit(index)}>
           <Text style={styles.rowTitle}>{item.payee}</Text>
           <Text style={styles.rowDetail}>{[item.date, transactionAssignmentLabel(state, item), accountName(item.accountId)].filter(Boolean).join(" · ")}</Text>
@@ -479,6 +503,8 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         <Text style={styles.rowValue}>{money(Number(item.amount), currency)}</Text>
         <Pressable onPress={() => openSplit(index)} accessibilityLabel={`Split ${item.payee} across categories`}><Ionicons name="cut-outline" size={18} color={item.splits?.length ? colors.green : colors.muted} /></Pressable>
         <Pressable onPress={() => deleteTransaction(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>
+      <TagChips tags={item.tags || []} suggestions={tagSuggestions(state.transactions, item.tags)} onChange={(tags) => void onSave(setTransactionTags(state, index, tags))} />
       </View>) : <Text style={styles.muted}>No transactions yet</Text>}
       {orderedTransactions.length > 15 ? <Pressable style={styles.secondarySmall} onPress={() => setShowAllTx((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showAllTx ? "Show fewer" : `Show all (${orderedTransactions.length})`}</Text></Pressable> : null}
     </Card>
@@ -1850,6 +1876,8 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
           </ScrollView>
           {!draft.accountId ? <Pressable style={styles.secondarySmall} disabled={aiBusyId === id} onPress={() => void suggestAccount(id, draft.payee || "")}><Text style={styles.secondaryButtonText}>✨ Suggest account</Text></Pressable> : null}
         </> : null}
+        <Text style={styles.label}>Tags</Text>
+        <TagChips tags={draft.tags || []} suggestions={tagSuggestions(state.transactions, draft.tags)} onChange={(tags) => void apply(updateDraft(state, id, { tags }))} />
         {isTransfer ? <View style={styles.planTaskBlock}>
           <Text style={styles.label}>{Number(draft.amount) > 0 ? "Money went to" : "Money came from"}</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.filter((item) => item.id !== draft.accountId).map((item) => <Pressable key={item.id} style={[styles.choice, transferAccountId === item.id && styles.choiceActive]} onPress={() => setTransferAccountId(item.id)}><Text style={[styles.choiceText, transferAccountId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</ScrollView>
@@ -3018,6 +3046,7 @@ const styles = StyleSheet.create({
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" },
   subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
   flowBar: { flexDirection: "row", height: 22, borderRadius: 11, overflow: "hidden", marginVertical: 12, backgroundColor: colors.panel }, flowDot: { width: 12, height: 12, borderRadius: 6 }, flowChildRow: { marginLeft: 22, minHeight: 52 }, flowChildActive: { backgroundColor: colors.panel },
+  tagChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: colors.greenSoft }, tagChipText: { color: colors.green, fontWeight: "700", fontSize: 13 }, tagInput: { minWidth: 96, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13 },
   iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, decisionColumn: { marginTop: 10 },
   reportSubcategoryRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
   cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 },

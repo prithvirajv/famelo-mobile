@@ -160,3 +160,35 @@ test("removeSplit puts the whole transaction back on the first split's category 
   assert.equal(removeSplit(plain, 0), plain);
   assert.equal(removeSplit(plain, 9), plain);
 });
+
+import { normalizeTag, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags } from "../src/budgetLogic.ts";
+
+test("addTagsDeduped appends new tags, splits on commas, and ignores case/whitespace duplicates while keeping the existing spelling", () => {
+  assert.deepEqual(addTagsDeduped(["Florida trip"], "florida TRIP, Beach ,  , beach, Gifts"), ["Florida trip", "Beach", "Gifts"]);
+  assert.deepEqual(addTagsDeduped(undefined, "a,b"), ["a", "b"]);
+  assert.deepEqual(addTagsDeduped(["a"], "   "), ["a"]);
+  assert.equal(normalizeTag("  Florida Trip "), "florida trip");
+});
+
+test("removeTag removes only the exact tag and never mutates the list", () => {
+  const tags = ["a", "b", "A"];
+  assert.deepEqual(removeTag(tags, "a"), ["b", "A"]);
+  assert.deepEqual(tags, ["a", "b", "A"]);
+  assert.deepEqual(removeTag(undefined, "x"), []);
+});
+
+test("tagSuggestions lists tags already in use (first spelling wins), skips ones already on the row, and caps the count", () => {
+  const transactions = [{ tags: ["Florida trip", "Gifts"] }, { tags: ["florida TRIP", "Beach"] }, { tags: [] }, {}, { tags: ["  ", "Zeta"] }];
+  assert.deepEqual(tagSuggestions(transactions, []), ["Florida trip", "Gifts", "Beach", "Zeta"]);
+  assert.deepEqual(tagSuggestions(transactions, ["gifts"]), ["Florida trip", "Beach", "Zeta"]);
+  assert.deepEqual(tagSuggestions(transactions, [], 2), ["Florida trip", "Gifts"]);
+  assert.deepEqual(tagSuggestions([], []), []);
+});
+
+test("setTransactionTags replaces one transaction's tags without touching the others or mutating the input", () => {
+  const state = { ...baseState(), transactions: [{ date: "2026-07-01", payee: "A", lineId: "rent", amount: 1, tags: ["x"] }, { date: "2026-07-02", payee: "B", lineId: "rent", amount: 2 }] };
+  const next = setTransactionTags(state, 1, ["trip"]);
+  assert.deepEqual(next.transactions.map((t) => t.tags), [["x"], ["trip"]]);
+  assert.equal(state.transactions[1].tags, undefined);
+  assert.equal(setTransactionTags(state, 9, ["z"]), state);
+});

@@ -46,6 +46,48 @@ export function parseTagsInput(value: string): string[] {
   return String(value || "").split(",").map((tag) => tag.trim()).filter(Boolean);
 }
 
+// Tags match case- and whitespace-insensitively, so "Florida Trip" and "florida trip" are one tag - a typo on a later
+// entry must not silently split one trip into two groups (the same rule Reports' tag grouping uses).
+export function normalizeTag(tag: string | undefined): string {
+  return String(tag || "").trim().toLowerCase();
+}
+
+// Appends one or more comma-separated tags to a list, skipping any that already match (by normalizeTag) - typing
+// "florida trip" when "Florida trip" is already a chip must not add a visually duplicate second chip. The list's
+// existing spelling wins.
+export function addTagsDeduped(existing: string[] | undefined, value: string): string[] {
+  const tags = [...(existing || [])];
+  parseTagsInput(value).forEach((tag) => {
+    const key = normalizeTag(tag);
+    if (!tags.some((current) => normalizeTag(current) === key)) tags.push(tag);
+  });
+  return tags;
+}
+
+export function removeTag(tags: string[] | undefined, tag: string): string[] {
+  return (tags || []).filter((current) => current !== tag);
+}
+
+// Tags already used on the household's transactions (first spelling seen wins), as quick-add suggestions: the phone
+// stand-in for web's "+ Add tag" autocomplete list. Tags already on the current row are left out.
+export function tagSuggestions(transactions: Transaction[], exclude: string[] | undefined, limit = 8): string[] {
+  const skip = new Set((exclude || []).map(normalizeTag));
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  transactions.forEach((transaction) => (transaction.tags || []).forEach((tag) => {
+    const key = normalizeTag(tag);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    if (!skip.has(key)) labels.push(String(tag).trim());
+  }));
+  return labels.slice(0, limit);
+}
+
+export function setTransactionTags(state: HouseholdState, index: number, tags: string[]): HouseholdState {
+  if (!state.transactions[index]) return state;
+  return { ...state, transactions: state.transactions.map((transaction, itemIndex) => itemIndex === index ? { ...transaction, tags } : transaction) };
+}
+
 export function addCategory(state: HouseholdState, name: string): HouseholdState | null {
   const trimmed = name.trim();
   if (!trimmed) return null;

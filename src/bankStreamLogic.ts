@@ -453,7 +453,7 @@ export function dismissDraft(state: HouseholdState, draftId: string): HouseholdS
   };
 }
 
-export type DraftPatch = { payee?: string; date?: string; amount?: number; lineId?: string; accountId?: string };
+export type DraftPatch = { payee?: string; date?: string; amount?: number; lineId?: string; accountId?: string; tags?: string[] };
 
 // Edits one draft. Picking a different line/account clears its "from history" mark (the mark describes where the CURRENT
 // value came from - keeping it would credit a hand-picked choice to the suggestion). A closed account rejects a draft
