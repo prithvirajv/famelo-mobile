@@ -45,7 +45,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount } from "./src/bankStreamLogic";
 import type { DraftReview, ParsedBankRow } from "./src/bankStreamLogic";
-import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -257,7 +257,12 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const [txPayee, setTxPayee] = useState(""); const [txAmount, setTxAmount] = useState(""); const [txDate, setTxDate] = useState(todayKey());
   const [txLineId, setTxLineId] = useState(allLines[0]?.id || ""); const [txAccountId, setTxAccountId] = useState(""); const [txTags, setTxTags] = useState("");
   const [showAllTx, setShowAllTx] = useState(false);
+  // Split editor: which ledger transaction is being split across categories, and its working rows (amounts kept as
+  // text so typing "12." doesn't get rewritten under the user).
+  const [splitIndex, setSplitIndex] = useState<number | null>(null);
+  const [splitRows, setSplitRows] = useState<Array<{ lineId: string; amount: string }>>([]);
 
+  const editingSplit = editingTxIndex !== null && Boolean(state.transactions[editingTxIndex]?.splits?.length);
   // The picked category can disappear (deleted line) - fall back to the first remaining one.
   useEffect(() => { if (!allLines.some((line) => line.id === txLineId)) setTxLineId(allLines[0]?.id || ""); }, [allLines.map((line) => line.id).join("|")]);
 
@@ -297,7 +302,6 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const beginTxEdit = (index: number) => {
     const item = state.transactions[index];
     if (!item) return;
-    if (item.splits?.length) return Alert.alert("Split transaction", "This transaction is split across categories — edit the split on the web app. You can still delete it here.");
     setEditingTxIndex(index); setTxPayee(item.payee); setTxAmount(String(item.amount)); setTxDate(item.date); setTxLineId(item.lineId || allLines[0]?.id || ""); setTxAccountId(item.accountId || ""); setTxTags((item.tags || []).join(", "));
   };
   const submitTransaction = async () => {
@@ -311,12 +315,36 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     if (editingTxIndex !== null) {
       const existing = state.transactions[editingTxIndex];
       if (!existing) return;
-      const updated = { ...existing, ...input, ...lineSnapshot(state, txLineId) };
+      // A split transaction keeps its splits (and its amount, which they must add up to) - only the details that don't
+      // affect the split can change here; edit the split itself with the scissors button.
+      const updated = existing.splits?.length
+        ? { ...existing, date: input.date, payee: input.payee, accountId: input.accountId, tags: input.tags }
+        : { ...existing, ...input, ...lineSnapshot(state, txLineId) };
       await onSave({ ...state, transactions: state.transactions.map((item, index) => index === editingTxIndex ? updated : item) });
     } else {
       await onSave({ ...state, transactions: [makeTransaction(state, input), ...state.transactions] });
     }
     resetTxForm();
+  };
+  const openSplit = (index: number) => {
+    const item = state.transactions[index];
+    if (!item) return;
+    setSplitIndex(index);
+    setSplitRows(splitEditorInitialRows(item).map((row) => ({ lineId: row.lineId, amount: String(row.amount) })));
+  };
+  const splitTransaction = splitIndex !== null ? state.transactions[splitIndex] : undefined;
+  const numericSplitRows = splitRows.map((row) => ({ lineId: row.lineId, amount: row.amount.trim() === "" ? 0 : Number(row.amount) }));
+  const saveSplit = async () => {
+    if (splitIndex === null) return;
+    const result = applySplit(state, splitIndex, numericSplitRows);
+    if (!result.ok) return Alert.alert("Can't save the split", result.error);
+    await onSave(result.state);
+    setSplitIndex(null);
+  };
+  const undoSplit = () => {
+    if (splitIndex === null) return;
+    void onSave(removeSplit(state, splitIndex));
+    setSplitIndex(null);
   };
   const deleteTransaction = (index: number) => {
     const item = state.transactions[index];
@@ -343,11 +371,15 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
       <Text style={styles.cardTitle}>{editingTxIndex !== null ? "Edit transaction" : "Add transaction"}</Text>
       <TextInput style={styles.input} value={txPayee} onChangeText={setTxPayee} placeholder="Payee" />
       <View style={styles.actionRow}>
-        <TextInput style={[styles.input, { flex: 1 }]} value={txAmount} onChangeText={setTxAmount} placeholder="Amount (negative = refund/income)" keyboardType="numbers-and-punctuation" />
+        <TextInput style={[styles.input, { flex: 1 }, editingSplit && { opacity: 0.5 }]} value={txAmount} onChangeText={setTxAmount} editable={!editingSplit} placeholder="Amount (negative = refund/income)" keyboardType="numbers-and-punctuation" />
         <TextInput style={[styles.input, { flex: 1 }]} value={txDate} onChangeText={setTxDate} placeholder="YYYY-MM-DD" />
       </View>
+      {editingSplit
+        ? <Text style={styles.muted}>Split across {state.transactions[editingTxIndex as number]?.splits?.length} categories - its amount and categories are changed with the scissors button in the list below.</Text>
+        : <>
       <Text style={styles.label}>Category</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, txLineId === line.id && styles.choiceActive]} onPress={() => setTxLineId(line.id)}><Text style={[styles.choiceText, txLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+        </>}
       {accounts.length ? <>
         <Text style={styles.label}>Account (optional)</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
@@ -361,6 +393,25 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         {editingTxIndex !== null ? <Pressable style={styles.secondarySmall} onPress={resetTxForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable> : null}
       </View>
     </Card>
+
+    {splitTransaction && splitIndex !== null ? <Card>
+      <View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Split {splitTransaction.payee}</Text><Text style={styles.rowValue}>{money(Number(splitTransaction.amount), currency)}</Text></View>
+      <Text style={styles.muted}>Divide this transaction across categories. The amounts must add up to the total.</Text>
+      {splitRows.map((row, rowIndex) => <View key={rowIndex} style={styles.planTaskBlock}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, row.lineId === line.id && styles.choiceActive]} onPress={() => setSplitRows((prev) => prev.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, lineId: line.id } : item))}><Text style={[styles.choiceText, row.lineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={row.amount} onChangeText={(value) => setSplitRows((prev) => prev.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, amount: value } : item))} placeholder="Amount" keyboardType="numbers-and-punctuation" />
+          <Pressable style={styles.planStepperButton} onPress={() => setSplitRows((prev) => prev.filter((_, itemIndex) => itemIndex !== rowIndex))} accessibilityLabel="Remove this split row"><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+        </View>
+      </View>)}
+      <Pressable style={styles.secondarySmall} onPress={() => setSplitRows((prev) => [...prev, { lineId: "", amount: "0" }])}><Text style={styles.secondaryButtonText}>+ Add split</Text></Pressable>
+      <Text style={[styles.rowTitle, { marginTop: 8, color: canSaveSplit(splitTransaction, numericSplitRows) ? colors.green : colors.coral }]}>{Math.abs(splitRemaining(splitTransaction, numericSplitRows)) < 0.005 ? "Fully allocated" : `${money(splitRemaining(splitTransaction, numericSplitRows), currency)} remaining`}</Text>
+      <View style={styles.actionRow}>
+        <Pressable style={[styles.primaryButton, !canSaveSplit(splitTransaction, numericSplitRows) && { opacity: 0.5 }]} disabled={!canSaveSplit(splitTransaction, numericSplitRows)} onPress={() => void saveSplit()}><Text style={styles.primaryButtonText}>Save split</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => setSplitIndex(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+        {splitTransaction.splits?.length ? <Pressable style={styles.secondarySmall} onPress={undoSplit}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Remove split</Text></Pressable> : null}
+      </View>
+    </Card> : null}
 
     {pendingDelete && pendingImpact ? <Card>
       <Text style={styles.cardTitle}>{pendingDelete.title}</Text>
@@ -426,6 +477,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
           <Text style={styles.rowDetail}>{[item.date, transactionAssignmentLabel(state, item), accountName(item.accountId)].filter(Boolean).join(" · ")}</Text>
         </Pressable>
         <Text style={styles.rowValue}>{money(Number(item.amount), currency)}</Text>
+        <Pressable onPress={() => openSplit(index)} accessibilityLabel={`Split ${item.payee} across categories`}><Ionicons name="cut-outline" size={18} color={item.splits?.length ? colors.green : colors.muted} /></Pressable>
         <Pressable onPress={() => deleteTransaction(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
       </View>) : <Text style={styles.muted}>No transactions yet</Text>}
       {orderedTransactions.length > 15 ? <Pressable style={styles.secondarySmall} onPress={() => setShowAllTx((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showAllTx ? "Show fewer" : `Show all (${orderedTransactions.length})`}</Text></Pressable> : null}

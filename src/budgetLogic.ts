@@ -143,3 +143,60 @@ export function deleteBudgetLines(state: HouseholdState, lineIds: string[], targ
     budget: { ...state.budget, categories }
   };
 }
+
+// ---- Splitting a transaction across categories ----------------------------------------------------------------------
+// A split transaction has no category of its own: `splits` is [{ lineId, amount }] and its lineId/category names are
+// cleared. Every total (Budget spent, Reports, the cash-flow breakdown) reads through the splits instead, so they MUST add
+// up to the transaction's amount or the budget silently drifts. Only already-accepted ledger transactions can be split.
+
+export type SplitRow = { lineId: string; amount: number };
+
+// Existing splits, or - to start splitting - the whole amount on its current line plus an empty second row.
+export function splitEditorInitialRows(transaction: Transaction): SplitRow[] {
+  if (transaction.splits?.length) return transaction.splits.map((split) => ({ lineId: split.lineId, amount: split.amount }));
+  return [{ lineId: transaction.lineId || "", amount: Number(transaction.amount || 0) }, { lineId: "", amount: 0 }];
+}
+
+// Only rows that have a category count: a row with an amount but no category is dropped on save, so counting its
+// amount as "allocated" (as web's editor does) would let a split save that does not add up to the total.
+function usableSplitRows(rows: SplitRow[]): SplitRow[] {
+  return rows.filter((row) => row.lineId && Number.isFinite(Number(row.amount)));
+}
+
+export function splitRemaining(transaction: Transaction, rows: SplitRow[]): number {
+  const allocated = usableSplitRows(rows).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  return Math.round((Number(transaction.amount || 0) - allocated) * 100) / 100;
+}
+
+// Saveable once at least two categories are used and every cent of the amount is allocated.
+export function canSaveSplit(transaction: Transaction, rows: SplitRow[]): boolean {
+  return usableSplitRows(rows).length >= 2 && Math.abs(splitRemaining(transaction, rows)) < 0.005;
+}
+
+export type SplitResult = { ok: true; state: HouseholdState } | { ok: false; error: string };
+
+function replaceTransaction(state: HouseholdState, index: number, update: (transaction: Transaction) => Transaction): HouseholdState {
+  return { ...state, transactions: state.transactions.map((transaction, itemIndex) => itemIndex === index ? update(transaction) : transaction) };
+}
+
+export function applySplit(state: HouseholdState, index: number, rows: SplitRow[]): SplitResult {
+  const transaction = state.transactions[index];
+  if (!transaction) return { ok: false, error: "That transaction is no longer in the ledger." };
+  const usable = usableSplitRows(rows);
+  if (usable.length < 2) return { ok: false, error: "Split across at least two categories." };
+  if (!canSaveSplit(transaction, rows)) return { ok: false, error: "The split amounts must add up to the transaction amount." };
+  return { ok: true, state: replaceTransaction(state, index, (item) => ({
+    ...item, splits: usable.map((row) => ({ lineId: row.lineId, amount: Number(row.amount) })), lineId: "", categoryName: "", subcategoryName: ""
+  })) };
+}
+
+// Removing a split puts the whole transaction back on the first split's category (with a fresh name snapshot).
+export function removeSplit(state: HouseholdState, index: number): HouseholdState {
+  const transaction = state.transactions[index];
+  if (!transaction?.splits?.length) return state;
+  const lineId = transaction.splits[0]?.lineId || "";
+  return replaceTransaction(state, index, (item) => {
+    const { splits: _removed, ...rest } = item;
+    return { ...rest, lineId, ...lineSnapshot(state, lineId) };
+  });
+}

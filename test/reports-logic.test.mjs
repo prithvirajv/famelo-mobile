@@ -155,3 +155,15 @@ test("transactionsForLines keeps only the scope's months and the selected lines,
   ];
   assert.deepEqual(transactionsForLines(transactions, ["g"], ["2026-05"]).map((t) => t.payee), ["New", "Split", "Old"]);
 });
+
+test("spentByLineInMonth credits each split its own line, counts a plain transaction on its line, and is month-scoped", () => {
+  const transactions = [
+    { date: "2026-07-03", payee: "Run", lineId: "", amount: 120, splits: [{ lineId: "food", amount: 80 }, { lineId: "house", amount: 40 }] },
+    { date: "2026-07-04", payee: "Plain", lineId: "food", amount: 10 },
+    { date: "2026-08-01", payee: "Next month", lineId: "food", amount: 999, splits: undefined }
+  ];
+  assert.equal(spentByLineInMonth(transactions, "food", "2026-07"), 90);
+  assert.equal(spentByLineInMonth(transactions, "house", "2026-07"), 40);
+  assert.equal(spentByLineInMonth(transactions, "other", "2026-07"), 0);
+  assert.equal(spentByLineInMonth(transactions, "food", "2026-08"), 999);
+});

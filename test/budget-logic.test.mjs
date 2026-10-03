@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spentByLineInMonth } from "../src/reportsLogic.ts";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, makeTransaction, transactionAssignmentLabel, parseTagsInput, categoryColor } from "../src/budgetLogic.ts";
 import { budgetIncomeFromPaychecks } from "../src/paychecksLogic.ts";
 
@@ -100,4 +101,62 @@ test("budgetIncomeFromPaychecks sums one-time income in the month plus materiali
     ]
   };
   assert.equal(budgetIncomeFromPaychecks(state), 2300);
+});
+
+import { splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "../src/budgetLogic.ts";
+
+const txn = (overrides = {}) => ({ date: "2026-07-02", payee: "Superstore", lineId: "groceries", amount: 100, categoryName: "Food", subcategoryName: "Groceries", ...overrides });
+const splitState = (transaction = txn()) => ({ ...baseState(), transactions: [transaction] });
+
+test("splitEditorInitialRows starts from the whole amount on its current line plus an empty row, or from the existing splits", () => {
+  assert.deepEqual(splitEditorInitialRows(txn()), [{ lineId: "groceries", amount: 100 }, { lineId: "", amount: 0 }]);
+  assert.deepEqual(splitEditorInitialRows(txn({ lineId: "" })), [{ lineId: "", amount: 100 }, { lineId: "", amount: 0 }]);
+  assert.deepEqual(splitEditorInitialRows(txn({ lineId: "", splits: [{ lineId: "rent", amount: 60 }, { lineId: "power", amount: 40 }] })), [{ lineId: "rent", amount: 60 }, { lineId: "power", amount: 40 }]);
+});
+
+test("splitRemaining counts only rows that have a category, so an amount on a category-less row can't fake a balanced split", () => {
+  assert.equal(splitRemaining(txn(), [{ lineId: "groceries", amount: 70 }, { lineId: "power", amount: 20 }]), 10);
+  assert.equal(splitRemaining(txn(), [{ lineId: "groceries", amount: 60 }, { lineId: "", amount: 40 }]), 40);
+  assert.equal(splitRemaining(txn(), [{ lineId: "groceries", amount: 33.33 }, { lineId: "power", amount: 66.67 }]), 0);
+  assert.equal(splitRemaining(txn({ amount: -30 }), [{ lineId: "groceries", amount: -10 }, { lineId: "power", amount: -20 }]), 0);
+});
+
+test("canSaveSplit needs two categories and every cent allocated", () => {
+  assert.equal(canSaveSplit(txn(), [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: 40 }]), true);
+  assert.equal(canSaveSplit(txn(), [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: 39.99 }]), false);
+  assert.equal(canSaveSplit(txn(), [{ lineId: "groceries", amount: 100 }, { lineId: "", amount: 0 }]), false, "one category isn't a split");
+  assert.equal(canSaveSplit(txn(), [{ lineId: "groceries", amount: 60 }, { lineId: "", amount: 40 }]), false);
+  assert.equal(canSaveSplit(txn(), [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: Number.NaN }]), false);
+});
+
+test("applySplit stores only the categorized rows, clears the transaction's own category, and never mutates the input", () => {
+  const state = splitState();
+  const result = applySplit(state, 0, [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: 40 }, { lineId: "", amount: 0 }]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.state.transactions[0], { date: "2026-07-02", payee: "Superstore", lineId: "", amount: 100, categoryName: "", subcategoryName: "", splits: [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: 40 }] });
+  assert.equal(state.transactions[0].lineId, "groceries");
+  assert.match(applySplit(state, 0, [{ lineId: "groceries", amount: 100 }]).error, /at least two/);
+  assert.match(applySplit(state, 0, [{ lineId: "groceries", amount: 50 }, { lineId: "power", amount: 40 }]).error, /add up/);
+  assert.equal(applySplit(state, 5, []).ok, false);
+});
+
+test("a split transaction counts toward each category's own share in the monthly spend totals", () => {
+  const result = applySplit(splitState(), 0, [{ lineId: "groceries", amount: 60 }, { lineId: "power", amount: 40 }]);
+  assert.equal(spentByLineInMonth(result.state.transactions, "groceries", "2026-07"), 60);
+  assert.equal(spentByLineInMonth(result.state.transactions, "power", "2026-07"), 40);
+  assert.equal(spentByLineInMonth(result.state.transactions, "rent", "2026-07"), 0);
+});
+
+test("removeSplit puts the whole transaction back on the first split's category with a fresh name snapshot", () => {
+  const split = applySplit(splitState(), 0, [{ lineId: "power", amount: 40 }, { lineId: "groceries", amount: 60 }]).state;
+  const restored = removeSplit(split, 0);
+  assert.equal(restored.transactions[0].splits, undefined);
+  assert.equal("splits" in restored.transactions[0], false);
+  assert.equal(restored.transactions[0].lineId, "power");
+  assert.equal(restored.transactions[0].categoryName, "Home");
+  assert.equal(restored.transactions[0].subcategoryName, "Power");
+  assert.equal(restored.transactions[0].amount, 100);
+  const plain = splitState();
+  assert.equal(removeSplit(plain, 0), plain);
+  assert.equal(removeSplit(plain, 9), plain);
 });

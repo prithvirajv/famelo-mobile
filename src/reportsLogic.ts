@@ -49,10 +49,16 @@ export function monthKeysForScope(scope: ReportScope, currentMonth: string): str
   return monthKeysInRange(`${month}-01`, monthEndDateKey(month));
 }
 
+// A split transaction has no lineId of its own - each split's own amount counts toward its own line instead of the whole
+// transaction counting toward one, so a $120 grocery run split into $80 Food + $40 Household credits each category its own
+// share. (This used to ignore splits entirely, which would have made a split transaction vanish from every total.)
 export function spentByLineInMonth(transactions: Transaction[], lineId: string, monthKey: string): number {
   return (transactions || [])
-    .filter((transaction) => transaction.lineId === lineId && dateKeyToMonthKey(transaction.date) === monthKey)
-    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    .filter((transaction) => dateKeyToMonthKey(transaction.date) === monthKey)
+    .reduce((sum, transaction) => {
+      if (transaction.splits?.length) return sum + transaction.splits.filter((split) => split.lineId === lineId).reduce((splitSum, split) => splitSum + Number(split.amount || 0), 0);
+      return transaction.lineId === lineId ? sum + Number(transaction.amount || 0) : sum;
+    }, 0);
 }
 
 export type ReportCategoryLine = { id: string; name: string; value: number };

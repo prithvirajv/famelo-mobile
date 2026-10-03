@@ -310,3 +310,15 @@ test("Bank stream is reachable from More, imports CSV/PDF into reviewable drafts
   // an AI suggestion is only ever applied as an editable choice on the row, never accepted automatically
   assert.doesNotMatch(body.slice(body.indexOf("const suggestLine"), body.indexOf("const openTransfer")), /acceptDraft/);
 });
+
+test("Budget can split a ledger transaction across categories, only saving a split that adds up, and leaves a split's amount alone when editing it", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Budget");
+  assert.match(body, /applySplit\(state, splitIndex, numericSplitRows\)/);
+  assert.match(body, /removeSplit\(state, splitIndex\)/);
+  assert.match(body, /canSaveSplit\(splitTransaction, numericSplitRows\)/, "Save split is disabled until every cent is allocated");
+  assert.match(body, /existing\.splits\?\.length\s*\?\s*\{ \.\.\.existing, date: input\.date, payee: input\.payee, accountId: input\.accountId, tags: input\.tags \}/, "editing a split transaction must not touch its amount or categories");
+  assert.doesNotMatch(body, /edit the split on the web/, "splits are editable on mobile now");
+  const reports = fs.readFileSync(new URL("../src/reportsLogic.ts", import.meta.url), "utf8");
+  assert.match(reports, /transaction\.splits\.filter\(\(split\) => split\.lineId === lineId\)/, "spent totals must read through splits or a split transaction vanishes from the budget");
+});
