@@ -337,3 +337,24 @@ test("Tags are editable as chips on bank-stream rows and ledger transactions, wi
   assert.match(budget, /setTransactionTags\(state, index, tags\)/);
   assert.match(budget, /addTagsDeduped\(\[\], txTags\)/, "the add form's typed tags dedupe too");
 });
+
+test("Cross-platform: no long Alert pickers (Android shows 3 buttons max), Back button handled, safe areas work on Android, taps work with the keyboard open", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  // Alert.alert is for short confirmations only - never given a built-up list of options
+  assert.doesNotMatch(app, /Alert\.alert\([^)]*,\s*options\)/, "a dynamic options list passed to Alert.alert loses everything past the 3rd button on Android");
+  assert.match(app, /function OptionList\(/);
+  assert.match(app, /BackHandler\.addEventListener\("hardwareBackPress"/);
+  assert.match(app, /SafeAreaView[^;]*from "react-native-safe-area-context"|import \{[^}]*SafeAreaView[^}]*\} from "react-native-safe-area-context"/, "react-native's own SafeAreaView does nothing on Android");
+  assert.doesNotMatch(app.split('from "react-native";')[0], /SafeAreaView/);
+  assert.match(app, /keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets/);
+  // every horizontal chip row must let a tap through while a text field has focus
+  const horizontal = app.match(/<ScrollView horizontal [^>]*>/g) || [];
+  assert.ok(horizontal.length > 10);
+  horizontal.forEach((tag) => assert.match(tag, /keyboardShouldPersistTaps="handled"/));
+});
+
+test("Cross-platform: reminder times are built from numeric parts, never by parsing a zone-less date-time string", () => {
+  const logic = fs.readFileSync(new URL("../src/calendarLogic.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(logic, /new Date\(`\$\{[^}]*\}T\$\{/, "'YYYY-MM-DDTHH:MM' parsing can differ between JS engines");
+  assert.doesNotMatch(logic, /new Date\((dateTime|nextReminderAt)\)/);
+});

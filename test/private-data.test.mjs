@@ -22,8 +22,9 @@ test("mobile API exposes private-data journal and plan endpoints", () => {
 test("Journal screen uses expo-image-picker and never shared messaging", () => {
   const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(source, /expo-image-picker/);
-  assert.match(source, /requestMediaLibraryPermissionsAsync/);
   assert.match(source, /launchImageLibraryAsync/);
+  // The system photo picker needs no permission on iOS 14+ or Android, and asking first can wrongly block it on Android 13+.
+  assert.doesNotMatch(source, /requestMediaLibraryPermissionsAsync/);
   assert.match(source, /never shared with other household members/);
 });
 
@@ -80,14 +81,14 @@ test("package.json declares the document picker and file system dependencies", (
 test("Documents screen lets a document be moved to a different folder", () => {
   const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(source, /moveDocument/);
-  assert.match(source, /promptMove/);
+  assert.match(source, /moveOptions/);
   assert.match(source, /Move to folder/);
 });
 
 test("Documents screen lets a document be tagged to a wealth asset or liability", () => {
   const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(source, /linkWealthItem/);
-  assert.match(source, /promptWealthLink/);
+  assert.match(source, /wealthOptions/);
   assert.match(source, /Tag to a wealth item/);
   assert.match(source, /wealthItemType/);
 });
@@ -95,7 +96,7 @@ test("Documents screen lets a document be tagged to a wealth asset or liability"
 test("Documents screen lets a whole folder be tagged to a wealth asset or liability", () => {
   const source = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   assert.match(source, /linkFolderWealthItem/);
-  assert.match(source, /promptFolderWealthLink/);
+  assert.match(source, /folderWealthOptions/);
   assert.match(source, /Tag folder to a wealth item/);
   assert.match(source, /updateDocumentFolder/);
 });

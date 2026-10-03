@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
-  SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View
+  ActivityIndicator, Alert, AppState, BackHandler, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
+  ScrollView, Share, StyleSheet, Text, TextInput, View
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
@@ -10,7 +10,7 @@ import * as DocumentPicker from "expo-document-picker";
 // "expo-file-system/legacy", not the package root: since SDK 54 the root still exports uploadAsync/writeAsStringAsync
 // but every one of those throws at runtime ("imported from expo-file-system is deprecated").
 import * as FileSystem from "expo-file-system/legacy";
-import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
@@ -125,6 +125,17 @@ function AppContent() {
     return () => subscription.remove();
   }, [user?.id]);
 
+  // Android's Back button/gesture would otherwise exit the app from anywhere. Close a sub-screen first, then fall back
+  // to Home, and only let Back leave the app once the user is already there. (iOS has no hardware Back; harmless there.)
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (subScreen) { setSubScreen(null); return true; }
+      if (tab !== "home") { setTab("home"); return true; }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [subScreen, tab]);
+
   const save = useCallback(async (nextState: HouseholdState) => {
     // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
     const withIncome = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
@@ -179,7 +190,7 @@ function AppContent() {
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
       onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} />;
 
-  return <SafeAreaView style={styles.app}>
+  return <SafeAreaView style={styles.app} edges={["top", "left", "right"]}>
     <StatusBar style="dark" />
     <View style={styles.header}>
       <View><Text style={styles.brand}>FamilyLoop</Text><Text style={styles.household}>{selected?.name || state.household.name}</Text></View>
@@ -223,7 +234,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: () => Promise<void> 
 }
 
 function Page({ children, onRefresh }: React.PropsWithChildren<{ onRefresh?: () => void }>) {
-  return <ScrollView contentContainerStyle={styles.content} refreshControl={onRefresh ? <RefreshControl refreshing={false} onRefresh={onRefresh} /> : undefined}>{children}</ScrollView>;
+  return <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets refreshControl={onRefresh ? <RefreshControl refreshing={false} onRefresh={onRefresh} /> : undefined}>{children}</ScrollView>;
 }
 function Title({ eyebrow, children }: React.PropsWithChildren<{ eyebrow: string }>) { return <View style={styles.titleBlock}><Text style={styles.eyebrow}>{eyebrow}</Text><Text style={styles.title}>{children}</Text></View>; }
 function Card({ children }: React.PropsWithChildren) { return <View style={styles.card}>{children}</View>; }
@@ -260,7 +271,7 @@ function TagChips({ tags, suggestions, onChange }: { tags: string[]; suggestions
       </Pressable>)}
       <TextInput style={styles.tagInput} value={text} onChangeText={setText} placeholder="+ Add tag" returnKeyType="done" autoCapitalize="none" onEndEditing={(event) => commit(event.nativeEvent.text)} />
     </View>
-    {suggestions.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+    {suggestions.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
       {suggestions.map((tag) => <Pressable key={tag} style={styles.choice} onPress={() => commit(tag)}><Text style={styles.choiceText}>+ {tag}</Text></Pressable>)}
     </ScrollView> : null}
   </View>;
@@ -402,11 +413,11 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         ? <Text style={styles.muted}>Split across {state.transactions[editingTxIndex as number]?.splits?.length} categories - its amount and categories are changed with the scissors button in the list below.</Text>
         : <>
       <Text style={styles.label}>Category</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, txLineId === line.id && styles.choiceActive]} onPress={() => setTxLineId(line.id)}><Text style={[styles.choiceText, txLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, txLineId === line.id && styles.choiceActive]} onPress={() => setTxLineId(line.id)}><Text style={[styles.choiceText, txLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
         </>}
       {accounts.length ? <>
         <Text style={styles.label}>Account (optional)</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
           <Pressable style={[styles.choice, !txAccountId && styles.choiceActive]} onPress={() => setTxAccountId("")}><Text style={[styles.choiceText, !txAccountId && styles.choiceTextActive]}>None</Text></Pressable>
           {accounts.map((account) => <Pressable key={account.id} style={[styles.choice, txAccountId === account.id && styles.choiceActive]} onPress={() => setTxAccountId(account.id)}><Text style={[styles.choiceText, txAccountId === account.id && styles.choiceTextActive]}>{account.name}</Text></Pressable>)}
         </ScrollView>
@@ -422,7 +433,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
       <View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Split {splitTransaction.payee}</Text><Text style={styles.rowValue}>{money(Number(splitTransaction.amount), currency)}</Text></View>
       <Text style={styles.muted}>Divide this transaction across categories. The amounts must add up to the total.</Text>
       {splitRows.map((row, rowIndex) => <View key={rowIndex} style={styles.planTaskBlock}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, row.lineId === line.id && styles.choiceActive]} onPress={() => setSplitRows((prev) => prev.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, lineId: line.id } : item))}><Text style={[styles.choiceText, row.lineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, row.lineId === line.id && styles.choiceActive]} onPress={() => setSplitRows((prev) => prev.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, lineId: line.id } : item))}><Text style={[styles.choiceText, row.lineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
         <View style={styles.actionRow}>
           <TextInput style={[styles.input, { flex: 1 }]} value={row.amount} onChangeText={(value) => setSplitRows((prev) => prev.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, amount: value } : item))} placeholder="Amount" keyboardType="numbers-and-punctuation" />
           <Pressable style={styles.planStepperButton} onPress={() => setSplitRows((prev) => prev.filter((_, itemIndex) => itemIndex !== rowIndex))} accessibilityLabel="Remove this split row"><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
@@ -447,7 +458,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         pendingImpact.debtCount ? `${pendingImpact.debtCount} Wealth item${pendingImpact.debtCount === 1 ? "" : "s"}` : null,
         pendingImpact.paycheckCount ? `${pendingImpact.paycheckCount} paycheck${pendingImpact.paycheckCount === 1 ? "" : "s"}` : null
       ].filter(Boolean).join(", ")} still linked. Pick where to move them, or leave them unassigned.</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
         <Pressable style={styles.choice} onPress={() => void confirmPendingDelete("")}><Text style={styles.choiceText}>Leave unassigned</Text></Pressable>
         {allLines.filter((line) => !pendingDelete.lineIds.includes(line.id)).map((line) => <Pressable key={line.id} style={styles.choice} onPress={() => void confirmPendingDelete(line.id)}><Text style={styles.choiceText}>{line.category} · {line.name}</Text></Pressable>)}
       </ScrollView>
@@ -535,8 +546,6 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
   const [photoDraft, setPhotoDraft] = useState<(ReminderPhotoDraft & { previewUri: string }) | null>(null);
   const [readingPhoto, setReadingPhoto] = useState(false);
   const pickPhotoReminder = async () => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to read a reminder from a photo.");
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.6 });
     const asset = result.canceled ? null : result.assets?.[0];
     if (!asset?.base64) return;
@@ -730,14 +739,14 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     </View>}
     <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Title" /><TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
     {kind === "event" && (editing === null || state.calendar.events[editing.index]?.type === "reminder") ? <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="Time (HH:MM, 24-hour) - when you'll be reminded" keyboardType="numbers-and-punctuation" maxLength={5} /> : null}
-    <Text style={styles.label}>Assign to</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
+    <Text style={styles.label}>Assign to</Text><ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
     {kind === "event" && <>
       <Text style={styles.label}>Repeat</Text>
       <View style={styles.choiceRow}>{(["once", "weekly", "monthly", "yearly"] as ReminderRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, recurrence === item && styles.choiceActive]} onPress={() => setRecurrence(item)}><Text style={[styles.choiceText, recurrence === item && styles.choiceTextActive]}>{reminderRecurrenceLabels[item]}</Text></Pressable>)}</View>
     </>}
     {kind === "chore" && <>
       <Text style={styles.label}>Repeat</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{(Object.keys(choreCadenceLabels) as ChoreRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, choreRecurrence === item && styles.choiceActive]} onPress={() => setChoreRecurrence(item)}><Text style={[styles.choiceText, choreRecurrence === item && styles.choiceTextActive]}>{choreCadenceLabels[item]}</Text></Pressable>)}</ScrollView>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{(Object.keys(choreCadenceLabels) as ChoreRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, choreRecurrence === item && styles.choiceActive]} onPress={() => setChoreRecurrence(item)}><Text style={[styles.choiceText, choreRecurrence === item && styles.choiceTextActive]}>{choreCadenceLabels[item]}</Text></Pressable>)}</ScrollView>
     </>}
     <View style={styles.actionRow}>
       <Pressable style={styles.primaryButton} onPress={() => void saveItem()}><Text style={styles.primaryButtonText}>{editing ? "Save changes" : kind === "chore" ? "Add chore" : "Add reminder"}</Text></Pressable>
@@ -843,9 +852,9 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   };
   return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card>
     <Text style={styles.label}>Week</Text>
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{weeks.map((item) => <Pressable key={item.number} style={[styles.choice, week === item.number && styles.choiceActive]} onPress={() => void selectWeek(item.number)}><Text style={[styles.choiceText, week === item.number && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</ScrollView>
+    <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{weeks.map((item) => <Pressable key={item.number} style={[styles.choice, week === item.number && styles.choiceActive]} onPress={() => void selectWeek(item.number)}><Text style={[styles.choiceText, week === item.number && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</ScrollView>
     <View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
-    <Text style={styles.label}>Day</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
+    <Text style={styles.label}>Day</Text><ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
     <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>
     <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => { setRecipeId(recipe.id); setCustomMeal(""); }}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={customMeal} onChangeText={(text) => { setCustomMeal(text); setRecipeId(""); }} placeholder="Or type any meal (no recipe)" /><TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
   </Card>{weekDayDates.map(({ day: mealDay, date }) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text><Text style={styles.muted}>{formatShortDate(date)}</Text>{slots.flatMap((mealSlot) => { const items = current.filter((item) => item.day === mealDay && (item.slot || "Dinner") === mealSlot); return items.length ? items.map((item, index) => <Row key={`${mealSlot}-${item.recipeId}-${index}`} title={item.meal} detail={`${mealSlot} · ${item.servings} servings`} />) : [<Pressable key={`${mealSlot}-open`} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>]; })}</Card>)}</Page>;
@@ -888,8 +897,6 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   }, [documents]);
 
   const addPhoto = async (note: Note) => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to attach photos to notes.");
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7 });
     const asset = result.canceled ? null : result.assets?.[0];
     if (!asset) return;
@@ -981,7 +988,7 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
         <Pressable onPress={() => deleteNote(note)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
       </View>
       {note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}
-      {noteLinkedImages(documents, note.id).length ? <ScrollView horizontal style={styles.journalPhotoRow}>{noteLinkedImages(documents, note.id).map((photo) => <Pressable key={photo.id} onPress={() => removePhoto(photo)} accessibilityLabel={`Remove photo ${photo.name}`}>
+      {noteLinkedImages(documents, note.id).length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{noteLinkedImages(documents, note.id).map((photo) => <Pressable key={photo.id} onPress={() => removePhoto(photo)} accessibilityLabel={`Remove photo ${photo.name}`}>
         {imageUrls[photo.id] ? <Image source={{ uri: imageUrls[photo.id] }} style={styles.journalPhoto} /> : <View style={[styles.journalPhoto, { backgroundColor: colors.panel }]} />}
       </Pressable>)}</ScrollView> : null}
       {note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}
@@ -1028,8 +1035,6 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
   };
 
   const addPhoto = async (entryId: string) => {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to attach photos to journal entries.");
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.5 });
     const asset = result.canceled ? null : result.assets?.[0];
     if (!asset?.base64) return;
@@ -1046,7 +1051,7 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
     <Card>
       <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Give today a title" />
       <Text style={styles.label}>Mood</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
         {journalMoods.map((item) => <Pressable key={item} style={[styles.choice, mood === item && styles.choiceActive]} onPress={() => setMood(mood === item ? "" : item)}><Text style={[styles.choiceText, mood === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}
       </ScrollView>
       <TextInput style={[styles.input, styles.multilineInput]} value={body} onChangeText={setBody} placeholder="What happened today?" multiline />
@@ -1062,7 +1067,7 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
       <Text style={styles.muted}>{entry.entryDate}{entry.mood ? ` · ${entry.mood}` : ""}</Text>
       {entry.body ? <Text style={styles.noteBody}>{entry.body}</Text> : null}
       <TextInput style={[styles.input, { marginTop: 6 }]} defaultValue={entry.gratitude || ""} onEndEditing={(event) => void updateGratitude(entry.id, event.nativeEvent.text)} placeholder="🙏 Grateful for..." />
-      {entry.photos.length ? <ScrollView horizontal style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
+      {entry.photos.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
       <Pressable style={styles.secondarySmall} onPress={() => void addPhoto(entry.id)}><Text style={styles.secondaryButtonText}>+ Add photo</Text></Pressable>
     </Card>)}
   </Page>;
@@ -1351,6 +1356,17 @@ function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateD
   </Page>;
 }
 
+// An inline list of choices, used instead of Alert.alert for long pickers: Android's Alert shows at most three
+// buttons, so a list of folders or wealth items passed to it would silently lose everything past the third.
+type PickerOption = { label: string; onPress: () => void };
+function OptionList({ title, options, onClose }: { title: string; options: PickerOption[]; onClose: () => void }) {
+  return <View style={styles.subtaskList}>
+    <Text style={styles.label}>{title}</Text>
+    {options.length ? options.map((option) => <Pressable key={option.label} style={styles.checkRow} onPress={() => { option.onPress(); onClose(); }}><Text style={styles.checkText}>{option.label}</Text></Pressable>) : <Text style={styles.muted}>Nothing to choose from yet</Text>}
+    <Pressable style={styles.secondarySmall} onPress={onClose}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+  </View>;
+}
+
 function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, viewerName, onDownload, onDelete, onLinkNote, onMove, onLinkWealth, onChangeExpiry }: {
   document: Document; notes: Note[]; folders: DocumentsData["folders"]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[]; viewerName: string;
   onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void;
@@ -1365,24 +1381,16 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
   const expiryBadge = documentExpiryBadge(document.expiryDate);
   const expiryToneColor = expiryBadge?.tone === "danger" ? colors.coral : expiryBadge?.tone === "warning" ? colors.gold : colors.muted;
 
-  const promptMove = () => {
-    const options = [
-      ...folders.filter((folder) => folder.id !== document.folderId).map((folder) => ({ text: folder.name, onPress: () => onMove(folder.id) })),
-      ...(document.folderId ? [{ text: "All documents (root)", onPress: () => onMove(null) }] : []),
-      { text: "Cancel", style: "cancel" as const }
-    ];
-    Alert.alert("Move to folder", document.name, options);
-  };
-
-  const promptWealthLink = () => {
-    const options = [
-      ...(document.wealthItemId ? [{ text: "Remove tag", onPress: () => onLinkWealth(null, null) }] : []),
-      ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ text: `Asset: ${asset.name}`, onPress: () => onLinkWealth("asset", asset.id as string) })),
-      ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ text: `Liability: ${liability.name}`, onPress: () => onLinkWealth("liability", liability.id as string) })),
-      { text: "Cancel", style: "cancel" as const }
-    ];
-    Alert.alert("Tag to a wealth item", document.name, options);
-  };
+  const [picker, setPicker] = useState<"move" | "wealth" | null>(null);
+  const moveOptions: PickerOption[] = [
+    ...folders.filter((folder) => folder.id !== document.folderId).map((folder) => ({ label: folder.name, onPress: () => onMove(folder.id) })),
+    ...(document.folderId ? [{ label: "All documents (root)", onPress: () => onMove(null) }] : [])
+  ];
+  const wealthOptions: PickerOption[] = [
+    ...(document.wealthItemId ? [{ label: "Remove tag", onPress: () => onLinkWealth(null, null) }] : []),
+    ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ label: `Asset: ${asset.name}`, onPress: () => onLinkWealth("asset", asset.id as string) })),
+    ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ label: `Liability: ${liability.name}`, onPress: () => onLinkWealth("liability", liability.id as string) }))
+  ];
 
   return <View style={styles.planTaskBlock}>
     <View style={styles.row}>
@@ -1401,10 +1409,10 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
           />
         </View>
       </View>
-      <Pressable onPress={promptMove}><Ionicons name="folder-outline" size={20} color={colors.text} /></Pressable>
+      <Pressable onPress={() => setPicker(picker === "move" ? null : "move")}><Ionicons name="folder-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={onDownload}><Ionicons name="download-outline" size={20} color={colors.text} /></Pressable>
       <Pressable onPress={() => setShowNotePicker((prev) => !prev)}><Ionicons name="link-outline" size={20} color={linkedNote ? colors.green : colors.muted} /></Pressable>
-      <Pressable onPress={promptWealthLink}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
+      <Pressable onPress={() => setPicker(picker === "wealth" ? null : "wealth")}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
       <Pressable onPress={onDelete}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>
     {showNotePicker ? <View style={styles.subtaskList}>
@@ -1417,6 +1425,8 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
         <Text style={styles.checkText}>{note.title || "Untitled note"}</Text>
       </Pressable>)}
     </View> : null}
+    {picker === "move" ? <OptionList title="Move to folder" options={moveOptions} onClose={() => setPicker(null)} /> : null}
+    {picker === "wealth" ? <OptionList title="Tag to a wealth item" options={wealthOptions} onClose={() => setPicker(null)} /> : null}
   </View>;
 }
 
@@ -1479,15 +1489,12 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }:
     catch (cause) { showError("Could not tag folder", cause); }
   };
 
-  const promptFolderWealthLink = (folder: DocumentsData["folders"][number]) => {
-    const options = [
-      ...(folder.wealthItemId ? [{ text: "Remove tag", onPress: () => void linkFolderWealthItem(folder.id, null, null) }] : []),
-      ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ text: `Asset: ${asset.name}`, onPress: () => void linkFolderWealthItem(folder.id, "asset", asset.id as string) })),
-      ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ text: `Liability: ${liability.name}`, onPress: () => void linkFolderWealthItem(folder.id, "liability", liability.id as string) })),
-      { text: "Cancel", style: "cancel" as const }
-    ];
-    Alert.alert("Tag folder to a wealth item", folder.name, options);
-  };
+  const [folderPickerId, setFolderPickerId] = useState<string | null>(null);
+  const folderWealthOptions = (folder: DocumentsData["folders"][number]): PickerOption[] => [
+    ...(folder.wealthItemId ? [{ label: "Remove tag", onPress: () => void linkFolderWealthItem(folder.id, null, null) }] : []),
+    ...wealthAssets.filter((asset) => asset.id).map((asset) => ({ label: `Asset: ${asset.name}`, onPress: () => void linkFolderWealthItem(folder.id, "asset", asset.id as string) })),
+    ...wealthLiabilities.filter((liability) => liability.id).map((liability) => ({ label: `Liability: ${liability.name}`, onPress: () => void linkFolderWealthItem(folder.id, "liability", liability.id as string) }))
+  ];
 
   const uploadDocument = async () => {
     const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
@@ -1599,14 +1606,16 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }:
           <Pressable onPress={() => setRenamingFolderId(null)}><Ionicons name="close-outline" size={20} color={colors.muted} /></Pressable>
         </View>;
       }
-      return <View key={folder.id} style={styles.row}>
+      return <View key={folder.id}><View style={styles.row}>
         <Pressable style={styles.rowCopy} onPress={() => setCurrentFolderId(folder.id)}>
           <Text style={styles.rowTitle}>{folder.name}</Text>
           {linkedWealthItem ? <Text style={styles.rowDetail}>Tagged to {folder.wealthItemType === "liability" ? "Liability" : "Asset"}: {linkedWealthItem.name}</Text> : null}
         </Pressable>
         <Pressable onPress={() => startRenameFolder(folder.id, folder.name)}><Ionicons name="pencil-outline" size={18} color={colors.text} /></Pressable>
-        <Pressable onPress={() => promptFolderWealthLink(folder)}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
+        <Pressable onPress={() => setFolderPickerId(folderPickerId === folder.id ? null : folder.id)}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
         <Pressable onPress={() => deleteFolder(folder.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>
+      {folderPickerId === folder.id ? <OptionList title="Tag folder to a wealth item" options={folderWealthOptions(folder)} onClose={() => setFolderPickerId(null)} /> : null}
       </View>;
     })}</Card> : null}
     <Card>{documents.length
@@ -1630,6 +1639,7 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [itemDrafts, setItemDrafts] = useState<Record<string, string>>({});
   const [outcomeDrafts, setOutcomeDrafts] = useState<Record<string, string>>({});
+  const [notesDrafts, setNotesDrafts] = useState<Record<string, string>>({});
   const author = { key: user.email, name: user.name };
 
   const saveDecisions = (next: Decision[]) => onSave({ ...state, decisions: next });
@@ -1706,7 +1716,8 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
           <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => change(decision.id, reopenDecision)}><Text style={styles.secondaryButtonText}>Reopen</Text></Pressable>
         </View> : null}
         {isExpanded ? <View style={{ marginTop: 8 }}>
-          <TextInput key={decision.notes} style={[styles.input, styles.multilineInput]} defaultValue={decision.notes} placeholder="Any context worth remembering (optional)" multiline onEndEditing={(event) => change(decision.id, (current) => ({ ...current, notes: event.nativeEvent.text.trim() }))} />
+          <TextInput style={[styles.input, styles.multilineInput]} value={notesDrafts[decision.id] ?? decision.notes} onChangeText={(value) => setNotesDrafts((prev) => ({ ...prev, [decision.id]: value }))} placeholder="Any context worth remembering (optional)" multiline
+            onBlur={() => { const draft = notesDrafts[decision.id]; if (draft !== undefined && draft.trim() !== decision.notes) change(decision.id, (current) => ({ ...current, notes: draft.trim() })); setNotesDrafts((prev) => { const { [decision.id]: _done, ...rest } = prev; return rest; }); }} />
           {renderList(decision, "pros")}
           {renderList(decision, "cons")}
           {!isDecided ? <View style={styles.actionRow}>
@@ -1841,7 +1852,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     {Object.keys(counts).length && accounts.length ? <Card>
       <Text style={styles.cardTitle}>Clear an account's backlog</Text>
       <Text style={styles.muted}>Remove every unreviewed row for one account instead of reviewing each one.</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, clearAccountId === account.id && styles.choiceActive]} onPress={() => setClearAccountId(clearAccountId === account.id ? "" : account.id)}>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, clearAccountId === account.id && styles.choiceActive]} onPress={() => setClearAccountId(clearAccountId === account.id ? "" : account.id)}>
         <Text style={[styles.choiceText, clearAccountId === account.id && styles.choiceTextActive]}>{account.name}{counts[account.id] ? ` (${counts[account.id]})` : ""}</Text>
       </Pressable>)}</ScrollView>
       {clearAccountId ? <Pressable style={styles.secondarySmall} onPress={confirmClear}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Clear</Text></Pressable> : null}
@@ -1860,7 +1871,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         </View>
         <Text style={styles.rowDetail}>{account && account.type !== "credit_card" ? "Amount as on your bank statement (deposit +, expense -)" : "Amount (purchase +, refund/payment -)"}</Text>
         <Text style={styles.label}>Category</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
           <Pressable style={[styles.choice, !draft.lineId && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { lineId: "" }))}><Text style={[styles.choiceText, !draft.lineId && styles.choiceTextActive]}>Unassigned</Text></Pressable>
           {lines.map((line) => <Pressable key={line.id} style={[styles.choice, draft.lineId === line.id && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { lineId: line.id }))}><Text style={[styles.choiceText, draft.lineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}
         </ScrollView>
@@ -1870,7 +1881,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         </View>
         {accounts.length ? <>
           <Text style={styles.label}>Account</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
             <Pressable style={[styles.choice, !draft.accountId && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { accountId: "" }))}><Text style={[styles.choiceText, !draft.accountId && styles.choiceTextActive]}>Not linked</Text></Pressable>
             {accounts.map((item) => <Pressable key={item.id} style={[styles.choice, draft.accountId === item.id && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { accountId: item.id }))}><Text style={[styles.choiceText, draft.accountId === item.id && styles.choiceTextActive]}>{item.name}{item.closedAt ? " (closed)" : ""}</Text></Pressable>)}
           </ScrollView>
@@ -1880,7 +1891,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         <TagChips tags={draft.tags || []} suggestions={tagSuggestions(state.transactions, draft.tags)} onChange={(tags) => void apply(updateDraft(state, id, { tags }))} />
         {isTransfer ? <View style={styles.planTaskBlock}>
           <Text style={styles.label}>{Number(draft.amount) > 0 ? "Money went to" : "Money came from"}</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.filter((item) => item.id !== draft.accountId).map((item) => <Pressable key={item.id} style={[styles.choice, transferAccountId === item.id && styles.choiceActive]} onPress={() => setTransferAccountId(item.id)}><Text style={[styles.choiceText, transferAccountId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</ScrollView>
+          <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.filter((item) => item.id !== draft.accountId).map((item) => <Pressable key={item.id} style={[styles.choice, transferAccountId === item.id && styles.choiceActive]} onPress={() => setTransferAccountId(item.id)}><Text style={[styles.choiceText, transferAccountId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</ScrollView>
           <View style={styles.actionRow}>
             <Pressable style={styles.primaryButton} onPress={() => void confirmTransfer(draft)}><Text style={styles.primaryButtonText}>Move to Transfers</Text></Pressable>
             <Pressable style={styles.secondarySmall} onPress={() => setTransferDraftId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
@@ -2665,9 +2676,9 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       <Text style={styles.cardTitle}>Transfers</Text>
       {accounts.length >= 2 ? <>
         <Text style={styles.label}>From</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferFrom === account.id && styles.choiceActive]} onPress={() => setTransferFrom(account.id)}><Text style={[styles.choiceText, transferFrom === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferFrom === account.id && styles.choiceActive]} onPress={() => setTransferFrom(account.id)}><Text style={[styles.choiceText, transferFrom === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
         <Text style={styles.label}>To</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferTo === account.id && styles.choiceActive]} onPress={() => setTransferTo(account.id)}><Text style={[styles.choiceText, transferTo === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferTo === account.id && styles.choiceActive]} onPress={() => setTransferTo(account.id)}><Text style={[styles.choiceText, transferTo === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
         <View style={styles.actionRow}>
           <TextInput style={[styles.input, { flex: 1 }]} value={transferAmount} onChangeText={setTransferAmount} placeholder="Amount" keyboardType="decimal-pad" />
           <TextInput style={[styles.input, { flex: 1 }]} value={transferDate} onChangeText={setTransferDate} placeholder="YYYY-MM-DD" />

@@ -26,7 +26,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "FamilyLoop uses your photos to attach them to journal entries."
+          "photosPermission": "FamilyLoop uses your photos to attach them to journal entries and notes, and to read reminders from a photo."
         }
       ]
     ],

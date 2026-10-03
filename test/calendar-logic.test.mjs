@@ -173,3 +173,18 @@ test("advanceRecurringReminder moves date, dateTime, reminderAt and notifyAt tog
   assert.equal(weekly.reminderAt, undefined);
   assert.equal(weekly.notifyAt, undefined);
 });
+
+import { localInstant } from "../src/calendarLogic.ts";
+
+test("localInstant builds device-local times from numeric parts and rejects anything that isn't a real date/time instead of rolling it over", () => {
+  assert.equal(localInstant("2026-07-20", "14:30").getTime(), new Date(2026, 6, 20, 14, 30).getTime());
+  assert.equal(localInstant(" 2026-07-20 ", " 09:05 ").getHours(), 9);
+  assert.equal(localInstant("2026-13-01", "09:00"), null);
+  assert.equal(localInstant("2026-02-30", "09:00"), null);
+  assert.equal(localInstant("2026-07-20", "25:00"), null);
+  assert.equal(localInstant("2026-07-20", "09:60"), null);
+  assert.equal(localInstant("garbage", "09:00"), null);
+  assert.equal(localInstant("2026-07-20", ""), null);
+  assert.equal(reminderTiming("2026-02-30", "09:00"), null, "a date that does not exist is not a reminder time");
+  assert.equal(reminderTiming("2026-07-20", "9pm").dateTime, "2026-07-20T09:00");
+});

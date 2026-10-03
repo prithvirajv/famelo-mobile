@@ -145,6 +145,19 @@ export function normalizeReminderPhotoDraft(raw: unknown): ReminderPhotoDraft {
 
 export type PhotoReminderInput = { title: string; date: string; time: string; location: string };
 
+// A date + 24-hour time as a Date in the device's own timezone, or null if either part isn't real. Built from numeric
+// parts on purpose instead of parsing "YYYY-MM-DDTHH:MM": that string has no seconds or zone, and whether it is read as
+// local time (as the spec says) is exactly the kind of thing that differs between JS engines, so it must not decide when
+// a reminder fires on iOS vs Android. Impossible values (month 13, Feb 30, 25:00) are rejected rather than rolled over.
+export function localInstant(date: string, time: string): Date | null {
+  const [year, month, day] = date.trim().split("-").map(Number);
+  const [hour, minute] = time.trim().split(":").map(Number);
+  if (![year, month, day, hour, minute].every((part) => Number.isInteger(part))) return null;
+  const instant = new Date(year as number, (month as number) - 1, day as number, hour as number, minute as number);
+  const exact = instant.getFullYear() === year && instant.getMonth() === (month as number) - 1 && instant.getDate() === day && instant.getHours() === hour && instant.getMinutes() === minute;
+  return exact ? instant : null;
+}
+
 export type ReminderTiming = { dateTime: string; reminderAt: string; notifyAt: string };
 
 // A plain reminder's schedule as web writes it: dateTime is the event's own date+time, and reminderAt /
@@ -156,8 +169,8 @@ export function reminderTiming(date: string, time: string): ReminderTiming | nul
   if (!DATE_PATTERN.test(date.trim())) return null;
   const cleanTime = TIME_PATTERN.test(time.trim()) ? time.trim() : "09:00";
   const dateTime = `${date.trim()}T${cleanTime}`;
-  const instant = new Date(dateTime);
-  if (Number.isNaN(instant.getTime())) return null;
+  const instant = localInstant(date, cleanTime);
+  if (!instant) return null;
   return { dateTime, reminderAt: dateTime, notifyAt: instant.toISOString() };
 }
 
@@ -174,8 +187,8 @@ export function advanceRecurringReminder(event: CalendarEvent): CalendarEvent {
     const reminderTime = event.reminderAt.slice(11, 16) || "09:00";
     const nextReminderAt = `${advanceReminderDate(event.reminderAt.slice(0, 10), recurrence)}T${reminderTime}`;
     next.reminderAt = nextReminderAt;
-    const instant = new Date(nextReminderAt);
-    if (!Number.isNaN(instant.getTime())) next.notifyAt = instant.toISOString();
+    const instant = localInstant(nextReminderAt.slice(0, 10), nextReminderAt.slice(11, 16));
+    if (instant) next.notifyAt = instant.toISOString();
   }
   return next;
 }
@@ -509,8 +522,8 @@ export function calendarDraftToItem(draft: CalendarImportDraft, assignees: Array
   if (draft.kind === "chore") {
     const recurrence = (Object.keys(choreCadenceLabels).includes(draft.recurrence) ? draft.recurrence : "once") as ChoreRecurrence;
     const endDate = recurrence === "once" ? "" : draft.endDate || "";
-    const instant = new Date(`${draft.date}T${time}`);
-    if (Number.isNaN(instant.getTime())) return null;
+    const instant = localInstant(draft.date, time);
+    if (!instant) return null;
     const base = choreCadenceLabels[recurrence];
     return { kind: "chore", item: {
       id: createId(), title: draft.title, assignee: first?.key || "", assigneeName: first?.name || "", assignees,
@@ -520,8 +533,8 @@ export function calendarDraftToItem(draft: CalendarImportDraft, assignees: Array
   }
   const isAnnual = ANNUAL_EVENT_TYPES.includes(draft.type);
   const dateTime = `${draft.date}T${time}`;
-  const instant = new Date(dateTime);
-  if (Number.isNaN(instant.getTime())) return null;
+  const instant = localInstant(draft.date, time);
+  if (!instant) return null;
   const monthDay = isAnnual ? draft.date.slice(5) : undefined;
   const reminderDays = isAnnual ? (draft.reminderDays ?? 1) : undefined;
   const recurrence = (REMINDER_RECURRENCES.includes(draft.recurrence) ? draft.recurrence : "once") as ReminderRecurrence;
