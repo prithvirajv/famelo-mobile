@@ -34,7 +34,7 @@ import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, Calend
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
@@ -2750,6 +2750,23 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     }]);
   };
 
+  // Display currency for the net-worth summary only (individual accounts and holdings stay in the household's currency). Rates
+  // come from the server, cached per session; until they load, or if a rate is missing, the original amount is shown rather
+  // than a guess.
+  const [displayCurrency, setDisplayCurrency] = useState(currency);
+  const [fxRates, setFxRates] = useState<{ rates: Record<string, number>; date: string } | null>(null);
+  const [fxError, setFxError] = useState("");
+  const chooseDisplayCurrency = async (code: string) => {
+    setDisplayCurrency(code);
+    if (code === currency || fxRates) return;
+    try { const result = await api.fxRates(); setFxRates({ rates: result.rates, date: result.date }); setFxError(""); }
+    catch (cause) { setFxError(cause instanceof Error ? cause.message : "Exchange rates are unavailable right now"); }
+  };
+  const shownCurrency = displayCurrency === currency || convertCurrency(1, currency, displayCurrency, fxRates?.rates) !== null ? displayCurrency : currency;
+  const inDisplayCurrency = (amount: number) => convertCurrency(amount, currency, shownCurrency, fxRates?.rates) ?? amount;
+  const allocation = assetAllocationBreakdown(netWorthAssets);
+  const ALLOCATION_COLORS = { cash: colors.blue, stock: colors.green, property: colors.gold, other: colors.muted } as const;
+
   // ---- Stock / fund holdings: edit a group, refresh live prices --------------------------------------------
   // After an await the closed-over `state` can be stale (the user may have edited meanwhile), so the quote
   // results are applied onto the latest state through this ref instead.
@@ -2941,7 +2958,10 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
 
     <Card>
       <Text style={styles.cardTitle}>Net worth</Text>
-      <Text style={styles.heroValue}>{money(netWorthNow, currency)}</Text>
+      <Text style={styles.heroValue}>{money(inDisplayCurrency(netWorthNow), shownCurrency)}</Text>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{displayCurrencyOptions(currency).map((code) => <Pressable key={code} style={[styles.choice, displayCurrency === code && styles.choiceActive]} onPress={() => void chooseDisplayCurrency(code)}><Text style={[styles.choiceText, displayCurrency === code && styles.choiceTextActive]}>{code}</Text></Pressable>)}</ScrollView>
+      {shownCurrency !== currency ? <Text style={styles.muted}>Converted from {currency} using exchange rates{fxRates?.date ? ` from ${fxRates.date}` : ""}. Accounts and holdings below stay in {currency}.</Text> : null}
+      {displayCurrency !== currency && shownCurrency === currency ? <Text style={styles.muted}>{fxError || "Loading exchange rates…"}</Text> : null}
       <Text style={styles.muted}>Trailing 6 months</Text>
       <View style={styles.cashFlowChart}>
         {trend.map((point) => <View key={point.month} style={styles.cashFlowColumn}>
@@ -2950,6 +2970,16 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
         </View>)}
       </View>
     </Card>
+
+    {allocation.length ? <Card>
+      <Text style={styles.cardTitle}>Asset allocation</Text>
+      <View style={styles.flowBar}>{allocation.map((segment) => <View key={segment.key} style={{ flex: segment.value, minWidth: 2, backgroundColor: ALLOCATION_COLORS[segment.key] }} />)}</View>
+      {allocation.map((segment) => <View key={segment.key} style={styles.row}>
+        <View style={[styles.flowDot, { backgroundColor: ALLOCATION_COLORS[segment.key] }]} />
+        <View style={styles.rowCopy}><Text style={styles.rowTitle}>{segment.label}</Text><Text style={styles.rowDetail}>{segment.percent}% of your assets</Text></View>
+        <Text style={styles.rowValue}>{money(segment.value, currency)}</Text>
+      </View>)}
+    </Card> : null}
 
     <Card>
       <Text style={styles.cardTitle}>Accounts</Text>

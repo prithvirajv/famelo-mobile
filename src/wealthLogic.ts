@@ -423,3 +423,42 @@ export function formatRelativeTime(iso: string | undefined, now: Date = new Date
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
+
+
+// ---- Display currency and asset allocation ---------------------------------------------------------------------------------
+// Rates come from the server's /api/fx-rates, which is always relative to USD (rates[EUR] = how many euros per dollar).
+
+// Converts an amount between two currencies using USD-based rates, or null when a needed rate isn't available - the caller shows
+// the original amount rather than guessing. (Web multiplies by rates[target] as if every amount were already USD, which is
+// wrong for a household that keeps its books in another currency, so this converts from the household's own currency.)
+export function convertCurrency(amount: number, from: string, to: string, usdRates: Record<string, number> | null | undefined): number | null {
+  if (from === to) return amount;
+  const rateOf = (code: string) => (code === "USD" ? 1 : Number(usdRates?.[code]));
+  const fromRate = rateOf(from);
+  const toRate = rateOf(to);
+  if (!(fromRate > 0) || !(toRate > 0)) return null;
+  return (amount / fromRate) * toRate;
+}
+
+// The currencies offered for the net-worth summary: the household's own first, then a few common ones, without repeats.
+export function displayCurrencyOptions(householdCurrency: string): string[] {
+  return [...new Set([householdCurrency || "USD", "USD", "EUR", "GBP", "INR"])];
+}
+
+export type AllocationSegment = { key: "cash" | "stock" | "property" | "other"; label: string; value: number; percent: number };
+
+// Buckets every asset (never liabilities) into four classes: cash, stocks & funds (retirement accounts are folded in - they are
+// stock/fund holdings underneath), property and everything else. Empty buckets are left out; largest first.
+export function assetAllocationBreakdown(assets: WealthAsset[]): AllocationSegment[] {
+  const labels = { cash: "Cash", stock: "Stocks & funds", property: "Property", other: "Other" } as const;
+  const groups: Record<AllocationSegment["key"], number> = { cash: 0, stock: 0, property: 0, other: 0 };
+  assets.forEach((asset) => {
+    const bucket: AllocationSegment["key"] = asset.assetClass === "retirement" || asset.assetClass === "stock" ? "stock" : asset.assetClass === "cash" || asset.assetClass === "property" ? asset.assetClass : "other";
+    groups[bucket] += Math.max(0, assetValue(asset));
+  });
+  const total = Object.values(groups).reduce((sum, value) => sum + value, 0);
+  return (Object.keys(groups) as AllocationSegment["key"][])
+    .filter((key) => groups[key] > 0)
+    .map((key) => ({ key, label: labels[key], value: groups[key], percent: total ? Math.round((groups[key] / total) * 100) : 0 }))
+    .sort((a, b) => b.value - a.value);
+}

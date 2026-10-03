@@ -412,3 +412,35 @@ test("formatRelativeTime gives web's just now / minutes / hours / days captions"
   assert.equal(formatRelativeTime("2026-07-10T09:00:00.000Z", now), "3h ago");
   assert.equal(formatRelativeTime("2026-07-08T12:00:00.000Z", now), "2d ago");
 });
+
+import { convertCurrency, displayCurrencyOptions, assetAllocationBreakdown } from "../src/wealthLogic.ts";
+
+test("convertCurrency uses USD-based rates in either direction, from the household's own currency, and returns null rather than guessing", () => {
+  const rates = { EUR: 0.9, GBP: 0.8, INR: 83 };
+  assert.equal(convertCurrency(100, "USD", "USD", rates), 100);
+  assert.equal(convertCurrency(100, "USD", "EUR", rates), 90);
+  assert.equal(convertCurrency(90, "EUR", "USD", rates), 100);
+  assert.ok(Math.abs(convertCurrency(8300, "INR", "EUR", rates) - 90) < 1e-9, "INR -> EUR goes through USD");
+  assert.equal(convertCurrency(5, "INR", "INR", {}), 5, "same currency needs no rate");
+  assert.equal(convertCurrency(100, "USD", "JPY", rates), null);
+  assert.equal(convertCurrency(100, "USD", "EUR", null), null);
+  assert.equal(convertCurrency(100, "CAD", "EUR", rates), null);
+});
+
+test("displayCurrencyOptions puts the household currency first without repeats", () => {
+  assert.deepEqual(displayCurrencyOptions("INR"), ["INR", "USD", "EUR", "GBP"]);
+  assert.deepEqual(displayCurrencyOptions("USD"), ["USD", "EUR", "GBP", "INR"]);
+  assert.deepEqual(displayCurrencyOptions(""), ["USD", "EUR", "GBP", "INR"]);
+});
+
+test("assetAllocationBreakdown buckets assets into cash / stocks & funds / property / other, folding retirement into stocks, largest first", () => {
+  const assets = [
+    { id: "a", name: "Checking", value: 1000, assetClass: "cash" }, { id: "b", name: "401k", value: 0, assetClass: "retirement", shares: 10, price: 200 },
+    { id: "c", name: "AAPL", value: 0, assetClass: "stock", shares: 5, price: 100 }, { id: "d", name: "House", value: 6500, assetClass: "property" },
+    { id: "e", name: "Misc", value: 0, assetClass: "other" }, { id: "f", name: "Legacy", value: 500 }, { id: "g", name: "Negative", value: -300, assetClass: "cash" }
+  ];
+  const result = assetAllocationBreakdown(assets);
+  // total 10500: property 61.9%, stocks 23.8%, cash 9.5%, other 4.8% - the negative cash asset counts as 0, never subtracts
+  assert.deepEqual(result.map((r) => [r.key, r.label, r.value, r.percent]), [["property", "Property", 6500, 62], ["stock", "Stocks & funds", 2500, 24], ["cash", "Cash", 1000, 10], ["other", "Other", 500, 5]]);
+  assert.deepEqual(assetAllocationBreakdown([]), []);
+});

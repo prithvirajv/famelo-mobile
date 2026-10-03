@@ -72,6 +72,7 @@ export const api = {
   // AI fallbacks for a bank-stream row with no history match; each returns null when nothing is a confident match.
   suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines }) }),
   suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts }) }),
+  fxRates: () => request<{ base: string; rates: Record<string, number>; date: string }>("/api/fx-rates"),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

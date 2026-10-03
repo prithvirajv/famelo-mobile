@@ -430,3 +430,13 @@ test("Reports uses what was actually planned in each month (budget history), off
   const logic = fs.readFileSync(new URL("../src/reportsLogic.ts", import.meta.url), "utf8");
   assert.doesNotMatch(logic, /constant approximation/, "planned is no longer a live-budget approximation");
 });
+
+test("Wealth shows asset allocation and can display net worth in another currency using real server rates, never a guessed one", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /\/api\/fx-rates/);
+  const body = extractFunctionSource(app, "Wealth");
+  assert.match(body, /assetAllocationBreakdown\(netWorthAssets\)/);
+  assert.match(body, /convertCurrency\(amount, currency, shownCurrency, fxRates\?\.rates\) \?\? amount/, "a missing rate falls back to the original amount");
+  assertOnlyWholeStateSaves(body, "Wealth");
+});
