@@ -88,7 +88,7 @@ test("Calendar reminders support a repeat recurrence, matching web's advance-on-
   const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
   assert.match(types, /recurrence\?: ReminderRecurrence/);
   const body = extractFunctionSource(app, "Calendar");
-  assert.match(body, /advanceReminderDate/);
+  assert.match(body, /advanceRecurringReminder/);
   assert.match(body, /isReminderComplete/);
   // Calendar predates the onSave({ ...state, ... }) literal convention used by newer screens -
   // it already clones the full state up front (structuredClone(state)) and saves that clone,
@@ -104,7 +104,9 @@ test("Calendar supports adding a chore (not just editing existing ones), deletin
   assert.match(body, /next\.calendar\.chores\.push/);
   assert.match(body, /deleteEvent/);
   assert.match(body, /deleteChore/);
-  assert.match(body, /advanceChoreDate/);
+  assert.match(body, /toggleChoreCompletion\(/, "chore completion must be the date-keyed map web reads");
+  assert.match(body, /currentChoreOccurrenceDate\(/);
+  assert.doesNotMatch(body, /startDate = nextDate|target\.startDate/, "completing a chore must never move its recurrence anchor");
 });
 
 test("Notes support real CRUD (add/edit/pin/archive/delete/checklist-add), not just checklist toggling", () => {
@@ -202,7 +204,7 @@ test("Savings goals support auto-contribute (round-up / % of paycheck), applied 
   assert.match(body, /withGoalAutoContributions\(/);
   assert.match(body, /ensurePaycheckOccurrencesGenerated/, "percent goals need paycheck occurrences materialized before they can be counted");
   assertOnlyWholeStateSaves(body, "Wealth");
-  assert.match(app, /withGoalAutoContributions\(withIncome, localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
+  assert.match(app, /withGoalAutoContributions\(repairChoreCompletion\(withIncome\), localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
 });
 
 test("Notes can attach photos via the Documents pipeline (linked by noteId) and remove them", () => {
@@ -229,4 +231,13 @@ test("Calendar can draft a reminder from a photo via the server's vision endpoin
   // AI output is only ever a draft: the event is added in submitPhotoDraft, never straight from the API response
   assert.doesNotMatch(body.slice(body.indexOf("pickPhotoReminder"), body.indexOf("submitPhotoDraft")), /calendar\.events\.push/);
   assert.match(app, /<Calendar state=\{state\} access=\{access\} user=\{user\}/);
+});
+
+test("Reminders created or rescheduled on mobile carry a notifyAt (the server skips events without one), and recurring ones roll it forward", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Calendar");
+  assert.match(body, /reminderTiming\(date, time\)/);
+  assert.match(body, /advanceRecurringReminder\(target\)/);
+  assert.match(body, /completionKeyFor\(/, "completion keys must match web's assignee keys or the two apps disagree on done");
+  assert.match(app, /repairChoreCompletion\(withIncome\)/, "the shared save repairs the old flat-array chore completion shape");
 });

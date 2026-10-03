@@ -1,4 +1,4 @@
-import type { CalendarEvent, ChoreRecurrence, ReminderPhotoDraft, ReminderRecurrence } from "./types";
+import type { CalendarEvent, Chore, ChoreRecurrence, ReminderPhotoDraft, ReminderRecurrence } from "./types";
 
 function parseDateKey(value: string): Date {
   const [year, month, day] = value.split("-").map(Number);
@@ -45,20 +45,88 @@ export const choreCadenceLabels: Record<ChoreRecurrence, string> = {
   monthly: "Monthly", every3months: "Every 3 months", every4months: "Every 4 months", every6months: "Every 6 months", yearly: "Yearly"
 };
 
-// Web tracks chore completion via a date-keyed occurrence grid (isChoreOccurrencePendingFor);
-// mobile's flat-list Calendar screen instead mirrors the simpler single-occurrence
-// self-advance-on-complete model already used for reminders (see advanceReminderDate) -
-// a deliberate simplification, not a partial port of the grid.
-export function advanceChoreDate(value: string, recurrence?: ChoreRecurrence): string {
-  if (recurrence === "weekly" || recurrence === "biweekly" || recurrence === "triweekly") {
-    const days = recurrence === "weekly" ? 7 : recurrence === "biweekly" ? 14 : 21;
-    const date = parseDateKey(value);
-    date.setDate(date.getDate() + days);
-    return dateKey(date);
+// ---- Chores -------------------------------------------------------------------------------------
+// Web keeps a chore's recurrence anchored on startDate and derives every occurrence from elapsed time
+// (never from completion), and records completion per occurrence DATE: completedBy is a map
+// { "YYYY-MM-DD": [assignee keys] }. Mobile must write exactly that shape - an array here is silently
+// dropped by web's `completedBy[date] ||= []` (JSON loses non-index properties on an array), and moving
+// startDate on completion would shift the recurrence anchor and erase history.
+
+// The occurrence the chore's reminders track right now: the latest one on/before `now` (never every
+// missed one), or the first one if none has arrived yet. Ported from web's currentChoreOccurrenceDate.
+export function currentChoreOccurrenceDate(chore: Pick<Chore, "startDate" | "nextDue" | "recurrence" | "endDate">, now: Date = new Date()): string | null {
+  const recurrence = chore.recurrence || "once";
+  const startKey = chore.startDate || chore.nextDue;
+  if (!startKey || !DATE_PATTERN.test(startKey)) return null;
+  const start = parseDateKey(startKey);
+  const end = chore.endDate && DATE_PATTERN.test(chore.endDate) ? parseDateKey(chore.endDate) : null;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (recurrence === "once") return end && start > end ? null : dateKey(start);
+
+  const monthStep = CHORE_MONTH_STEP_BY_RECURRENCE[recurrence];
+  let current: Date | null = null;
+  if (monthStep) {
+    const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+    for (let i = 0; i < 240; i += 1) {
+      const lastDay = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+      const occurrence = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(start.getDate(), lastDay));
+      if (occurrence >= start) {
+        if (end && occurrence > end) break;
+        if (occurrence > today) break;
+        current = occurrence;
+      }
+      cursor.setMonth(cursor.getMonth() + monthStep);
+    }
+  } else {
+    const intervalDays = recurrence === "triweekly" ? 21 : recurrence === "biweekly" ? 14 : 7;
+    const cursor = new Date(start);
+    for (let i = 0; i < 3650; i += 1) {
+      if (end && cursor > end) break;
+      if (cursor > today) break;
+      current = new Date(cursor);
+      cursor.setDate(cursor.getDate() + intervalDays);
+    }
   }
-  const months = recurrence ? CHORE_MONTH_STEP_BY_RECURRENCE[recurrence] : undefined;
-  if (months) return addMonthsToDateKey(value, months) || value;
-  return value;
+  if (current) return dateKey(current);
+  return end && start > end ? null : dateKey(start);
+}
+
+function completionMap(value: unknown): Record<string, string[]> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, string[]>) : {};
+}
+
+export function choreCompletedKeys(chore: Pick<Chore, "completedBy">, date: string): string[] {
+  return completionMap(chore.completedBy)[date] || [];
+}
+
+// An occurrence is done once every assignee has marked it (or anyone, when the chore has none).
+export function isChoreOccurrenceComplete(chore: Pick<Chore, "completedBy" | "assignees">, date: string): boolean {
+  const assigneeKeys = (chore.assignees || []).map((assignee) => assignee.key);
+  const completed = choreCompletedKeys(chore, date);
+  if (!assigneeKeys.length) return completed.length > 0;
+  return assigneeKeys.every((key) => completed.includes(key));
+}
+
+export function toggleChoreCompletion(chore: Chore, date: string, key: string): Chore {
+  const map = completionMap(chore.completedBy);
+  const current = map[date] || [];
+  return { ...chore, completedBy: { ...map, [date]: current.includes(key) ? current.filter((item) => item !== key) : [...current, key] } };
+}
+
+// Which key the signed-in viewer marks done under, and whether they may at all - web's single
+// "Mark done" button: an assignee marks their own part, a chore/reminder with no assignees is
+// marked as the whole "household", and a viewer who isn't one of several assignees only sees progress.
+export function completionKeyFor(assignees: Array<{ key: string }> | undefined, viewerKey: string): string | null {
+  if (!assignees?.length) return "household";
+  return assignees.some((assignee) => assignee.key === viewerKey) ? viewerKey : null;
+}
+
+// Mobile used to write completedBy as a flat array on chores; web can't read that, so convert any
+// such chore to the date-keyed map (the lost completions cannot be reconstructed, an empty map is
+// the safe state). Returns the same state object when nothing needs repair.
+export function repairChoreCompletion<T extends { calendar: { chores: Chore[] } }>(state: T): T {
+  if (!state.calendar?.chores?.some((chore) => Array.isArray(chore.completedBy))) return state;
+  return { ...state, calendar: { ...state.calendar, chores: state.calendar.chores.map((chore) => Array.isArray(chore.completedBy) ? { ...chore, completedBy: {} } : chore) } };
 }
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -77,21 +145,64 @@ export function normalizeReminderPhotoDraft(raw: unknown): ReminderPhotoDraft {
 
 export type PhotoReminderInput = { title: string; date: string; time: string; location: string };
 
+export type ReminderTiming = { dateTime: string; reminderAt: string; notifyAt: string };
+
+// A plain reminder's schedule as web writes it: dateTime is the event's own date+time, and reminderAt /
+// notifyAt are when to notify. The server only sends a push/email for an event that HAS notifyAt, so
+// every reminder mobile creates or reschedules must set it. A blank/invalid time falls back to 09:00
+// (web's default); returns null for an invalid date. notifyAt is the device-local wall-clock time
+// converted to a UTC instant - the same thing web does in the browser.
+export function reminderTiming(date: string, time: string): ReminderTiming | null {
+  if (!DATE_PATTERN.test(date.trim())) return null;
+  const cleanTime = TIME_PATTERN.test(time.trim()) ? time.trim() : "09:00";
+  const dateTime = `${date.trim()}T${cleanTime}`;
+  const instant = new Date(dateTime);
+  if (Number.isNaN(instant.getTime())) return null;
+  return { dateTime, reminderAt: dateTime, notifyAt: instant.toISOString() };
+}
+
+// Completing a RECURRING reminder rolls it to its next occurrence (web's complete handler): the event's
+// own date and the notification time both move forward by one period, and completion resets. Without
+// moving notifyAt too, the next occurrence would never notify.
+export function advanceRecurringReminder(event: CalendarEvent): CalendarEvent {
+  const recurrence = event.recurrence;
+  if (event.type !== "reminder" || !recurrence || recurrence === "once") return event;
+  const nextDate = advanceReminderDate(event.date, recurrence);
+  const time = (event.dateTime || "").slice(11, 16) || "09:00";
+  const next: CalendarEvent = { ...event, date: nextDate, dateTime: `${nextDate}T${time}`, completedBy: [] };
+  if (event.reminderAt) {
+    const reminderTime = event.reminderAt.slice(11, 16) || "09:00";
+    const nextReminderAt = `${advanceReminderDate(event.reminderAt.slice(0, 10), recurrence)}T${reminderTime}`;
+    next.reminderAt = nextReminderAt;
+    const instant = new Date(nextReminderAt);
+    if (!Number.isNaN(instant.getTime())) next.notifyAt = instant.toISOString();
+  }
+  return next;
+}
+
 // Builds the reminder web's "Reminder from photo" dialog adds (same fields, same 09:00 default when no
 // time was read). Returns null until there is both a title and a valid date - exactly web's submit
-// guard. notifyAt is what makes the server actually send a notification for it, so it is always set.
-// owner/ownerName are mobile's own single-assignee display fields; assignees is web's richer form.
+// guard. owner/ownerName are mobile's own single-assignee display fields; assignees is web's richer form.
 export function buildPhotoReminderEvent(input: PhotoReminderInput, user: { email: string; name: string }, createId: () => string): CalendarEvent | null {
   const title = input.title.trim();
-  const date = input.date.trim();
-  if (!title || !DATE_PATTERN.test(date)) return null;
-  const time = TIME_PATTERN.test(input.time.trim()) ? input.time.trim() : "09:00";
-  const dateTime = `${date}T${time}`;
-  const notifyAt = new Date(dateTime);
-  if (Number.isNaN(notifyAt.getTime())) return null;
+  const timing = reminderTiming(input.date, input.time);
+  if (!title || !timing) return null;
   return {
-    id: createId(), title, date, dateTime, notifyAt: notifyAt.toISOString(), reminderAt: dateTime, type: "reminder", annual: false,
+    id: createId(), title, date: input.date.trim(), ...timing, type: "reminder", annual: false,
     location: input.location.trim(), recurrence: "once", completedBy: [],
     owner: user.email, ownerName: user.name, assignees: [{ key: user.email, name: user.name, email: user.email }]
   };
+}
+
+export function isValidClockTime(value: string): boolean {
+  return TIME_PATTERN.test(value.trim());
+}
+
+// Who a reminder/chore is assigned to, in web's terms. Mobile-created items only carry a single
+// owner/assignee email; web upgrades those to a one-person assignees list on its next render, so
+// completion has to be keyed the same way or the two apps disagree about whether it is done.
+export function effectiveAssignees(item: { assignees?: Array<{ key: string }>; owner?: string; assignee?: string }): Array<{ key: string }> {
+  if (item.assignees?.length) return item.assignees;
+  const single = item.owner || item.assignee;
+  return single ? [{ key: single }] : [];
 }

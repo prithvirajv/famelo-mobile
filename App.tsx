@@ -27,8 +27,8 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
-import { advanceChoreDate, advanceReminderDate, buildPhotoReminderEvent, choreCadenceLabels, isReminderComplete, normalizeReminderPhotoDraft } from "./src/calendarLogic";
+import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import { advanceRecurringReminder, buildPhotoReminderEvent, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
@@ -123,7 +123,7 @@ function AppContent() {
     // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
     const withIncome = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
     // Savings goals with auto-contribute on keep accumulating as purchases/paychecks are recorded (web does this every render).
-    const next = withGoalAutoContributions(withIncome, localDateKey());
+    const next = withGoalAutoContributions(repairChoreCompletion(withIncome), localDateKey());
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
@@ -434,6 +434,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
   const [addKind, setAddKind] = useState<"event" | "chore">("event");
   const [title, setTitle] = useState(""); const [date, setDate] = useState(`${state.budget.month}-01`); const [owner, setOwner] = useState(members[0]?.email || "");
   const [recurrence, setRecurrence] = useState<ReminderRecurrence>("once");
+  const [time, setTime] = useState("09:00");
   const [choreRecurrence, setChoreRecurrence] = useState<ChoreRecurrence>("once");
   const kind = editing?.kind || addKind;
   const begin = (targetKind: "event" | "chore", index: number) => {
@@ -441,6 +442,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     if (!item) return;
     setEditing({ kind: targetKind, index }); setTitle(item.title); setDate(targetKind === "event" ? (item as typeof state.calendar.events[number]).date : (item as typeof state.calendar.chores[number]).startDate || (item as typeof state.calendar.chores[number]).nextDue); setOwner(targetKind === "event" ? (item as typeof state.calendar.events[number]).owner || members[0]?.email || "" : (item as typeof state.calendar.chores[number]).assignee || members[0]?.email || "");
     setRecurrence(targetKind === "event" ? (item as typeof state.calendar.events[number]).recurrence || "once" : "once");
+    setTime(targetKind === "event" ? ((item as typeof state.calendar.events[number]).dateTime || "").slice(11, 16) || "09:00" : "09:00");
     setChoreRecurrence(targetKind === "chore" ? (item as typeof state.calendar.chores[number]).recurrence || "once" : "once");
   };
   // "From photo": the picture is sent inline to the server's vision model (never stored) and comes back
@@ -472,15 +474,47 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     await onSave(next);
     setPhotoDraft(null);
   };
-  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setChoreRecurrence("once"); };
+  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setChoreRecurrence("once"); };
   const saveItem = async () => {
     if (!title.trim() || !date) return;
     const member = members.find((item) => item.email === owner);
+    const ownerName = member?.name || owner;
+    const ownerAssignee = owner ? [{ key: owner, name: ownerName, email: owner }] : [];
     const next = structuredClone(state);
-    if (editing?.kind === "chore") next.calendar.chores = next.calendar.chores.map((item, index) => index === editing.index ? { ...item, title: title.trim(), startDate: date, nextDue: date, assignee: owner, assigneeName: member?.name || owner, recurrence: choreRecurrence, cadence: choreCadenceLabels[choreRecurrence] } : item);
-    else if (editing?.kind === "event") next.calendar.events = next.calendar.events.map((item, index) => index === editing.index ? { ...item, title: title.trim(), date, owner, ownerName: member?.name || owner, recurrence } : item);
-    else if (kind === "chore") next.calendar.chores.push({ id: `chore-${Date.now()}`, title: title.trim(), assignee: owner, assigneeName: member?.name || owner, cadence: choreCadenceLabels[choreRecurrence], nextDue: date, startDate: date, recurrence: choreRecurrence, completedBy: [] });
-    else next.calendar.events.push({ id: `event-${Date.now()}`, title: title.trim(), date, type: "reminder", owner, ownerName: member?.name || owner, recurrence, completedBy: [] });
+    if (editing?.kind === "chore") {
+      next.calendar.chores = next.calendar.chores.map((item, index) => index === editing.index ? {
+        ...item, title: title.trim(), startDate: date, nextDue: date, assignee: owner, assigneeName: ownerName,
+        // keep a multi-assignee list set on web unless the single owner picked here actually changed
+        assignees: item.assignee === owner && item.assignees?.length ? item.assignees : ownerAssignee,
+        recurrence: choreRecurrence, cadence: choreCadenceLabels[choreRecurrence]
+      } : item);
+    } else if (editing?.kind === "event") {
+      const existing = state.calendar.events[editing.index];
+      let timing: Partial<ReturnType<typeof reminderTiming> & object> = {};
+      if (existing?.type === "reminder") {
+        if (time.trim() && !isValidClockTime(time)) return Alert.alert("Invalid time", "Use 24-hour HH:MM, for example 14:30.");
+        // Rescheduling moves the notification with it. If neither the date nor the time changed, leave
+        // reminderAt/notifyAt alone - web lets those be set independently of the event's own time.
+        const unchanged = Boolean(existing.notifyAt) && existing.date === date && ((existing.dateTime || "").slice(11, 16) || "09:00") === (time.trim() || "09:00");
+        if (!unchanged) {
+          const fresh = reminderTiming(date, time);
+          if (!fresh) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+          timing = fresh;
+        }
+      }
+      next.calendar.events = next.calendar.events.map((item, index) => index === editing.index ? {
+        ...item, title: title.trim(), date, owner, ownerName,
+        assignees: item.owner === owner && item.assignees?.length ? item.assignees : ownerAssignee,
+        ...(item.type === "reminder" ? { recurrence, ...timing } : {})
+      } : item);
+    } else if (kind === "chore") {
+      next.calendar.chores.push({ id: `chore-${Date.now()}`, title: title.trim(), assignee: owner, assigneeName: ownerName, assignees: ownerAssignee, cadence: choreCadenceLabels[choreRecurrence], nextDue: date, startDate: date, recurrence: choreRecurrence, completedBy: {} });
+    } else {
+      if (time.trim() && !isValidClockTime(time)) return Alert.alert("Invalid time", "Use 24-hour HH:MM, for example 14:30.");
+      const timing = reminderTiming(date, time);
+      if (!timing) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+      next.calendar.events.push({ id: `event-${Date.now()}`, title: title.trim(), date, ...timing, type: "reminder", annual: false, owner, ownerName, assignees: ownerAssignee, recurrence, completedBy: [] });
+    }
     await onSave(next); resetForm();
   };
   const deleteEvent = (index: number) => {
@@ -504,34 +538,28 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
   const toggleReminderDone = async (index: number) => {
     const event = state.calendar.events[index];
     if (!event) return;
-    const key = event.owner || "household";
+    const assignees = effectiveAssignees(event);
+    const key = completionKeyFor(assignees, user.email);
+    if (!key) return;
     const already = (event.completedBy || []).includes(key);
-    const next = structuredClone(state);
-    const target = next.calendar.events[index];
-    if (!target) return;
-    target.completedBy = already ? (target.completedBy || []).filter((item) => item !== key) : [...(target.completedBy || []), key];
-    // Only a genuinely completing action (not un-checking) advances a recurring reminder -
+    let target: CalendarEvent = { ...event, completedBy: already ? (event.completedBy || []).filter((item) => item !== key) : [...(event.completedBy || []), key] };
+    // Only a genuinely completing action (not un-checking) rolls a recurring reminder forward -
     // otherwise "Mark done" then "Undo" would leave it silently jumped to the wrong next date.
-    if (!already && target.recurrence && target.recurrence !== "once" && isReminderComplete(target.completedBy, target.owner ? [target.owner] : [])) {
-      target.date = advanceReminderDate(target.date, target.recurrence);
-      target.completedBy = [];
-    }
+    if (!already && isReminderComplete(target.completedBy, assignees.map((assignee) => assignee.key))) target = advanceRecurringReminder(target);
+    const next = structuredClone(state);
+    next.calendar.events = next.calendar.events.map((item, itemIndex) => itemIndex === index ? target : item);
     await onSave(next);
   };
+  // Completion is recorded per occurrence DATE (web's shape) against the occurrence the chore is on right
+  // now; the recurrence anchor (startDate) is never moved by completing something.
   const toggleChoreDone = async (index: number) => {
     const chore = state.calendar.chores[index];
-    if (!chore) return;
-    const key = chore.assignee || "household";
-    const already = (chore.completedBy || []).includes(key);
+    const occurrence = chore ? currentChoreOccurrenceDate(chore) : null;
+    if (!chore || !occurrence) return;
+    const key = completionKeyFor(effectiveAssignees(chore), user.email);
+    if (!key) return;
     const next = structuredClone(state);
-    const target = next.calendar.chores[index];
-    if (!target) return;
-    target.completedBy = already ? (target.completedBy || []).filter((item) => item !== key) : [...(target.completedBy || []), key];
-    if (!already && target.recurrence && target.recurrence !== "once" && isReminderComplete(target.completedBy, target.assignee ? [target.assignee] : [])) {
-      const nextDate = advanceChoreDate(target.nextDue, target.recurrence);
-      target.nextDue = nextDate; target.startDate = nextDate;
-      target.completedBy = [];
-    }
+    next.calendar.chores = next.calendar.chores.map((item, itemIndex) => itemIndex === index ? toggleChoreCompletion(item, occurrence, key) : item);
     await onSave(next);
   };
   return <Page><Title eyebrow="CALENDAR">Shared schedule</Title>
@@ -558,6 +586,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       <Pressable style={[styles.choice, addKind === "chore" && styles.choiceActive]} onPress={() => setAddKind("chore")}><Text style={[styles.choiceText, addKind === "chore" && styles.choiceTextActive]}>Chore</Text></Pressable>
     </View>}
     <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Title" /><TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
+    {kind === "event" && (editing === null || state.calendar.events[editing.index]?.type === "reminder") ? <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="Time (HH:MM, 24-hour) - when you'll be reminded" keyboardType="numbers-and-punctuation" maxLength={5} /> : null}
     <Text style={styles.label}>Assign to</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
     {kind === "event" && <>
       <Text style={styles.label}>Repeat</Text>
@@ -572,20 +601,30 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       {editing && <Pressable style={styles.secondarySmall} onPress={resetForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>}
     </View>
   </Card><Card><Text style={styles.cardTitle}>Events and reminders</Text>{state.calendar.events.map((item, index) => {
-    const key = item.owner || "household";
-    const done = (item.completedBy || []).includes(key);
+    const assignees = effectiveAssignees(item);
+    const key = completionKeyFor(assignees, user.email);
+    const completed = item.completedBy || [];
+    const done = key ? completed.includes(key) : false;
     const recurrenceLabel = item.recurrence && item.recurrence !== "once" ? reminderRecurrenceLabels[item.recurrence] : null;
+    const timeLabel = item.type === "reminder" && item.dateTime ? item.dateTime.slice(11, 16) : null;
     return <View key={item.id || `${item.date}-${item.title}`} style={styles.row}>
-      <Pressable style={styles.rowCopy} onPress={() => begin("event", index)}><Row title={item.title} detail={[item.date, item.ownerName || item.owner || "Unassigned", recurrenceLabel].filter(Boolean).join(" · ")} badge={item.type} /></Pressable>
-      {item.type === "reminder" && <Pressable style={styles.planStepperButton} onPress={() => void toggleReminderDone(index)}><Text style={styles.secondaryButtonText}>{done ? "✓ Done" : "Mark done"}</Text></Pressable>}
+      <Pressable style={styles.rowCopy} onPress={() => begin("event", index)}><Row title={item.title} detail={[item.date, timeLabel, item.ownerName || item.owner || "Unassigned", recurrenceLabel].filter(Boolean).join(" · ")} badge={item.type} /></Pressable>
+      {item.type === "reminder" ? (key
+        ? <Pressable style={styles.planStepperButton} onPress={() => void toggleReminderDone(index)}><Text style={styles.secondaryButtonText}>{done ? "✓ Done" : "Mark done"}</Text></Pressable>
+        : <Text style={styles.rowDetail}>{completed.length}/{assignees.length} done</Text>) : null}
       <Pressable onPress={() => deleteEvent(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>;
   })}</Card><Card><Text style={styles.cardTitle}>Chore rotation</Text>{state.calendar.chores.map((item, index) => {
-    const key = item.assignee || "household";
-    const done = (item.completedBy || []).includes(key);
+    const occurrence = currentChoreOccurrenceDate(item);
+    const assignees = effectiveAssignees(item);
+    const key = completionKeyFor(assignees, user.email);
+    const done = occurrence ? isChoreOccurrenceComplete(item, occurrence) : false;
+    const mine = key && occurrence ? choreCompletedKeys(item, occurrence).includes(key) : false;
     return <View key={item.id || item.title} style={styles.row}>
-      <Pressable style={styles.rowCopy} onPress={() => begin("chore", index)}><Row title={item.title} detail={`${item.assigneeName || item.assignee} · ${item.cadence}`} badge={item.nextDue} /></Pressable>
-      <Pressable style={styles.planStepperButton} onPress={() => void toggleChoreDone(index)}><Text style={styles.secondaryButtonText}>{done ? "✓ Done" : "Mark done"}</Text></Pressable>
+      <Pressable style={styles.rowCopy} onPress={() => begin("chore", index)}><Row title={item.title} detail={`${item.assigneeName || item.assignee} · ${item.cadence}`} badge={occurrence || item.nextDue} /></Pressable>
+      {occurrence ? (key
+        ? <Pressable style={styles.planStepperButton} onPress={() => void toggleChoreDone(index)}><Text style={styles.secondaryButtonText}>{mine ? "✓ Done" : "Mark done"}</Text></Pressable>
+        : <Text style={styles.rowDetail}>{choreCompletedKeys(item, occurrence).length}/{assignees.length} done</Text>) : null}
       <Pressable onPress={() => deleteChore(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>;
   })}</Card></Page>;

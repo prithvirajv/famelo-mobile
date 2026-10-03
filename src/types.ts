@@ -28,9 +28,12 @@ export type CalendarEvent = {
 // What POST /api/calendar/reminder-from-image extracts from a photo; every field may be blank.
 export type ReminderPhotoDraft = { title: string; date: string; time: string; location: string };
 export type ChoreRecurrence = "once" | "weekly" | "biweekly" | "triweekly" | "monthly" | "every3months" | "every4months" | "every6months" | "yearly";
+// completedBy is a map { "YYYY-MM-DD": [assignee keys] } (web's shape). Fields beyond the first group are
+// written by web and preserved untouched on every mobile edit (all edits spread the existing chore).
 export type Chore = {
   id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string;
-  recurrence?: ChoreRecurrence; completedBy?: string[];
+  recurrence?: ChoreRecurrence; completedBy?: Record<string, string[]>;
+  endDate?: string; time?: string; location?: string; assignees?: EventAssignee[]; notifyAt?: string;
 };
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
 export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string; createdAt?: string };
