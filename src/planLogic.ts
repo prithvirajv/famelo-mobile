@@ -20,7 +20,8 @@ export function groupPlanTasksByBucket(tasks: PlanTask[]): Record<PlanBucket, Pl
 
 export function defaultPlanAnchorDate(bucket: PlanBucket, now: Date = new Date()): string {
   if (bucket === "monthly") return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return now.toISOString().slice(0, 10);
+  // Local calendar date, not UTC: in the evening west of Greenwich the UTC date is already tomorrow.
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 export function dailyTaskOccursOnDate(task: PlanTask, dateKey: string): boolean {

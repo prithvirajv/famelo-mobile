@@ -522,3 +522,18 @@ test("Profile and Sharing are reachable from More, gate management on ownership,
   // every save hands over the whole household state produced by a sharingLogic function, never a hand-built partial
   assert.equal((sharing.match(/onSave\((?:recordInvitation|recordRevoked|recordAccessLevel|setShareEverything|toggleScope)\(state/g) || []).length, 5);
 });
+
+test("Journal supports date/tags/editing/search/stats/reflection, and 'today' is the local day everywhere", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const journal = extractFunctionSource(app, "Journal");
+  assert.match(journal, /updateEntry\(/);
+  assert.match(journal, /filterEntries\(/);
+  assert.match(journal, /api\.journalReflection/);
+  assert.match(journal, /todaysJournalContext\(state, viewerEmail/);
+  assert.match(journal, /keyboardShouldPersistTaps="handled"/);
+  assert.match(app, /<Journal privateData=\{activePrivateData\} state=\{state\} viewerEmail=\{user\.email\}/);
+  // A UTC date is already tomorrow on a US evening - never derive "today" from toISOString().
+  assert.doesNotMatch(app, /new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
+  const plan = fs.readFileSync(new URL("../src/planLogic.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(plan, /toISOString\(\)\.slice\(0, 10\)/);
+});

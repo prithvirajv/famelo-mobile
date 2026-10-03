@@ -41,6 +41,7 @@ import {
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
+import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
@@ -68,7 +69,6 @@ const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap
   { id: "more", label: "More", icon: "grid-outline" }
 ];
 
-const journalMoods = ["Happy", "Calm", "Neutral", "Stressed", "Sad", "Grateful", "Excited"];
 
 function parseLocalDate(dateKey: string): Date {
   const [year, month, day] = dateKey.split("-").map(Number);
@@ -200,7 +200,7 @@ function AppContent() {
     : tab === "budget" ? <Budget state={state} members={(access?.members || []).filter((member) => member.status === "active").map((member) => ({ name: member.name, email: member.email }))} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "calendar" ? <Calendar state={state} access={access} user={user} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
-    : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
+    : tab === "journal" ? <Journal privateData={activePrivateData} state={state} viewerEmail={user.email} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} sinkingFundNames={(state.goals?.sinkingFunds || []).map((fund) => fund.name)} />
     : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} viewerName={user.name} />
     : tab === "meals" ? <Meals state={state} onSave={save} onOpenRecipes={() => setSubScreen("recipes")} />
@@ -1728,25 +1728,44 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   </Page>;
 }
 
-function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (journal: PrivateData["journal"]) => Promise<void> }) {
-  const [title, setTitle] = useState(""); const [body, setBody] = useState(""); const [mood, setMood] = useState(""); const [gratitude, setGratitude] = useState("");
-  const entries = [...privateData.journal.entries].sort((a, b) => b.entryDate.localeCompare(a.entryDate));
+function Journal({ privateData, state, viewerEmail, onSave }: { privateData: PrivateData; state: HouseholdState; viewerEmail: string; onSave: (journal: PrivateData["journal"]) => Promise<void> }) {
+  const blankDraft = () => ({ entryDate: localDateKey(), title: "", body: "", mood: "", gratitude: "", tags: "" });
+  const [draft, setDraft] = useState(blankDraft);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState(blankDraft);
+  const [query, setQuery] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [reflection, setReflection] = useState<{ text: string; isError: boolean } | null>(null);
+  const [reflecting, setReflecting] = useState(false);
+  const allEntries = sortedEntries(privateData.journal.entries);
+  const visibleEntries = filterEntries(allEntries, query, tagFilter);
+  const tags = allTags(allEntries);
+  const today = localDateKey();
+  const groups = visibleEntries.reduce<Array<{ monthKey: string; items: JournalEntry[] }>>((acc, entry) => {
+    const monthKey = entry.entryDate.slice(0, 7) || "undated";
+    const group = acc.find((item) => item.monthKey === monthKey);
+    if (group) group.items.push(entry); else acc.push({ monthKey, items: [entry] });
+    return acc;
+  }, []);
 
   const addEntry = async () => {
-    if (!title.trim() && !body.trim() && !gratitude.trim()) return;
-    const now = new Date().toISOString();
-    const entry: JournalEntry = { id: `journal-${Date.now()}`, entryDate: now.slice(0, 10), title: title.trim(), body: body.trim(), mood, tags: [], photos: [], createdAt: now, updatedAt: now, gratitude: gratitude.trim() };
-    await onSave({ entries: [...privateData.journal.entries, entry] });
-    setTitle(""); setBody(""); setMood(""); setGratitude("");
+    const problem = validateEntryInput(draft);
+    if (problem) return Alert.alert("Check the entry", problem);
+    await onSave({ entries: [...privateData.journal.entries, createEntry(draft, () => uniqueId("journal"))] });
+    setDraft(blankDraft()); setReflection(null);
   };
-
-  const deleteEntry = async (entryId: string) => {
-    await onSave({ entries: privateData.journal.entries.filter((entry) => entry.id !== entryId) });
+  const startEdit = (entry: JournalEntry) => {
+    setEditDraft({ entryDate: entry.entryDate, title: entry.title, body: entry.body, mood: entry.mood, gratitude: entry.gratitude || "", tags: (entry.tags || []).join(", ") });
+    setEditingId(entry.id);
   };
-
-  const updateGratitude = async (entryId: string, value: string) => {
-    await onSave({ entries: privateData.journal.entries.map((entry) => entry.id === entryId ? { ...entry, gratitude: value } : entry) });
+  const saveEdit = async () => {
+    if (!editingId) return;
+    const problem = validateEntryInput(editDraft);
+    if (problem) return Alert.alert("Check the entry", problem);
+    await onSave({ entries: updateEntry(privateData.journal.entries, editingId, editDraft) });
+    setEditingId(null);
   };
+  const confirmDelete = (entry: JournalEntry) => Alert.alert("Delete this entry?", "This cannot be undone.", [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => { if (editingId === entry.id) setEditingId(null); void onSave({ entries: privateData.journal.entries.filter((item) => item.id !== entry.id) }); } }]);
 
   const addPhoto = async (entryId: string) => {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.5 });
@@ -1755,35 +1774,97 @@ function Journal({ privateData, onSave }: { privateData: PrivateData; onSave: (j
     const dataUrl = `data:${asset.mimeType || "image/jpeg"};base64,${asset.base64}`;
     const now = new Date().toISOString();
     const nextEntries = privateData.journal.entries.map((entry) => entry.id === entryId
-      ? { ...entry, photos: [...entry.photos, { id: `photo-${Date.now()}`, dataUrl, createdAt: now }].slice(0, 8) }
+      ? { ...entry, photos: [...entry.photos, { id: uniqueId("photo"), dataUrl, createdAt: now }].slice(0, JOURNAL_MAX_PHOTOS) }
       : entry);
     await onSave({ entries: nextEntries });
   };
+  const confirmRemovePhoto = (entryId: string, photoId: string) => Alert.alert("Remove this photo?", "", [{ text: "Cancel" }, { text: "Remove", style: "destructive", onPress: () => void onSave({ entries: removePhoto(privateData.journal.entries, entryId, photoId) }) }]);
+
+  const getReflection = async () => {
+    const context = todaysJournalContext(state, viewerEmail, today);
+    if (!context) return setReflection({ text: "Nothing logged yet today to reflect on - complete a chore, wish someone happy birthday, or jot a note first.", isError: true });
+    setReflecting(true);
+    try { const result = await api.journalReflection(context); setReflection({ text: result.message, isError: false }); }
+    catch (cause) { setReflection({ text: cause instanceof Error ? cause.message : "Could not get a reflection", isError: true }); }
+    finally { setReflecting(false); }
+  };
+
+  const moodChips = (selected: string, onPick: (mood: string) => void) => <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+    {JOURNAL_MOODS.map((item) => <Pressable key={item} style={[styles.choice, selected === item && styles.choiceActive]} onPress={() => onPick(selected === item ? "" : item)}>
+      <Text style={[styles.choiceText, selected === item && styles.choiceTextActive]}>{JOURNAL_MOOD_EMOJI[item]} {item}</Text>
+    </Pressable>)}
+  </ScrollView>;
+  const fields = (value: typeof draft, set: (next: typeof draft) => void) => <>
+    <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
+    <TextInput style={styles.input} value={value.entryDate} onChangeText={(entryDate) => set({ ...value, entryDate })} autoCapitalize="none" />
+    <TextInput style={styles.input} value={value.title} onChangeText={(title) => set({ ...value, title })} placeholder="Give today a title" />
+    <Text style={styles.label}>Mood</Text>
+    {moodChips(value.mood, (mood) => set({ ...value, mood }))}
+    <TextInput style={[styles.input, styles.multilineInput]} value={value.body} onChangeText={(body) => set({ ...value, body })} placeholder="What happened today? How are you feeling?" multiline />
+    <Text style={styles.label}>🙏 Grateful for</Text>
+    <TextInput style={styles.input} value={value.gratitude} onChangeText={(gratitude) => set({ ...value, gratitude })} placeholder="One thing you're grateful for today" />
+    <Text style={styles.label}>Tags</Text>
+    <TextInput style={styles.input} value={value.tags} onChangeText={(next) => set({ ...value, tags: next })} placeholder="travel, family, work" autoCapitalize="none" />
+  </>;
 
   return <Page><Title eyebrow="JOURNAL">Your private journal</Title>
     <Text style={styles.muted}>Private to you — never shared with other household members.</Text>
     <Card>
-      <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Give today a title" />
-      <Text style={styles.label}>Mood</Text>
-      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
-        {journalMoods.map((item) => <Pressable key={item} style={[styles.choice, mood === item && styles.choiceActive]} onPress={() => setMood(mood === item ? "" : item)}><Text style={[styles.choiceText, mood === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}
-      </ScrollView>
-      <TextInput style={[styles.input, styles.multilineInput]} value={body} onChangeText={setBody} placeholder="What happened today?" multiline />
-      <Text style={styles.label}>🙏 Grateful for</Text>
-      <TextInput style={styles.input} value={gratitude} onChangeText={setGratitude} placeholder="One thing you're grateful for today" />
-      <Pressable style={styles.primaryButton} onPress={() => void addEntry()}><Text style={styles.primaryButtonText}>Add entry</Text></Pressable>
+      <Text style={styles.cardTitle}>New entry</Text>
+      {fields(draft, setDraft)}
+      <Pressable style={styles.secondarySmall} disabled={reflecting} onPress={() => void getReflection()}><Text style={styles.secondaryButtonText}>{reflecting ? "Thinking..." : "✨ Get a gentle reflection"}</Text></Pressable>
+      {reflection ? <View style={{ marginTop: 8 }}>
+        <Text style={reflection.isError ? styles.formError : styles.noteBody}>{reflection.text}</Text>
+        <View style={styles.actionRow}>
+          {!reflection.isError ? <Pressable style={styles.secondarySmall} onPress={() => { setDraft({ ...draft, body: draft.body ? `${draft.body}\n\n${reflection.text}` : reflection.text }); setReflection(null); }}><Text style={styles.secondaryButtonText}>Use this</Text></Pressable> : null}
+          <Pressable style={styles.secondarySmall} onPress={() => setReflection(null)}><Text style={styles.secondaryButtonText}>Dismiss</Text></Pressable>
+        </View>
+      </View> : null}
+      <Pressable style={styles.primaryButton} onPress={() => void addEntry()}><Text style={styles.primaryButtonText}>Save entry</Text></Pressable>
     </Card>
-    {entries.map((entry) => <Card key={entry.id}>
-      <View style={styles.noteHeader}>
-        <Text style={styles.noteTitle}>{entry.title || "Untitled entry"}</Text>
-        <Pressable onPress={() => void deleteEntry(entry.id)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+    {allEntries.length ? <>
+      <View style={styles.metricGrid}>
+        <Metric label="Day streak" value={String(writingStreak(allEntries))} />
+        <Metric label="Entries this year" value={String(entriesInYear(allEntries, Number(today.slice(0, 4))))} accent={colors.blue} />
       </View>
-      <Text style={styles.muted}>{entry.entryDate}{entry.mood ? ` · ${entry.mood}` : ""}</Text>
-      {entry.body ? <Text style={styles.noteBody}>{entry.body}</Text> : null}
-      <TextInput style={[styles.input, { marginTop: 6 }]} defaultValue={entry.gratitude || ""} onEndEditing={(event) => void updateGratitude(entry.id, event.nativeEvent.text)} placeholder="🙏 Grateful for..." />
-      {entry.photos.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
-      <Pressable style={styles.secondarySmall} onPress={() => void addPhoto(entry.id)}><Text style={styles.secondaryButtonText}>+ Add photo</Text></Pressable>
-    </Card>)}
+      <Card>
+        <Text style={styles.cardTitle}>How you've felt lately</Text>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", height: 60, gap: 4 }}>
+          {moodTrend(allEntries).map((bar) => <View key={bar.id} style={{ flex: 1, height: `${bar.heightPercent}%`, borderRadius: 3, backgroundColor: bar.mood ? JOURNAL_MOOD_COLOR[bar.mood] || colors.border : colors.border }} />)}
+        </View>
+      </Card>
+      <Card>
+        <TextInput style={styles.input} value={query} onChangeText={setQuery} placeholder="Search title, body, tags..." autoCapitalize="none" autoCorrect={false} />
+        {tags.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          {["", ...tags].map((tag) => <Pressable key={tag || "all"} style={[styles.choice, tagFilter === tag && styles.choiceActive]} onPress={() => setTagFilter(tag)}><Text style={[styles.choiceText, tagFilter === tag && styles.choiceTextActive]}>{tag ? `#${tag}` : "All"}</Text></Pressable>)}
+        </ScrollView> : null}
+      </Card>
+    </> : <Text style={styles.muted}>No journal entries yet — write your first one above.</Text>}
+    {allEntries.length && !visibleEntries.length ? <Text style={styles.muted}>No entries match your search.</Text> : null}
+    {groups.map((group) => <View key={group.monthKey} style={{ gap: 10 }}>
+      <Text style={styles.label}>{group.monthKey === "undated" ? "Undated" : formatMonthLabel(group.monthKey)} · {group.items.length}</Text>
+      {group.items.map((entry) => editingId === entry.id ? <Card key={entry.id}>
+        {fields(editDraft, setEditDraft)}
+        <View style={styles.actionRow}>
+          <Pressable style={[styles.secondarySmall, { flex: 1 }]} onPress={() => setEditingId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+          <Pressable style={[styles.primaryButton, { flex: 1, marginTop: 0 }]} onPress={() => void saveEdit()}><Text style={styles.primaryButtonText}>Done</Text></Pressable>
+        </View>
+        <Pressable accessibilityLabel="Delete entry" onPress={() => confirmDelete(entry)}><Text style={[styles.secondaryButtonText, { color: colors.coral, marginTop: 8 }]}>Delete entry</Text></Pressable>
+        {entry.photos.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Pressable key={photo.id} accessibilityLabel="Remove photo" onPress={() => confirmRemovePhoto(entry.id, photo.id)}><Image source={{ uri: photo.dataUrl }} style={styles.journalPhoto} /></Pressable>)}</ScrollView> : null}
+        {entry.photos.length < JOURNAL_MAX_PHOTOS ? <Pressable style={styles.secondarySmall} onPress={() => void addPhoto(entry.id)}><Text style={styles.secondaryButtonText}>+ Add photo ({entry.photos.length}/{JOURNAL_MAX_PHOTOS})</Text></Pressable> : null}
+      </Card> : <Card key={entry.id}>
+        <View style={styles.noteHeader}>
+          <Text style={styles.noteTitle}>{entry.title || "Untitled entry"}</Text>
+          <Pressable accessibilityLabel="Edit entry" hitSlop={8} onPress={() => startEdit(entry)}><Ionicons name="create-outline" size={18} color={colors.text} /></Pressable>
+          <Pressable accessibilityLabel="Delete entry" hitSlop={8} onPress={() => confirmDelete(entry)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+        <Text style={styles.muted}>{entry.entryDate === today ? "Today" : entry.entryDate}{entry.mood ? ` · ${JOURNAL_MOOD_EMOJI[entry.mood] || ""} ${entry.mood}` : ""}</Text>
+        {entry.gratitude ? <Text style={styles.noteBody}>🙏 {entry.gratitude}</Text> : null}
+        {entry.body ? <Text style={styles.noteBody}>{entry.body}</Text> : null}
+        {entry.tags?.length ? <Text style={styles.muted}>{entry.tags.map((tag) => `#${tag}`).join("  ")}</Text> : null}
+        {entry.photos.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{entry.photos.map((photo) => <Image key={photo.id} source={{ uri: photo.dataUrl }} style={styles.journalPhoto} />)}</ScrollView> : null}
+      </Card>)}
+    </View>)}
   </Page>;
 }
 
@@ -1793,7 +1874,7 @@ const planRecurrenceLabels: Record<PlanRecurrence, string> = {
 
 function formatPlanDayLabel(dateKey: string): string {
   const date = new Date(`${dateKey}T00:00:00`);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   if (dateKey === today) return `Today · ${date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}`;
   return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
@@ -1825,7 +1906,7 @@ function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateD
   const [startTime, setStartTime] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(30);
   const [recurrence, setRecurrence] = useState<PlanRecurrence>("none");
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [selectedDate, setSelectedDate] = useState(() => localDateKey());
   const [subtaskDrafts, setSubtaskDrafts] = useState<Record<string, string>>({});
   const [editingLogId, setEditingLogId] = useState<string | null>(null);
   const [logStart, setLogStart] = useState("");
@@ -1911,7 +1992,7 @@ function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateD
   const shiftDay = (delta: number) => {
     const next = new Date(`${selectedDate}T00:00:00`);
     next.setDate(next.getDate() + delta);
-    setSelectedDate(next.toISOString().slice(0, 10));
+    setSelectedDate(localDateKey(next));
     resetLogForm();
   };
 
@@ -1962,7 +2043,7 @@ function Plan({ privateData, onSave, sinkingFundNames }: { privateData: PrivateD
     </View>
     {bucket === "daily" && <View style={styles.dayNavRow}>
       <Pressable style={styles.planStepperButton} onPress={() => shiftDay(-1)}><Ionicons name="chevron-back" size={18} color={colors.text} /></Pressable>
-      <Pressable style={styles.dayNavLabel} onPress={() => setSelectedDate(new Date().toISOString().slice(0, 10))}><Text style={styles.rowTitle}>{formatPlanDayLabel(selectedDate)}</Text></Pressable>
+      <Pressable style={styles.dayNavLabel} onPress={() => setSelectedDate(localDateKey())}><Text style={styles.rowTitle}>{formatPlanDayLabel(selectedDate)}</Text></Pressable>
       <Pressable style={styles.planStepperButton} onPress={() => shiftDay(1)}><Ionicons name="chevron-forward" size={18} color={colors.text} /></Pressable>
     </View>}
     <Card>
@@ -2822,7 +2903,7 @@ function SharedExpenses({ state, onSave, onBack }: { state: HouseholdState; onSa
   const ious = state.ious || [];
   const friends = state.friends || [];
   const currency = state.household.currency;
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => localDateKey();
 
   const [debtPerson, setDebtPerson] = useState("");
   const [debtEmail, setDebtEmail] = useState("");
@@ -3049,7 +3130,7 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
   const [showAllFlowTransactions, setShowAllFlowTransactions] = useState(false);
 
-  function today() { return new Date().toISOString().slice(0, 10); }
+  function today() { return localDateKey(); }
 
   const scope: ReportScope = scopeType === "month" ? { type: "month", month: scopeMonth }
     : scopeType === "range" ? { type: "range", start: rangeStart, end: rangeEnd }
@@ -3299,7 +3380,7 @@ function HoldingsEditor({ state, groupId, currency, quoteFeedback, refreshingIds
 // shouldn't poll silently), multi-currency display, and debt-to-budget-line auto-EMI linking.
 function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
   const currency = state.household.currency;
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => localDateKey();
   const accounts = state.accounts || [];
   const debts = state.goals?.debts || [];
   const netWorthAssets = state.goals?.netWorth?.assets || [];
@@ -3877,7 +3958,7 @@ const PAYCHECK_RECURRENCE_LABELS: Record<PaycheckRecurrence, string> = { once: "
 function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
   const currency = state.household.currency;
   const accounts = state.accounts || [];
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => localDateKey();
 
   // Materializes/self-heals occurrence rows on every visit to this screen (same
   // convention as the web app's ensurePaycheckOccurrencesGenerated, which runs on

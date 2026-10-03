@@ -25,13 +25,13 @@ test("groupPlanTasksByBucket returns empty arrays for buckets with no tasks", ()
 
 test("defaultPlanAnchorDate returns a YYYY-MM-DD date for daily and weekly buckets", () => {
   // Noon UTC avoids local-midnight-to-UTC date-shift flakiness across timezones.
-  const now = new Date(Date.UTC(2026, 6, 5, 12));
+  const now = new Date(2026, 6, 5, 12);
   assert.equal(defaultPlanAnchorDate("daily", now), "2026-07-05");
   assert.equal(defaultPlanAnchorDate("weekly", now), "2026-07-05");
 });
 
 test("defaultPlanAnchorDate returns a YYYY-MM month for the monthly bucket", () => {
-  const now = new Date(Date.UTC(2026, 6, 5, 12));
+  const now = new Date(2026, 6, 5, 12);
   assert.equal(defaultPlanAnchorDate("monthly", now), "2026-07");
 });
 

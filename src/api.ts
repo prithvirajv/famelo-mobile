@@ -91,6 +91,7 @@ export const api = {
   addSharedNoteItem: (shareId: string, text: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items`, { method: "POST", body: JSON.stringify({ text }) }),
   deleteSharedNoteItem: (shareId: string, itemId: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
+  journalReflection: (context: string) => request<{ message: string }>("/api/journal/reflection", { method: "POST", body: JSON.stringify({ context }) }),
   // Profile and household sharing (web's Profile and Sharing pages).
   updateProfile: (patch: { name?: string; currentPassword?: string; newPassword?: string }) => request<User>("/api/auth/me", { method: "PATCH", body: JSON.stringify(patch) }),
   resendVerification: () => request<{ message?: string }>("/api/auth/verify-email/resend", { method: "POST", body: "{}" }),
