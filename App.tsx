@@ -30,7 +30,7 @@ import {
   flowSegments, resolveFlowSelection, transactionAmountForLines, transactionsForLines, priorYearMonthKeys, yoyDelta, yoyLabel, REPORT_THEMES
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
@@ -1045,6 +1045,88 @@ const noteColorOptions = [
   { value: "#fff0ee", label: "Coral" }
 ];
 
+// Share one note three ways, each matching a web option: an email to anyone (a snapshot plus a live link), a public no-login link
+// that anyone can open to view and tick items, or access for a specific FamilyLoop account. Network-backed (not part of the household
+// state), so each action reports its own result.
+function NoteSharePanel({ note }: { note: Note }) {
+  const [email, setEmail] = useState(""); const [message, setMessage] = useState("");
+  const [linkUrl, setLinkUrl] = useState(""); const [shares, setShares] = useState<NoteUserShare[]>([]);
+  const [userEmail, setUserEmail] = useState("");
+  const [status, setStatus] = useState(""); const [busy, setBusy] = useState(false);
+  useEffect(() => { api.noteUserShares(note.id).then((result) => setShares(result.shares)).catch(() => undefined); }, [note.id]);
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true); setStatus("");
+    try { await action(); } catch (cause) { setStatus(cause instanceof Error ? cause.message : "Something went wrong"); } finally { setBusy(false); }
+  };
+  const sendEmail = () => run(async () => {
+    const result = await api.shareNoteByEmail({ to: email.trim(), title: note.title, body: note.body, message: message.trim(), noteId: note.id, checklist: note.checklist.map((item) => ({ text: item.text, done: item.done })) });
+    setLinkUrl(result.url || linkUrl); setEmail(""); setMessage(""); setStatus(`Sent to ${email.trim()}.`);
+  });
+  const makeLink = () => run(async () => { setLinkUrl((await api.createNoteShareLink(note.id)).url); });
+  const stopLink = () => run(async () => { await api.removeNoteShareLink(note.id); setLinkUrl(""); setStatus("The public link no longer works."); });
+  const shareWithUser = () => run(async () => { const result = await api.shareNoteWithUser(note.id, userEmail.trim()); setShares(result.shares); setUserEmail(""); setStatus("Shared."); });
+  const removeShare = (share: NoteUserShare) => run(async () => { setShares((await api.removeNoteUserShare(note.id, share.userId)).shares); });
+  return <View style={styles.planTaskBlock}>
+    <Text style={styles.label}>Email a copy to anyone</Text>
+    <TextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="Their email" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} />
+    <TextInput style={styles.input} value={message} onChangeText={setMessage} placeholder="Message (optional)" />
+    <Pressable style={[styles.secondarySmall, (busy || !email.trim()) && { opacity: 0.5 }]} disabled={busy || !email.trim()} onPress={() => void sendEmail()}><Text style={styles.secondaryButtonText}>Send email</Text></Pressable>
+    <Text style={styles.label}>Public link (no login needed)</Text>
+    {linkUrl ? <>
+      <Text style={styles.rowDetail} selectable>{linkUrl}</Text>
+      <View style={styles.actionRow}>
+        <Pressable style={styles.secondarySmall} onPress={() => void Share.share({ message: linkUrl })}><Text style={styles.secondaryButtonText}>Share link</Text></Pressable>
+        <Pressable style={styles.secondarySmall} disabled={busy} onPress={() => void stopLink()}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Stop sharing</Text></Pressable>
+      </View>
+    </> : <Pressable style={styles.secondarySmall} disabled={busy} onPress={() => void makeLink()}><Text style={styles.secondaryButtonText}>Create link</Text></Pressable>}
+    <Text style={styles.label}>Share with a FamilyLoop account</Text>
+    {shares.map((share) => <View key={share.id} style={styles.row}>
+      <View style={styles.rowCopy}><Text style={styles.rowTitle}>{share.name || share.email}</Text><Text style={styles.rowDetail}>{share.email}</Text></View>
+      <Pressable onPress={() => void removeShare(share)} accessibilityLabel={`Stop sharing with ${share.email}`}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+    </View>)}
+    <View style={styles.actionRow}>
+      <TextInput style={[styles.input, { flex: 1 }]} value={userEmail} onChangeText={setUserEmail} placeholder="Their account email" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} />
+      <Pressable style={[styles.secondarySmall, (busy || !userEmail.trim()) && { opacity: 0.5 }]} disabled={busy || !userEmail.trim()} onPress={() => void shareWithUser()}><Text style={styles.secondaryButtonText}>Share</Text></Pressable>
+    </View>
+    {status ? <Text style={styles.muted}>{status}</Text> : null}
+  </View>;
+}
+
+// Notes other people shared with this login, from any household - live, so a change either side is seen by both. You can tick items,
+// add one, or remove one.
+function SharedWithMe() {
+  const [notes, setNotes] = useState<SharedNote[] | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try { setNotes((await api.sharedWithMe()).notes); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Couldn't load shared notes"); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  const act = async (action: () => Promise<unknown>) => { try { await action(); await load(); } catch (cause) { Alert.alert("Couldn't update the note", cause instanceof Error ? cause.message : "Unknown error"); } };
+  if (!notes?.length && !error) return null;
+  return <Card>
+    <Text style={styles.cardTitle}>Shared with you</Text>
+    {error ? <Text style={styles.formError}>{error}</Text> : null}
+    {(notes || []).map((shared) => <View key={shared.shareId} style={styles.planTaskBlock}>
+      <Text style={styles.rowTitle}>{shared.title || "Untitled note"}</Text>
+      <Text style={styles.rowDetail}>From {shared.sharedFromHousehold}</Text>
+      {shared.body ? <Text style={styles.noteBody}>{shared.body}</Text> : null}
+      {shared.checklist.map((item) => <View key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]}>
+        <Pressable style={styles.checkRow} onPress={() => void act(() => api.toggleSharedNoteItem(shared.shareId, item.id, !item.done))}>
+          <Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} />
+          <Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text>
+        </Pressable>
+        <Pressable onPress={() => void act(() => api.deleteSharedNoteItem(shared.shareId, item.id))} accessibilityLabel={`Remove ${item.text}`}><Ionicons name="close" size={16} color={colors.muted} /></Pressable>
+      </View>)}
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={drafts[shared.shareId] || ""} onChangeText={(value) => setDrafts((prev) => ({ ...prev, [shared.shareId]: value }))} placeholder="Add an item" />
+        <Pressable style={styles.secondarySmall} onPress={() => { const text = (drafts[shared.shareId] || "").trim(); if (!text) return; setDrafts((prev) => ({ ...prev, [shared.shareId]: "" })); void act(() => api.addSharedNoteItem(shared.shareId, text)); }}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+      </View>
+    </View>)}
+  </Card>;
+}
+
 function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
   const [addTitle, setAddTitle] = useState(""); const [addBody, setAddBody] = useState(""); const [addColor, setAddColor] = useState("#ffffff");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -1058,6 +1140,7 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   const [labelDraft, setLabelDraft] = useState("");
   const [reminderDate, setReminderDate] = useState(""); const [reminderTime, setReminderTime] = useState("09:00");
   const [completedOpen, setCompletedOpen] = useState<Record<string, boolean>>({});
+  const [shareNoteId, setShareNoteId] = useState<string | null>(null);
 
   // A note's photos are Documents rows linked to it via noteId (web does the same), so they come from
   // the Documents API; each ready image needs its own short-lived signed URL to display.
@@ -1259,7 +1342,9 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
           <Pressable style={[styles.choice, showBoxes && styles.choiceActive]} onPress={() => updateNote(note.id, (current) => ({ ...current, showChecklist: current.showChecklist === false }))}><Text style={[styles.choiceText, showBoxes && styles.choiceTextActive]}>{showBoxes ? "✓ Show checkboxes" : "Show checkboxes"}</Text></Pressable>
           <Pressable style={[styles.choice, editingList && styles.choiceActive]} onPress={() => setEditListId(editingList ? null : note.id)}><Text style={[styles.choiceText, editingList && styles.choiceTextActive]}>{editingList ? "✓ Editing list" : "Edit list"}</Text></Pressable>
           <Pressable style={styles.choice} onPress={() => copyNote(note)}><Text style={styles.choiceText}>Make a copy</Text></Pressable>
+          <Pressable style={[styles.choice, shareNoteId === note.id && styles.choiceActive]} onPress={() => setShareNoteId(shareNoteId === note.id ? null : note.id)}><Text style={[styles.choiceText, shareNoteId === note.id && styles.choiceTextActive]}>Share</Text></Pressable>
         </View>
+        {shareNoteId === note.id ? <NoteSharePanel note={note} /> : null}
       </View> : null}
     </View>;
   };
@@ -1278,6 +1363,7 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     </ScrollView>
     {view === "trash" ? <Text style={styles.muted}>Notes in the trash are deleted for good after 7 days.</Text> : null}
     {shownNotes.map(renderNote)}
+    {view === "notes" && !query.trim() ? <SharedWithMe /> : null}
     {shownNotes.length ? null : <Text style={styles.muted}>{query.trim() ? "No notes match your search." : view === "trash" ? "Trash is empty." : view === "archive" ? "Nothing archived." : view === "reminders" ? "No notes with a reminder." : "No notes here yet."}</Text>}
   </Page>;
 }

@@ -1,5 +1,5 @@
 import type { ParsedBankRow } from "./bankStreamLogic";
-import type { ReminderPhotoDraft, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
+import type { NoteUserShare, ReminderPhotoDraft, SharedNote, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://familyloop.net").replace(/\/$/, "");
 
@@ -78,6 +78,18 @@ export const api = {
   suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines }) }),
   suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts }) }),
   fxRates: () => request<{ base: string; rates: Record<string, number>; date: string }>("/api/fx-rates"),
+  // Note sharing: a one-off email, a public no-login link, or a specific FamilyLoop login (all live-resolved by the server).
+  shareNoteByEmail: (body: { to: string; title: string; body: string; message: string; noteId: string; checklist: Array<{ text: string; done: boolean }> }) =>
+    request<{ ok: boolean; url: string }>("/api/notes/share", { method: "POST", body: JSON.stringify(body) }),
+  createNoteShareLink: (noteId: string) => request<{ ok: boolean; url: string }>("/api/notes/share-link", { method: "POST", body: JSON.stringify({ noteId }) }),
+  removeNoteShareLink: (noteId: string) => request<{ ok: boolean }>("/api/notes/share-link", { method: "DELETE", body: JSON.stringify({ noteId }) }),
+  noteUserShares: (noteId: string) => request<{ shares: NoteUserShare[] }>(`/api/notes/${encodeURIComponent(noteId)}/shares`),
+  shareNoteWithUser: (noteId: string, email: string) => request<{ ok: boolean; shares: NoteUserShare[] }>("/api/notes/share-user", { method: "POST", body: JSON.stringify({ noteId, email }) }),
+  removeNoteUserShare: (noteId: string, sharedWithUserId: string) => request<{ ok: boolean; shares: NoteUserShare[] }>("/api/notes/share-user", { method: "DELETE", body: JSON.stringify({ noteId, sharedWithUserId }) }),
+  sharedWithMe: () => request<{ notes: SharedNote[] }>("/api/notes/shared-with-me"),
+  toggleSharedNoteItem: (shareId: string, itemId: string, done: boolean) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/toggle`, { method: "POST", body: JSON.stringify({ itemId, done }) }),
+  addSharedNoteItem: (shareId: string, text: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items`, { method: "POST", body: JSON.stringify({ text }) }),
+  deleteSharedNoteItem: (shareId: string, itemId: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

@@ -198,3 +198,7 @@ export type Document = {
   expiryDate?: string | null;
 };
 export type DocumentsData = { folders: DocumentFolder[]; documents: Document[] };
+
+// Notes shared with the signed-in user from someone else's household (resolved live by the server, never a snapshot).
+export type SharedNote = { shareId: string; noteId: string; title: string; body: string; checklist: NoteItem[]; sharedFromHousehold: string };
+export type NoteUserShare = { id: string; userId: string; email: string; name: string };

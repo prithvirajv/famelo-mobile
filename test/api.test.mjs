@@ -460,3 +460,17 @@ test("Notes have views (Notes/Reminders/Archive/Trash/labels), search, labels, a
   assert.match(body, /Delete permanently/);
   assert.match(body, /Search notes/);
 });
+
+test("Notes can be shared by email, public link, or with a FamilyLoop account, and notes shared with you can be ticked and added to", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  for (const route of ["/api/notes/share\"", "/api/notes/share-link", "/api/notes/share-user", "/api/notes/shared-with-me", "/shared-with-me/\\$\\{encodeURIComponent\\(shareId\\)\\}/toggle", "/shared-with-me/\\$\\{encodeURIComponent\\(shareId\\)\\}/items"]) {
+    assert.match(api, new RegExp(route), `api.ts should call ${route}`);
+  }
+  const panel = extractFunctionSource(app, "NoteSharePanel");
+  for (const name of ["shareNoteByEmail", "createNoteShareLink", "removeNoteShareLink", "shareNoteWithUser", "removeNoteUserShare"]) assert.match(panel, new RegExp(`api\\.${name}\\(`));
+  assert.match(panel, /Share\.share\(\{ message: linkUrl \}\)/, "a link is shared as text so it works on both iOS and Android");
+  const shared = extractFunctionSource(app, "SharedWithMe");
+  for (const name of ["sharedWithMe", "toggleSharedNoteItem", "addSharedNoteItem", "deleteSharedNoteItem"]) assert.match(shared, new RegExp(`api\\.${name}\\(`));
+  assert.match(extractFunctionSource(app, "Notes"), /<NoteSharePanel note=\{note\} \/>/);
+});
