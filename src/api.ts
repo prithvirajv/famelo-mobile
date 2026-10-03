@@ -91,5 +91,12 @@ export const api = {
   addSharedNoteItem: (shareId: string, text: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items`, { method: "POST", body: JSON.stringify({ text }) }),
   deleteSharedNoteItem: (shareId: string, itemId: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
+  // Profile and household sharing (web's Profile and Sharing pages).
+  updateProfile: (patch: { name?: string; currentPassword?: string; newPassword?: string }) => request<User>("/api/auth/me", { method: "PATCH", body: JSON.stringify(patch) }),
+  resendVerification: () => request<{ message?: string }>("/api/auth/verify-email/resend", { method: "POST", body: "{}" }),
+  inviteMember: (body: { name: string; email: string; role: string; scopes: string[] }) =>
+    request<{ invitation?: { name: string; email: string; role: string; inviteCode?: string; householdName?: string }; invitations?: Array<{ name: string; email: string; role: string; inviteCode?: string; householdName?: string }>; email: { queued?: boolean; preview?: boolean } }>("/api/households/invitations", { method: "POST", body: JSON.stringify(body) }),
+  setMemberAccessLevel: (email: string, accessLevel: "edit" | "view") => request<{ ok?: boolean }>("/api/households/access", { method: "PATCH", body: JSON.stringify({ email, accessLevel }) }),
+  revokeMemberAccess: (email: string) => request<{ ok?: boolean; email: { queued?: boolean; preview?: boolean } }>("/api/households/access", { method: "DELETE", body: JSON.stringify({ email }) }),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

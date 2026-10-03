@@ -1,4 +1,4 @@
-export type User = { id: string; email: string; name: string; isAdmin: boolean };
+export type User = { id: string; email: string; name: string; isAdmin: boolean; emailVerified?: boolean };
 export type Household = { id: string; name: string; role: string; country: string; currency: string; selected: boolean };
 export type RecurringBudgetBill = { enabled: boolean; amount: number; frequency: "monthly" | "quarterly" | "yearly"; dueDate: string };
 export type BudgetLine = {
@@ -51,7 +51,7 @@ export type Note = {
   labels?: string[]; reminder?: string; reminderAt?: string; billLineId?: string | null; showChecklist?: boolean; trashedAt?: string;
 };
 export type Recipe = { id: string; name: string; ingredients: string[]; calories: number; protein: number };
-export type HouseholdAccess = { canManage: boolean; members: Array<{ name: string; email: string; role: string; status: string; isOwner: boolean }> };
+export type HouseholdAccess = { canManage: boolean; members: Array<{ name: string; email: string; role: string; status: string; isOwner: boolean; accessLevel?: "edit" | "view" }> };
 export type PlannedMeal = { month?: string; week?: number; day: string; slot?: string; meal: string; recipeId?: string; servings: number };
 // Holding-only fields (symbol/shares/price/costBasis/groupId/groupName/holdingType) only apply
 // when assetClass is "stock" or "retirement" - see isHoldingAssetClass in the web app's
@@ -132,7 +132,7 @@ export type InboxDraft = {
   isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; historyMatch?: boolean; accountHistoryMatch?: boolean; recurringId?: string;
 };
 export type HouseholdState = {
-  household: { name: string; country: string; currency: string; activity?: string[] };
+  household: { name: string; country: string; currency: string; activity?: string[]; members?: Array<{ name: string; email: string; role: string }>; sharedScopes?: string[]; inviteCode?: string };
   budget: { month: string; income: number; categories: BudgetCategory[]; taxonomyUnified?: boolean; monthPreferenceSet?: boolean; dismissedReminders?: Record<string, string[]> };
   // One frozen snapshot per past month, taken when switching months, since budget.categories became a
   // single taxonomy shared across every month (only line.planned still varies per month) - see

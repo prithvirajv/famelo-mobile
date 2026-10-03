@@ -507,3 +507,18 @@ test("recipes screen and meal planner save through the shared whole-state save a
   assert.match(meals, /groceryListByAisle\(/);
   assert.match(app, /<Recipes state=\{state\} onSave=\{save\}/);
 });
+
+test("Profile and Sharing are reachable from More, gate management on ownership, and never echo passwords", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /subScreen === "profile" \? <ProfileScreen/);
+  assert.match(app, /subScreen === "sharing" \? <SharingScreen/);
+  const profile = extractFunctionSource(app, "ProfileScreen");
+  assert.equal((profile.match(/secureTextEntry/g) || []).length, 3, "current, new and confirm password inputs are all masked");
+  assert.match(profile, /isDemoAccount\(user\.email\)/);
+  const sharing = extractFunctionSource(app, "SharingScreen");
+  assert.match(sharing, /access\?\.canManage/);
+  assert.match(sharing, /api\.revokeMemberAccess/);
+  assert.match(sharing, /onSave\(recordInvitation\(state/);
+  // every save hands over the whole household state produced by a sharingLogic function, never a hand-built partial
+  assert.equal((sharing.match(/onSave\((?:recordInvitation|recordRevoked|recordAccessLevel|setShareEverything|toggleScope)\(state/g) || []).length, 5);
+});

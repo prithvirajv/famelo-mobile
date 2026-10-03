@@ -40,6 +40,7 @@ import {
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
+import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
@@ -102,7 +103,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | "recipes" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | "recipes" | "profile" | "sharing" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingHidden, setOnboardingHidden] = useState(false);
@@ -191,6 +192,8 @@ function AppContent() {
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bankStream" ? <BankStream state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "profile" ? <ProfileScreen user={user} onUserChange={setUser} onBack={() => setSubScreen(null)} />
+    : subScreen === "sharing" ? <SharingScreen state={state} access={access} onSave={save} onRefreshAccess={async () => { try { setAccess(await api.householdAccess()); } catch { /* keep the last list */ } }} onBack={() => setSubScreen(null)} />
     : subScreen === "recipes" ? <Recipes state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
@@ -205,7 +208,7 @@ function AppContent() {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} onOpenRecipes={() => setSubScreen("recipes")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} onOpenRecipes={() => setSubScreen("recipes")} onOpenProfile={() => setSubScreen("profile")} onOpenSharing={() => setSubScreen("sharing")} />;
 
   return <SafeAreaView style={styles.app} edges={["top", "left", "right"]}>
     <StatusBar style="dark" />
@@ -322,6 +325,146 @@ function Recipes({ state, onSave, onBack }: { state: HouseholdState; onSave: (ne
           <Pressable accessibilityLabel={`Delete ${recipe.name}`} hitSlop={8} onPress={() => confirmDelete(recipe)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
         </View>
       </Card>)}
+  </Page>;
+}
+
+// Name, email-verification status and password change (web's Profile page). The shared demo account cannot be edited.
+function ProfileScreen({ user, onUserChange, onBack }: { user: User; onUserChange: (next: User) => void; onBack: () => void }) {
+  const demo = isDemoAccount(user.email);
+  const [name, setName] = useState(user.name);
+  const [nameMessage, setNameMessage] = useState("");
+  const [verifyMessage, setVerifyMessage] = useState("");
+  const [passwords, setPasswords] = useState({ current: "", next: "", confirm: "" });
+  const [passwordMessage, setPasswordMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const saveName = async () => {
+    if (!name.trim()) return setNameMessage("Name cannot be blank.");
+    setBusy(true);
+    try { const updated = await api.updateProfile({ name: name.trim() }); onUserChange({ ...user, ...updated }); setNameMessage("Saved."); }
+    catch (cause) { setNameMessage(cause instanceof Error ? cause.message : "Could not save"); }
+    finally { setBusy(false); }
+  };
+  const resend = async () => {
+    try { const result = await api.resendVerification(); setVerifyMessage(result.message || "Verification email sent."); }
+    catch (cause) { setVerifyMessage(cause instanceof Error ? cause.message : "Could not send"); }
+  };
+  const changePassword = async () => {
+    const problem = validateNewPassword(passwords.current, passwords.next, passwords.confirm);
+    if (problem) return setPasswordMessage(problem);
+    setBusy(true);
+    try { await api.updateProfile({ currentPassword: passwords.current, newPassword: passwords.next }); setPasswords({ current: "", next: "", confirm: "" }); setPasswordMessage("Password updated."); }
+    catch (cause) { setPasswordMessage(cause instanceof Error ? cause.message : "Could not update password"); }
+    finally { setBusy(false); }
+  };
+
+  return <Page>
+    <SubScreenHeader title="Profile" eyebrow="ACCOUNT" onBack={onBack} />
+    {demo ? <Card><Text style={styles.muted}>The demo account is shared by every visitor, so its name and password can't be changed.</Text></Card> : <>
+      <Card>
+        <Text style={styles.cardTitle}>Your profile</Text>
+        <Text style={styles.label}>Name</Text>
+        <TextInput style={styles.input} value={name} onChangeText={setName} />
+        <Text style={styles.label}>Email</Text>
+        <Text style={styles.rowDetail}>{user.email}</Text>
+        <Pressable style={styles.primaryButton} disabled={busy} onPress={() => void saveName()}><Text style={styles.primaryButtonText}>Save name</Text></Pressable>
+        {nameMessage ? <Text style={styles.muted}>{nameMessage}</Text> : null}
+        {user.emailVerified ? <Text style={styles.successText}>Email verified</Text> : <>
+          <Text style={styles.muted}>Email not verified yet.</Text>
+          <Pressable style={styles.secondarySmall} onPress={() => void resend()}><Text style={styles.secondaryButtonText}>Resend verification email</Text></Pressable>
+        </>}
+        {verifyMessage ? <Text style={styles.muted}>{verifyMessage}</Text> : null}
+      </Card>
+      <Card>
+        <Text style={styles.cardTitle}>Change password</Text>
+        <TextInput style={styles.input} value={passwords.current} onChangeText={(current) => setPasswords({ ...passwords, current })} placeholder="Current password" secureTextEntry autoComplete="current-password" autoCapitalize="none" />
+        <TextInput style={styles.input} value={passwords.next} onChangeText={(next) => setPasswords({ ...passwords, next })} placeholder="New password (8+ characters)" secureTextEntry autoComplete="new-password" autoCapitalize="none" />
+        <TextInput style={styles.input} value={passwords.confirm} onChangeText={(confirm) => setPasswords({ ...passwords, confirm })} placeholder="Confirm new password" secureTextEntry autoComplete="new-password" autoCapitalize="none" />
+        <Pressable style={styles.primaryButton} disabled={busy} onPress={() => void changePassword()}><Text style={styles.primaryButtonText}>Update password</Text></Pressable>
+        {passwordMessage ? <Text style={styles.muted}>{passwordMessage}</Text> : null}
+      </Card>
+    </>}
+  </Page>;
+}
+
+// Household members, invitations, per-member edit/view access, revoking, and which areas are shared (web's Sharing page).
+// Only the household owner can manage members (access.canManage); everyone else sees the list read-only.
+function SharingScreen({ state, access, onSave, onRefreshAccess, onBack }: { state: HouseholdState; access: HouseholdAccess | null; onSave: (next: HouseholdState) => Promise<void>; onRefreshAccess: () => Promise<void>; onBack: () => void }) {
+  const [inviteName, setInviteName] = useState(""); const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState(ACCESS_ROLES[1] || "Member");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const canManage = Boolean(access?.canManage);
+  const members = access?.members || (state.household.members || []).map((member, index) => ({ ...member, status: member.role.includes("Invited") ? "pending" : "active", isOwner: index === 0 }));
+  const scopes = sharedScopesOf(state);
+
+  const sendInvite = async () => {
+    const name = inviteName.trim(); const email = inviteEmail.trim();
+    if (!name || !email) return setStatus("Enter their name and email.");
+    setBusy(true); setStatus("Sending invitation...");
+    try {
+      const result = await api.inviteMember({ name, email, role: inviteRole, scopes });
+      const invitations = result.invitations || (result.invitation ? [result.invitation] : []);
+      const current = invitations.find((item) => item.householdName === state.household.name) || invitations[0];
+      if (current) await onSave(recordInvitation(state, current));
+      setStatus(emailOutcomeMessage(result.email, email, "invite"));
+      setInviteName(""); setInviteEmail("");
+      await onRefreshAccess();
+    } catch (cause) { setStatus(cause instanceof Error ? cause.message : "Could not send the invitation"); }
+    finally { setBusy(false); }
+  };
+  const changeLevel = async (email: string, level: "edit" | "view") => {
+    setBusy(true);
+    try { await api.setMemberAccessLevel(email, level); await onSave(recordAccessLevel(state, email, level)); await onRefreshAccess(); }
+    catch (cause) { setStatus(cause instanceof Error ? cause.message : "Could not change access"); }
+    finally { setBusy(false); }
+  };
+  const revoke = (email: string) => Alert.alert("Revoke access?", `${email} will lose access to this household.`, [{ text: "Cancel" }, { text: "Revoke", style: "destructive", onPress: () => void (async () => {
+    setBusy(true);
+    try { const result = await api.revokeMemberAccess(email); await onSave(recordRevoked(state, email)); setStatus(emailOutcomeMessage(result.email, email, "revoke")); await onRefreshAccess(); }
+    catch (cause) { setStatus(cause instanceof Error ? cause.message : "Could not revoke access"); }
+    finally { setBusy(false); }
+  })() }]);
+
+  return <Page>
+    <SubScreenHeader title="Sharing" eyebrow="HOUSEHOLD" onBack={onBack} />
+    <Card>
+      <Text style={styles.cardTitle}>{state.household.name}</Text>
+      {members.map((member) => <View key={member.email} style={styles.householdRow}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{member.name}</Text>
+          <Text style={styles.rowDetail}>{member.email}</Text>
+          <Text style={styles.rowDetail}>{member.role} · {member.status === "pending" ? "Invited" : "Active"}{member.isOwner ? " · Owner" : ""}</Text>
+          {canManage && !member.isOwner && member.status === "active" ? <View style={styles.choiceRow}>
+            {(["edit", "view"] as const).map((level) => <Pressable key={level} disabled={busy} style={[styles.choice, ((("accessLevel" in member && member.accessLevel) || "edit") === level) && styles.choiceActive]} onPress={() => void changeLevel(member.email, level)}>
+              <Text style={[styles.choiceText, ((("accessLevel" in member && member.accessLevel) || "edit") === level) && styles.choiceTextActive]}>{level === "edit" ? "Can edit" : "View only"}</Text>
+            </Pressable>)}
+          </View> : null}
+        </View>
+        {canManage && !member.isOwner ? <Pressable accessibilityLabel={`Revoke access for ${member.name}`} hitSlop={8} onPress={() => revoke(member.email)}><Ionicons name="person-remove-outline" size={20} color={colors.coral} /></Pressable> : null}
+      </View>)}
+    </Card>
+    {canManage ? <Card>
+      <Text style={styles.cardTitle}>Invite someone</Text>
+      <TextInput style={styles.input} value={inviteName} onChangeText={setInviteName} placeholder="Name" />
+      <TextInput style={styles.input} value={inviteEmail} onChangeText={setInviteEmail} placeholder="name@example.com" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} />
+      <Text style={styles.label}>Access</Text>
+      <View style={styles.choiceRow}>{ACCESS_ROLES.map((role) => <Pressable key={role} style={[styles.choice, inviteRole === role && styles.choiceActive]} onPress={() => setInviteRole(role)}><Text style={[styles.choiceText, inviteRole === role && styles.choiceTextActive]}>{role}</Text></Pressable>)}</View>
+      <Pressable style={styles.primaryButton} disabled={busy} onPress={() => void sendInvite()}><Text style={styles.primaryButtonText}>Send invite</Text></Pressable>
+    </Card> : <Text style={styles.muted}>Only the household owner can invite people or change access.</Text>}
+    {status ? <Text style={styles.muted}>{status}</Text> : null}
+    <Card>
+      <Text style={styles.cardTitle}>Shared areas</Text>
+      <Text style={styles.muted}>Choose which areas invited members can use.</Text>
+      <View style={styles.checkRow}>
+        <Text style={[styles.rowTitle, { flex: 1 }]}>Share everything</Text>
+        <Pressable disabled={!canManage} onPress={() => void onSave(setShareEverything(state, !allScopesShared(state)))}><Ionicons name={allScopesShared(state) ? "checkbox" : "square-outline"} size={24} color={canManage ? colors.green : colors.border} /></Pressable>
+      </View>
+      {ALL_SCOPES.map((scope) => <View key={scope} style={styles.checkRow}>
+        <Text style={[styles.rowDetail, { flex: 1 }]}>{scope}</Text>
+        <Pressable disabled={!canManage} onPress={() => void onSave(toggleScope(state, scope))}><Ionicons name={scopes.includes(scope) ? "checkbox" : "square-outline"} size={22} color={canManage ? colors.green : colors.border} /></Pressable>
+      </View>)}
+    </Card>
   </Page>;
 }
 
@@ -3821,10 +3964,10 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream, onOpenRecipes }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void; onOpenRecipes: () => void }) {
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream, onOpenRecipes, onOpenProfile, onOpenSharing }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void; onOpenRecipes: () => void; onOpenProfile: () => void; onOpenSharing: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenRecipes}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Recipes</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes · add, edit, search</Text></Pressable><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text><Pressable style={styles.householdRow} onPress={onOpenProfile}><View><Text style={styles.rowTitle}>Profile</Text><Text style={styles.rowDetail}>Name, email verification, password</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenSharing}><View><Text style={styles.rowTitle}>Sharing</Text><Text style={styles.rowDetail}>Members, invites, who can edit, shared areas</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenRecipes}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Recipes</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes · add, edit, search</Text></Pressable><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
