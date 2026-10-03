@@ -145,18 +145,24 @@ function monthEndDateKey(monthKey: string): string {
   return `${monthKey}-${String(lastDay).padStart(2, "0")}`;
 }
 
-// Mirrors web's budgetIncomeFromPaychecks (app.js): a month's budget income is always derived from
-// the household's paychecks (one-time income by occurrence count, recurring income from materialized
-// occurrences) - web recomputes it on every render, so the stored state.budget.income is never
-// something a client should edit directly; a stale value just gets overwritten there.
-export function budgetIncomeFromPaychecks(state: { budget: { month: string }; paychecks: Paycheck[]; paycheckOccurrences?: PaycheckOccurrence[] }): number {
-  const monthStart = `${state.budget.month}-01`;
-  const monthEnd = monthEndDateKey(state.budget.month);
-  const oneTimeIncome = state.paychecks
+// Income for one month, derived from paychecks the way web does everywhere (Budget's monthly income and
+// Reports' cash flow): one-time income by occurrence count, recurring income from the materialized
+// occurrences that land in the month.
+export function paycheckIncomeForMonth(state: { paychecks: Paycheck[]; paycheckOccurrences?: PaycheckOccurrence[] }, monthKey: string): number {
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = monthEndDateKey(monthKey);
+  const oneTimeIncome = (state.paychecks || [])
     .filter((paycheck) => ["once", "bonus"].includes(paycheck.recurrence || "once"))
     .reduce((sum, paycheck) => sum + Number(paycheck.amount || 0) * paycheckOccurrencesInRange(paycheck, monthStart, monthEnd), 0);
   const recurringIncome = (state.paycheckOccurrences || [])
     .filter((occurrence) => occurrence.date >= monthStart && occurrence.date <= monthEnd)
     .reduce((sum, occurrence) => sum + Number(occurrence.amount || 0), 0);
   return oneTimeIncome + recurringIncome;
+}
+
+// Mirrors web's budgetIncomeFromPaychecks (app.js): a month's budget income is always derived from
+// the household's paychecks - web recomputes it on every render, so the stored state.budget.income is
+// never something a client should edit directly; a stale value just gets overwritten there.
+export function budgetIncomeFromPaychecks(state: { budget: { month: string }; paychecks: Paycheck[]; paycheckOccurrences?: PaycheckOccurrence[] }): number {
+  return paycheckIncomeForMonth(state, state.budget.month);
 }

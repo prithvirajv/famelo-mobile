@@ -261,3 +261,14 @@ test("Calendar can export .ics/.csv through the share sheet and import them behi
   // nothing is added to the calendar by merely picking a file
   assert.doesNotMatch(body.slice(body.indexOf("pickImportFile"), body.indexOf("submitImport")), /calendar\.(events|chores)\.push/);
 });
+
+test("Reports shows a 'Where your income went' breakdown driven by paycheck income, with category/subcategory drill-down", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Reports");
+  assert.match(body, /paycheckIncomeForMonth\(state, monthKey\)/, "income comes from paychecks like web, not from negative transactions");
+  assert.match(body, /flowSegments\(categories, totalIncome, totalExpenses, FLOW_PALETTE\)/);
+  assert.match(body, /resolveFlowSelection\(flow, flowSelectedKey\)/);
+  assert.match(body, /transactionsForLines\(/);
+  assert.match(body, /transactionAmountForLines\(/, "split transactions show only their share so the list adds up to the segment");
+  assert.doesNotMatch(body, /react-native-svg/);
+});

@@ -113,3 +113,21 @@ test("ensurePaycheckOccurrencesGenerated: assigns a real id to a legacy paycheck
   assert.ok(result.paychecks[0].id, "a real id must be assigned");
   assert.ok(result.paycheckOccurrences.every((occurrence) => occurrence.seriesId === result.paychecks[0].id));
 });
+
+import { paycheckIncomeForMonth } from "../src/paychecksLogic.ts";
+
+test("paycheckIncomeForMonth sums one-time income and materialized occurrences for just that month", () => {
+  const state = {
+    paychecks: [
+      { id: "a", date: "2026-07-10", name: "Bonus", amount: 300, recurrence: "bonus", assignedLineIds: [] },
+      { id: "c", date: "2026-01-01", name: "Salary", amount: 1, recurrence: "monthly", assignedLineIds: [] }
+    ],
+    paycheckOccurrences: [
+      { id: "o1", seriesId: "c", date: "2026-07-01", amount: 2000 },
+      { id: "o2", seriesId: "c", date: "2026-08-01", amount: 2100 }
+    ]
+  };
+  assert.equal(paycheckIncomeForMonth(state, "2026-07"), 2300);
+  assert.equal(paycheckIncomeForMonth(state, "2026-08"), 2100);
+  assert.equal(paycheckIncomeForMonth(state, "2026-09"), 0);
+});

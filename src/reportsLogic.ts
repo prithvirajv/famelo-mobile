@@ -55,7 +55,7 @@ export function spentByLineInMonth(transactions: Transaction[], lineId: string, 
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
 }
 
-export type ReportCategoryLine = { name: string; value: number };
+export type ReportCategoryLine = { id: string; name: string; value: number };
 export type ReportCategory = { name: string; color: string; value: number; percent: number; lines: ReportCategoryLine[] };
 
 // Category spend summed across every month in the scope (not just the
@@ -67,7 +67,7 @@ export function reportCategoriesForScope(categories: BudgetCategory[], transacti
   const lineTotal = (lineId: string) => monthKeys.reduce((sum, monthKey) => sum + spentByLineInMonth(transactions, lineId, monthKey), 0);
   const withLines = categories.map((category) => {
     const lines = category.lines
-      .map((line) => ({ name: line.name, value: lineTotal(line.id) }))
+      .map((line) => ({ id: line.id, name: line.name, value: lineTotal(line.id) }))
       .filter((line) => line.value !== 0);
     const value = category.lines.reduce((sum, line) => sum + lineTotal(line.id), 0);
     return { name: category.name, color: category.color, value, lines };
@@ -122,15 +122,74 @@ export function groupTransactionsByTag(transactions: Transaction[]): TagGroup[] 
 
 export type CashFlowMonth = { month: string; income: number; expenses: number };
 
-// Simple income/expense split for a cash-flow view: expenses are positive
-// transaction amounts (spend), income is every negative one (a deposit/
-// refund) taken as its absolute value - mobile has no separate paycheck
-// feed wired into Reports, so this reads purely from transactions.
-export function cashFlowByMonth(transactions: Transaction[], monthKeys: string[]): CashFlowMonth[] {
+// Web's definition: a month's income is what the household's paychecks bring in (the caller supplies
+// that, since it needs paycheck logic this file can't import), and expenses are the NET of every
+// transaction dated in the month - a refund (negative amount) reduces spending rather than counting as
+// income. (Mobile used to treat negative transactions as income because it had no paycheck feed.)
+export function cashFlowByMonth(transactions: Transaction[], monthKeys: string[], incomeForMonth: (monthKey: string) => number): CashFlowMonth[] {
   return monthKeys.map((monthKey) => {
-    const monthTransactions = transactions.filter((transaction) => dateKeyToMonthKey(transaction.date) === monthKey);
-    const expenses = monthTransactions.filter((transaction) => Number(transaction.amount) > 0).reduce((sum, transaction) => sum + Number(transaction.amount), 0);
-    const income = monthTransactions.filter((transaction) => Number(transaction.amount) < 0).reduce((sum, transaction) => sum + Math.abs(Number(transaction.amount)), 0);
-    return { month: monthKey, income, expenses };
+    const expenses = transactions
+      .filter((transaction) => dateKeyToMonthKey(transaction.date) === monthKey)
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    return { month: monthKey, income: incomeForMonth(monthKey), expenses };
   });
+}
+
+// ---- Cash flow breakdown (web's Sankey, as a mobile-friendly list) -----------------------------------
+// Web draws a two-stage ribbon Sankey (Income -> Category -> Subcategory) as a custom SVG. The numbers
+// behind it are what matter and they port exactly; mobile presents them as one proportional bar plus an
+// expandable list instead of ribbons that are unreadable at phone width.
+
+export type FlowChild = { label: string; value: number; lineId: string };
+export type FlowSegment = { label: string; value: number; color: string; lineIds: string[]; children: FlowChild[] };
+
+// Ordered destinations income flows into: each category with real spend (largest first) plus a trailing
+// "Savings" segment for what is left of income after expenses - omitted entirely once spend meets or
+// exceeds income. Categories have no id of their own, so a segment's own comma-joined line ids double as
+// its drill-down key. Colors cycle through the given palette in order, like web's report themes.
+export function flowSegments(categories: ReportCategory[], totalIncome: number, totalExpenses: number, palette: string[], savingsColor = "#13936d"): FlowSegment[] {
+  const segments = categories
+    .filter((category) => category.value > 0)
+    .map((category) => ({
+      label: category.name, value: category.value, lineIds: category.lines.map((line) => line.id),
+      children: category.lines.filter((line) => line.value > 0).map((line) => ({ label: line.name, value: line.value, lineId: line.id })).sort((a, b) => b.value - a.value)
+    }))
+    .sort((a, b) => b.value - a.value)
+    .map((segment, index) => ({ ...segment, color: palette[index % palette.length] || savingsColor }));
+  const savings = totalIncome - totalExpenses;
+  if (savings > 0) segments.push({ label: "Savings", value: savings, color: savingsColor, lineIds: [], children: [] });
+  return segments;
+}
+
+export type FlowSelection = { label: string; value: number; lineIds: string[] };
+
+// A category's key is its comma-joined line ids; a subcategory's key is its single line id (never
+// colliding, since a category key always joins at least one id). Categories are matched first.
+export function resolveFlowSelection(segments: FlowSegment[], key: string): FlowSelection | null {
+  const category = segments.find((segment) => segment.lineIds.length && segment.lineIds.join(",") === key);
+  if (category) return { label: category.label, value: category.value, lineIds: category.lineIds };
+  for (const segment of segments) {
+    const leaf = segment.children.find((child) => child.lineId === key);
+    if (leaf) return { label: leaf.label, value: leaf.value, lineIds: [leaf.lineId] };
+  }
+  return null;
+}
+
+export function transactionHasLine(transaction: Transaction, lineIds: string[]): boolean {
+  if (transaction.splits?.length) return transaction.splits.some((split) => lineIds.includes(split.lineId));
+  return lineIds.includes(transaction.lineId);
+}
+
+// What a transaction contributes to a set of lines: its whole amount, or just the matching splits'
+// share when it is split across categories - so a drill-down list adds up to the segment it came from.
+export function transactionAmountForLines(transaction: Transaction, lineIds: string[]): number {
+  if (transaction.splits?.length) return transaction.splits.filter((split) => lineIds.includes(split.lineId)).reduce((sum, split) => sum + Number(split.amount || 0), 0);
+  return lineIds.includes(transaction.lineId) ? Number(transaction.amount || 0) : 0;
+}
+
+// The transactions behind a selected segment: dated in the scope's months, on those lines, newest first.
+export function transactionsForLines(transactions: Transaction[], lineIds: string[], monthKeys: string[]): Transaction[] {
+  return transactions
+    .filter((transaction) => monthKeys.includes(dateKeyToMonthKey(transaction.date)) && transactionHasLine(transaction, lineIds))
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 }

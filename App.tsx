@@ -26,7 +26,8 @@ import {
 } from "./src/iouLogic";
 import type { BillSplitParticipant, NetBalanceGroup } from "./src/iouLogic";
 import {
-  monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
+  monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth,
+  flowSegments, resolveFlowSelection, transactionAmountForLines, transactionsForLines
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
@@ -35,7 +36,7 @@ import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
-import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks } from "./src/paychecksLogic";
+import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
@@ -1884,6 +1885,8 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   const [rangeEnd, setRangeEnd] = useState(today());
   const [scopeYear, setScopeYear] = useState(String(new Date(currentMonth + "-01").getFullYear()));
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
+  const [showAllFlowTransactions, setShowAllFlowTransactions] = useState(false);
 
   function today() { return new Date().toISOString().slice(0, 10); }
 
@@ -1900,8 +1903,15 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
     budgetVsActualByCategoryTotals.set(row.category, { planned: existing.planned + row.planned, actual: existing.actual + row.actual, variance: existing.variance + row.variance });
   });
   const tagGroups = groupTransactionsByTag(state.transactions);
-  const cashFlow = cashFlowByMonth(state.transactions, monthKeys);
+  const cashFlow = cashFlowByMonth(state.transactions, monthKeys, (monthKey) => paycheckIncomeForMonth(state, monthKey));
   const maxCashFlow = Math.max(...cashFlow.map((month) => Math.max(month.income, month.expenses)), 1);
+  const totalIncome = cashFlow.reduce((sum, month) => sum + month.income, 0);
+  const totalExpenses = cashFlow.reduce((sum, month) => sum + month.expenses, 0);
+  const flow = flowSegments(categories, totalIncome, totalExpenses, FLOW_PALETTE);
+  const flowTotal = Math.max(totalIncome, totalExpenses, 1);
+  const flowSelection = flowSelectedKey ? resolveFlowSelection(flow, flowSelectedKey) : null;
+  const flowTransactions = flowSelection ? transactionsForLines(state.transactions, flowSelection.lineIds, monthKeys) : [];
+  const flowPercent = (value: number) => `${Math.round((value / flowTotal) * 100)}%`;
 
   return <Page>
     <SubScreenHeader title="Reports" onBack={onBack} />
@@ -1969,8 +1979,43 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
         <View style={styles.cashFlowLegendItem}><View style={[styles.dot, { backgroundColor: colors.coral }]} /><Text style={styles.rowDetail}>Expenses</Text></View>
       </View>
     </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Where your income went</Text>
+      <Text style={styles.muted}>{money(totalIncome, currency)} income · {money(totalExpenses, currency)} spent this period</Text>
+      {flow.length ? <>
+        <View style={styles.flowBar}>{flow.map((segment) => <View key={segment.label} style={{ flex: segment.value, minWidth: 2, backgroundColor: segment.color }} />)}</View>
+        {flow.map((segment) => {
+          const key = segment.lineIds.join(",");
+          const isOpen = Boolean(key) && Boolean(flowSelection) && (flowSelectedKey === key || segment.children.some((child) => child.lineId === flowSelectedKey));
+          return <View key={segment.label}>
+            <Pressable style={styles.row} disabled={!key} onPress={() => { setFlowSelectedKey(flowSelectedKey === key ? null : key); setShowAllFlowTransactions(false); }}>
+              <View style={[styles.flowDot, { backgroundColor: segment.color }]} />
+              <View style={styles.rowCopy}>
+                <Text style={styles.rowTitle}>{segment.label}</Text>
+                <Text style={styles.rowDetail}>{flowPercent(segment.value)} of {totalIncome > 0 ? "income" : "spending"}{key ? "" : " · what's left after spending"}</Text>
+              </View>
+              <Text style={styles.rowValue}>{money(segment.value, currency)}</Text>
+              {key ? <Ionicons name={isOpen ? "chevron-up" : "chevron-down"} size={18} color={colors.muted} /> : null}
+            </Pressable>
+            {isOpen ? segment.children.map((child) => <Pressable key={child.lineId} style={[styles.row, styles.flowChildRow, flowSelectedKey === child.lineId && styles.flowChildActive]} onPress={() => { setFlowSelectedKey(flowSelectedKey === child.lineId ? key : child.lineId); setShowAllFlowTransactions(false); }}>
+              <View style={styles.rowCopy}><Text style={styles.rowTitle}>{child.label}</Text><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.max(2, Math.round((child.value / segment.value) * 100))}%`, backgroundColor: segment.color }]} /></View></View>
+              <Text style={styles.rowValue}>{money(child.value, currency)}</Text>
+            </Pressable>) : null}
+          </View>;
+        })}
+        {flowSelection ? <View style={{ marginTop: 10 }}>
+          <Text style={styles.cardTitle}>{flowSelection.label} · {money(flowSelection.value, currency)}</Text>
+          {flowTransactions.length ? (showAllFlowTransactions ? flowTransactions : flowTransactions.slice(0, 20)).map((transaction, index) => <Row key={`${index}-${transaction.date}-${transaction.payee}`} title={transaction.payee} detail={transaction.date} value={money(transactionAmountForLines(transaction, flowSelection.lineIds), currency)} />) : <Text style={styles.muted}>No transactions found for this category.</Text>}
+          {flowTransactions.length > 20 ? <Pressable style={styles.secondarySmall} onPress={() => setShowAllFlowTransactions((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showAllFlowTransactions ? "Show fewer" : `Show all (${flowTransactions.length})`}</Text></Pressable> : null}
+        </View> : <Text style={styles.muted}>Tap a category for its subcategories and transactions.</Text>}
+      </> : <Text style={styles.muted}>No income or spending in this period</Text>}
+    </Card>
   </Page>;
 }
+
+// Same colors as web's default ("fresh") report theme, so a category reads the same on both apps.
+const FLOW_PALETTE = ["#13936d", "#3569d4", "#c9891e", "#e05252", "#7c5cff"];
 
 const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
 const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];
@@ -2570,6 +2615,7 @@ const styles = StyleSheet.create({
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" },
   subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
+  flowBar: { flexDirection: "row", height: 22, borderRadius: 11, overflow: "hidden", marginVertical: 12, backgroundColor: colors.panel }, flowDot: { width: 12, height: 12, borderRadius: 6 }, flowChildRow: { marginLeft: 22, minHeight: 52 }, flowChildActive: { backgroundColor: colors.panel },
   iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, decisionColumn: { marginTop: 10 },
   reportSubcategoryRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
   cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
