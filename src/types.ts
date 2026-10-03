@@ -115,9 +115,15 @@ export type Decision = {
   id: string; title: string; notes: string; status: "open" | "decided"; outcome: string; decidedAt: string;
   pros: DecisionComment[]; cons: DecisionComment[]; createdAt: string; attachments?: DecisionAttachment[];
 };
-export type InboxDraft = { id?: string; lineId: string; payee?: string; amount?: number; date?: string; accountId?: string };
+// An unreviewed bank-stream row waiting to be accepted into the ledger (positive amount = spend, negative = money
+// in, regardless of account type). The flag fields record what the importer detected; match results (duplicate,
+// refund, transfer) are recomputed live and never trusted from storage - web does the same.
+export type InboxDraft = {
+  id?: string; payee?: string; amount?: number; date?: string; lineId: string; accountId?: string; orderNumber?: string; tags?: string[];
+  isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; historyMatch?: boolean; accountHistoryMatch?: boolean; recurringId?: string;
+};
 export type HouseholdState = {
-  household: { name: string; country: string; currency: string };
+  household: { name: string; country: string; currency: string; activity?: string[] };
   budget: { month: string; income: number; categories: BudgetCategory[]; taxonomyUnified?: boolean; dismissedReminders?: Record<string, string[]> };
   // One frozen snapshot per past month, taken when switching months, since budget.categories became a
   // single taxonomy shared across every month (only line.planned still varies per month) - see
@@ -137,6 +143,10 @@ export type HouseholdState = {
   accounts: Account[];
   transfers: Transfer[];
   transactionInboxDrafts?: InboxDraft[];
+  // Ids of bank-stream rows already accepted or dismissed (web keeps them so a row can't reappear).
+  transactionInboxDone?: string[];
+  // { normalized payee: lineId } - "always categorize this payee this way".
+  transactionCategorizationRules?: Record<string, string>;
 };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };

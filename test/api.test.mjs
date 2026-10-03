@@ -292,3 +292,21 @@ test("Wealth holdings are editable (add account, edit holdings, live prices) thr
   assertOnlyWholeStateSaves(editor, "HoldingsEditor");
   assert.match(editor, /\.\.\.netWorth, assets/, "saving holdings must keep netWorth.priceLastUpdated and liabilities");
 });
+
+test("Bank stream is reachable from More, imports CSV/PDF into reviewable drafts, and every change goes through the pure logic and whole-state saves", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(app, /subScreen === "bankStream"/);
+  assert.match(app, /onOpenBankStream=\{\(\) => setSubScreen\("bankStream"\)\}/);
+  assert.match(api, /\/api\/bank-statement\/parse-pdf/);
+  assert.match(api, /\/api\/transactions\/suggest-subcategory/);
+  assert.match(api, /\/api\/transactions\/suggest-account/);
+  const body = extractFunctionSource(app, "BankStream");
+  for (const name of ["parseBankCsvTransactions", "buildBankStreamDrafts", "reviewDrafts", "acceptDraft", "dismissDraft", "updateDraft", "clearDraftsForAccount", "moveDraftToTransfer", "setCategorizationRule"]) {
+    assert.match(body, new RegExp(name + "\\("), `BankStream should use ${name}`);
+  }
+  assertOnlyWholeStateSaves(body, "BankStream");
+  assert.match(body, /EncodingType\.Base64/, "a PDF is sent to the server as base64");
+  // an AI suggestion is only ever applied as an editable choice on the row, never accepted automatically
+  assert.doesNotMatch(body.slice(body.indexOf("const suggestLine"), body.indexOf("const openTransfer")), /acceptDraft/);
+});

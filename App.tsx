@@ -43,6 +43,8 @@ import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount } from "./src/bankStreamLogic";
+import type { DraftReview, ParsedBankRow } from "./src/bankStreamLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
@@ -88,7 +90,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -161,6 +163,7 @@ function AppContent() {
     : subScreen === "wealth" ? <Wealth state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "bankStream" ? <BankStream state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
@@ -174,7 +177,7 @@ function AppContent() {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} />;
 
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
@@ -1639,6 +1642,181 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
   </Page>;
 }
 
+// The inbox of unreviewed bank/credit-card rows: import a statement (CSV or PDF), review each row (category, account,
+// duplicate/refund/transfer hints), then accept it into the ledger, move it to Transfers, or dismiss it. Every change goes
+// through the pure functions in src/bankStreamLogic.ts and is saved as a whole-state save. Not here yet (web-only): the
+// split editor, tags on rows, bulk "set account for all"/"apply history" actions, sorting, and "split with a friend".
+function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const currency = state.household.currency;
+  const accounts = state.accounts || [];
+  const lines = allBudgetLines(state);
+  const reviews = reviewDrafts(state).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const counts = pendingDraftCountsByAccount(reviews);
+  const [feedback, setFeedback] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [clearAccountId, setClearAccountId] = useState("");
+  const [visibleCount, setVisibleCount] = useState(25);
+  const [transferDraftId, setTransferDraftId] = useState<string | null>(null);
+  const [transferAccountId, setTransferAccountId] = useState("");
+  const [aiBusyId, setAiBusyId] = useState<string | null>(null);
+
+  const apply = async (result: { ok: true; state: HouseholdState } | { ok: false; error: string }) => {
+    if (!result.ok) { Alert.alert("Can't do that", result.error); return false; }
+    await onSave(result.state);
+    return true;
+  };
+
+  const importFile = async () => {
+    const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
+    const asset = picked.canceled ? null : picked.assets?.[0];
+    if (!asset) return;
+    const isPdf = asset.mimeType === "application/pdf" || asset.name.toLowerCase().endsWith(".pdf");
+    if (asset.size && asset.size > (isPdf ? 10_000_000 : 5_000_000)) return Alert.alert("File too large", isPdf ? "PDF statements over 10MB can't be read." : "CSV files over 5MB can't be imported.");
+    setImporting(true);
+    try {
+      let rows: ParsedBankRow[];
+      let accountHint = "";
+      if (isPdf) {
+        setFeedback(`Reading ${asset.name}…`);
+        const parsed = await api.parseBankStatementPdf(await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 }));
+        rows = parsed.rows;
+        accountHint = parsed.accountHint || "";
+        if (!rows.length) { setFeedback(`No transactions found in ${asset.name} — this may be a scanned/image PDF that can't be read as text.`); return; }
+      } else {
+        rows = parseBankCsvTransactions(await FileSystem.readAsStringAsync(asset.uri));
+        if (!rows.length) { setFeedback(`No transactions found in ${asset.name} — check that it has Date, Description, and Amount (or Debit) columns.`); return; }
+      }
+      const result = buildBankStreamDrafts({
+        rows: rows.slice(0, 2000), fileName: asset.name, accountHint, idPrefix: isPdf ? "pdf-import" : "csv-import", transactions: state.transactions,
+        existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId
+      });
+      await onSave({ ...state, transactionInboxDrafts: result.drafts });
+      setFeedback(rows.length > 2000 ? `${result.message} Only the first 2000 rows were imported.` : result.message);
+    } catch (cause) {
+      setFeedback(cause instanceof Error ? cause.message : `Could not read ${asset.name}.`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const confirmClear = () => {
+    const account = accounts.find((item) => item.id === clearAccountId);
+    const count = counts[clearAccountId] || 0;
+    if (!account) return Alert.alert("Choose an account", "Pick the account whose unreviewed rows you want to clear.");
+    if (!count) return Alert.alert("Nothing to clear", `${account.name} has no unreviewed rows.`);
+    Alert.alert(`Remove ${count} unreviewed row${count === 1 ? "" : "s"}?`, `This deletes them from Bank stream for ${account.name} - it doesn't touch anything already accepted into the ledger, and no other account's rows are affected.`, [{ text: "Cancel" }, {
+      text: "Remove", style: "destructive", onPress: () => { void onSave(clearDraftsForAccount(state, clearAccountId).state); setClearAccountId(""); }
+    }]);
+  };
+
+  const suggestLine = async (draftId: string, payee: string) => {
+    setAiBusyId(draftId);
+    try {
+      const { lineId } = await api.suggestTransactionSubcategory(payee, lines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` })));
+      if (!lineId) Alert.alert("No confident match", "The AI couldn't confidently pick a subcategory for this payee - choose one below.");
+      else await apply(updateDraft(state, draftId, { lineId }));
+    } catch (cause) { Alert.alert("Couldn't get a suggestion", cause instanceof Error ? cause.message : "Unknown error"); }
+    finally { setAiBusyId(null); }
+  };
+  const suggestAccount = async (draftId: string, payee: string) => {
+    setAiBusyId(draftId);
+    try {
+      const { accountId } = await api.suggestTransactionAccount(payee, accounts.filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: `${account.name} (${account.type})` })));
+      if (!accountId) Alert.alert("No confident match", "The AI couldn't confidently pick an account for this payee - choose one below.");
+      else await apply(updateDraft(state, draftId, { accountId }));
+    } catch (cause) { Alert.alert("Couldn't get a suggestion", cause instanceof Error ? cause.message : "Unknown error"); }
+    finally { setAiBusyId(null); }
+  };
+
+  const openTransfer = (draft: DraftReview) => {
+    if (!draft.accountId) return Alert.alert("Set an account first", `Set an account on "${draft.payee}" before moving it to Transfers - a transfer needs to know which account the money left or landed in.`);
+    setTransferDraftId(draft.id || null);
+    setTransferAccountId(draft.transferMatch?.accountId || "");
+  };
+  const confirmTransfer = async (draft: DraftReview) => {
+    if (await apply(moveDraftToTransfer(state, draft.id || "", transferAccountId, draft.payee || "", () => uniqueId("transfer")))) setTransferDraftId(null);
+  };
+
+  const pills = (draft: DraftReview): Array<{ label: string; tone: "info" | "warn" | "plain" }> => {
+    const result: Array<{ label: string; tone: "info" | "warn" | "plain" }> = [];
+    if (draft.recurringId) result.push({ label: "Recurring", tone: "plain" });
+    if (draft.isDeposit) result.push({ label: "Deposit", tone: "plain" });
+    if (draft.isPayment) result.push({ label: "Card payment - probably a transfer", tone: "info" });
+    if (draft.isPending) result.push({ label: "Pending - correct the date once it posts", tone: "warn" });
+    if (draft.historyMatch) result.push({ label: "Category from history", tone: "info" });
+    if (draft.categorizationRuleLineId) result.push({ label: "🔒 Rule", tone: "info" });
+    if (draft.categorizationConfidence) result.push({ label: `${draft.categorizationConfidence.confidence}% match (${draft.categorizationConfidence.sampleSize} past)`, tone: draft.categorizationConfidence.confidence >= 80 ? "info" : "warn" });
+    if (draft.accountHistoryMatch) result.push({ label: "Account from history", tone: "info" });
+    if (draft.possibleDuplicate) result.push({ label: "Possible duplicate", tone: "warn" });
+    if (draft.refundMatch) result.push({ label: `Refund match (${money(Number(draft.refundMatch.amount), currency)} on ${draft.refundMatch.date})`, tone: "info" });
+    if (draft.transferMatch) result.push({ label: `Possible transfer (${accounts.find((account) => account.id === draft.transferMatch?.accountId)?.name || "other account"}, ${money(Math.abs(Number(draft.transferMatch.amount)), currency)})`, tone: "info" });
+    return result;
+  };
+
+  return <Page>
+    <SubScreenHeader title="Bank stream" eyebrow="MONEY" onBack={onBack} />
+    <Text style={styles.muted}>Import a bank or credit-card statement (CSV or PDF), review each row, then accept it into your ledger.</Text>
+    <Card>
+      <Pressable style={styles.primaryButton} disabled={importing} onPress={() => void importFile()}>{importing ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Import a statement</Text>}</Pressable>
+      {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
+    </Card>
+    {Object.keys(counts).length && accounts.length ? <Card>
+      <Text style={styles.cardTitle}>Clear an account's backlog</Text>
+      <Text style={styles.muted}>Remove every unreviewed row for one account instead of reviewing each one.</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, clearAccountId === account.id && styles.choiceActive]} onPress={() => setClearAccountId(clearAccountId === account.id ? "" : account.id)}>
+        <Text style={[styles.choiceText, clearAccountId === account.id && styles.choiceTextActive]}>{account.name}{counts[account.id] ? ` (${counts[account.id]})` : ""}</Text>
+      </Pressable>)}</ScrollView>
+      {clearAccountId ? <Pressable style={styles.secondarySmall} onPress={confirmClear}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Clear</Text></Pressable> : null}
+    </Card> : null}
+    <Text style={styles.cardTitle}>{reviews.length ? `${reviews.length} waiting for review` : "Nothing waiting for review"}</Text>
+    {reviews.slice(0, visibleCount).map((draft) => {
+      const account = accounts.find((item) => item.id === draft.accountId);
+      const id = draft.id || "";
+      const isTransfer = transferDraftId === id;
+      return <Card key={id}>
+        {pills(draft).length ? <View style={styles.choiceRow}>{pills(draft).map((pill) => <Text key={pill.label} style={[styles.badge, pill.tone === "warn" && { color: colors.gold }, pill.tone === "info" && { color: colors.blue }]}>{pill.label}</Text>)}</View> : null}
+        <TextInput key={`${id}-payee-${draft.payee}`} style={styles.input} defaultValue={draft.payee || ""} placeholder="Payee" onEndEditing={(event) => { const value = event.nativeEvent.text.trim(); if (value && value !== draft.payee) void apply(updateDraft(state, id, { payee: value })); }} />
+        <View style={styles.actionRow}>
+          <TextInput key={`${id}-date-${draft.date}`} style={[styles.input, { flex: 1 }]} defaultValue={draft.date || ""} placeholder="YYYY-MM-DD" onEndEditing={(event) => { const value = event.nativeEvent.text.trim(); if (value !== draft.date) { if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) Alert.alert("Invalid date", "Use the format YYYY-MM-DD."); else void apply(updateDraft(state, id, { date: value })); } }} />
+          <TextInput key={`${id}-amount-${draft.amount}-${draft.accountId}`} style={[styles.input, { flex: 1 }]} defaultValue={String(displayDraftAmount(Number(draft.amount), account))} keyboardType="numbers-and-punctuation" placeholder="Amount" onEndEditing={(event) => { const value = Number(event.nativeEvent.text.replace(/[,$]/g, "")); if (Number.isFinite(value) && value !== displayDraftAmount(Number(draft.amount), account)) void apply(updateDraft(state, id, { amount: storedDraftAmount(value, account) })); }} />
+        </View>
+        <Text style={styles.rowDetail}>{account && account.type !== "credit_card" ? "Amount as on your bank statement (deposit +, expense -)" : "Amount (purchase +, refund/payment -)"}</Text>
+        <Text style={styles.label}>Category</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          <Pressable style={[styles.choice, !draft.lineId && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { lineId: "" }))}><Text style={[styles.choiceText, !draft.lineId && styles.choiceTextActive]}>Unassigned</Text></Pressable>
+          {lines.map((line) => <Pressable key={line.id} style={[styles.choice, draft.lineId === line.id && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { lineId: line.id }))}><Text style={[styles.choiceText, draft.lineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}
+        </ScrollView>
+        <View style={styles.actionRow}>
+          {!draft.lineId && lines.length ? <Pressable style={styles.secondarySmall} disabled={aiBusyId === id} onPress={() => void suggestLine(id, draft.payee || "")}>{aiBusyId === id ? <ActivityIndicator size="small" color={colors.green} /> : <Text style={styles.secondaryButtonText}>✨ Suggest category</Text>}</Pressable> : null}
+          {draft.lineId ? <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, transactionCategorizationRules: setCategorizationRule(state.transactionCategorizationRules, draft.payee || "", draft.categorizationRuleLineId === draft.lineId ? "" : draft.lineId) })}><Text style={styles.secondaryButtonText}>{draft.categorizationRuleLineId === draft.lineId ? "🔒 Always this category - remove" : "🔒 Always categorize this payee this way"}</Text></Pressable> : null}
+        </View>
+        {accounts.length ? <>
+          <Text style={styles.label}>Account</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+            <Pressable style={[styles.choice, !draft.accountId && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { accountId: "" }))}><Text style={[styles.choiceText, !draft.accountId && styles.choiceTextActive]}>Not linked</Text></Pressable>
+            {accounts.map((item) => <Pressable key={item.id} style={[styles.choice, draft.accountId === item.id && styles.choiceActive]} onPress={() => void apply(updateDraft(state, id, { accountId: item.id }))}><Text style={[styles.choiceText, draft.accountId === item.id && styles.choiceTextActive]}>{item.name}{item.closedAt ? " (closed)" : ""}</Text></Pressable>)}
+          </ScrollView>
+          {!draft.accountId ? <Pressable style={styles.secondarySmall} disabled={aiBusyId === id} onPress={() => void suggestAccount(id, draft.payee || "")}><Text style={styles.secondaryButtonText}>✨ Suggest account</Text></Pressable> : null}
+        </> : null}
+        {isTransfer ? <View style={styles.planTaskBlock}>
+          <Text style={styles.label}>{Number(draft.amount) > 0 ? "Money went to" : "Money came from"}</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.filter((item) => item.id !== draft.accountId).map((item) => <Pressable key={item.id} style={[styles.choice, transferAccountId === item.id && styles.choiceActive]} onPress={() => setTransferAccountId(item.id)}><Text style={[styles.choiceText, transferAccountId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</ScrollView>
+          <View style={styles.actionRow}>
+            <Pressable style={styles.primaryButton} onPress={() => void confirmTransfer(draft)}><Text style={styles.primaryButtonText}>Move to Transfers</Text></Pressable>
+            <Pressable style={styles.secondarySmall} onPress={() => setTransferDraftId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+          </View>
+        </View> : null}
+        <View style={styles.actionRow}>
+          <Pressable style={styles.primaryButton} onPress={() => void apply(acceptDraft(state, id))}><Text style={styles.primaryButtonText}>✓ Accept</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => openTransfer(draft)}><Text style={styles.secondaryButtonText}>⇄ Transfer</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => void onSave(dismissDraft(state, id))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Dismiss</Text></Pressable>
+        </View>
+      </Card>;
+    })}
+    {reviews.length > visibleCount ? <Pressable style={styles.secondarySmall} onPress={() => setVisibleCount((count) => count + 25)}><Text style={styles.secondaryButtonText}>Show more ({reviews.length - visibleCount} left)</Text></Pressable> : null}
+  </Page>;
+}
+
 function SubScreenHeader({ title, onBack, eyebrow = "MONEY" }: { title: string; onBack: () => void; eyebrow?: string }) {
   return <View style={styles.subScreenHeader}>
     <Pressable style={styles.subScreenBack} onPress={onBack}><Ionicons name="arrow-back" size={22} color={colors.text} /></Pressable>
@@ -2756,10 +2934,10 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void }) {
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }

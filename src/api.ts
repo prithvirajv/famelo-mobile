@@ -1,3 +1,4 @@
+import type { ParsedBankRow } from "./bankStreamLogic";
 import type { ReminderPhotoDraft, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://familyloop.net").replace(/\/$/, "");
@@ -67,6 +68,10 @@ export const api = {
   reminderFromImage: (imageBase64: string, mimeType: string) => request<ReminderPhotoDraft>("/api/calendar/reminder-from-image", {
     method: "POST", body: JSON.stringify({ imageBase64, mimeType })
   }),
+  parseBankStatementPdf: (fileBase64: string) => request<{ rows: ParsedBankRow[]; accountHint: string }>("/api/bank-statement/parse-pdf", { method: "POST", body: JSON.stringify({ fileBase64 }) }),
+  // AI fallbacks for a bank-stream row with no history match; each returns null when nothing is a confident match.
+  suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines }) }),
+  suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts }) }),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };
