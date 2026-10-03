@@ -216,3 +216,17 @@ test("Notes can attach photos via the Documents pipeline (linked by noteId) and 
   assert.doesNotMatch(body, /openDocument/);
   assertOnlyWholeStateSaves(body, "Notes");
 });
+
+test("Calendar can draft a reminder from a photo via the server's vision endpoint, reviewed before anything is added", () => {
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /\/api\/calendar\/reminder-from-image/);
+  assert.match(api, /imageBase64, mimeType/);
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Calendar");
+  assert.match(body, /api\.reminderFromImage\(asset\.base64/);
+  assert.match(body, /normalizeReminderPhotoDraft\(/);
+  assert.match(body, /buildPhotoReminderEvent\(photoDraft/);
+  // AI output is only ever a draft: the event is added in submitPhotoDraft, never straight from the API response
+  assert.doesNotMatch(body.slice(body.indexOf("pickPhotoReminder"), body.indexOf("submitPhotoDraft")), /calendar\.events\.push/);
+  assert.match(app, /<Calendar state=\{state\} access=\{access\} user=\{user\}/);
+});

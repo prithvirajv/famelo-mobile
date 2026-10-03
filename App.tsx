@@ -27,8 +27,8 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
-import { advanceChoreDate, advanceReminderDate, choreCadenceLabels, isReminderComplete } from "./src/calendarLogic";
+import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import { advanceChoreDate, advanceReminderDate, buildPhotoReminderEvent, choreCadenceLabels, isReminderComplete, normalizeReminderPhotoDraft } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
@@ -160,7 +160,7 @@ function AppContent() {
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
-    : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
+    : tab === "calendar" ? <Calendar state={state} access={access} user={user} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} sinkingFundNames={(state.goals?.sinkingFunds || []).map((fund) => fund.name)} />
@@ -428,7 +428,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
 
 const reminderRecurrenceLabels: Record<ReminderRecurrence, string> = { once: "Once", weekly: "Weekly", monthly: "Monthly", yearly: "Yearly" };
 
-function Calendar({ state, access, onSave }: { state: HouseholdState; access: HouseholdAccess | null; onSave: (next: HouseholdState) => Promise<void> }) {
+function Calendar({ state, access, user, onSave }: { state: HouseholdState; access: HouseholdAccess | null; user: User; onSave: (next: HouseholdState) => Promise<void> }) {
   const members = access?.members.filter((member) => member.status === "active") || [];
   const [editing, setEditing] = useState<{ kind: "event" | "chore"; index: number } | null>(null);
   const [addKind, setAddKind] = useState<"event" | "chore">("event");
@@ -442,6 +442,35 @@ function Calendar({ state, access, onSave }: { state: HouseholdState; access: Ho
     setEditing({ kind: targetKind, index }); setTitle(item.title); setDate(targetKind === "event" ? (item as typeof state.calendar.events[number]).date : (item as typeof state.calendar.chores[number]).startDate || (item as typeof state.calendar.chores[number]).nextDue); setOwner(targetKind === "event" ? (item as typeof state.calendar.events[number]).owner || members[0]?.email || "" : (item as typeof state.calendar.chores[number]).assignee || members[0]?.email || "");
     setRecurrence(targetKind === "event" ? (item as typeof state.calendar.events[number]).recurrence || "once" : "once");
     setChoreRecurrence(targetKind === "chore" ? (item as typeof state.calendar.chores[number]).recurrence || "once" : "once");
+  };
+  // "From photo": the picture is sent inline to the server's vision model (never stored) and comes back
+  // as a DRAFT the user reviews and edits before anything is added - same as web's dialog.
+  const [photoDraft, setPhotoDraft] = useState<(ReminderPhotoDraft & { previewUri: string }) | null>(null);
+  const [readingPhoto, setReadingPhoto] = useState(false);
+  const pickPhotoReminder = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to read a reminder from a photo.");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], base64: true, quality: 0.6 });
+    const asset = result.canceled ? null : result.assets?.[0];
+    if (!asset?.base64) return;
+    setReadingPhoto(true);
+    try {
+      const draft = normalizeReminderPhotoDraft(await api.reminderFromImage(asset.base64, imageContentType(asset.mimeType)));
+      setPhotoDraft({ ...draft, time: draft.time || "09:00", previewUri: asset.uri });
+    } catch (cause) {
+      Alert.alert("Couldn't read that photo", cause instanceof Error ? cause.message : "Unknown error");
+    } finally {
+      setReadingPhoto(false);
+    }
+  };
+  const submitPhotoDraft = async () => {
+    if (!photoDraft) return;
+    const event = buildPhotoReminderEvent(photoDraft, { email: user.email, name: user.name }, () => `event-${Date.now()}`);
+    if (!event) return Alert.alert("Missing info", "Enter a title and a date (YYYY-MM-DD).");
+    const next = structuredClone(state);
+    next.calendar.events.push(event);
+    await onSave(next);
+    setPhotoDraft(null);
   };
   const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setChoreRecurrence("once"); };
   const saveItem = async () => {
@@ -505,7 +534,25 @@ function Calendar({ state, access, onSave }: { state: HouseholdState; access: Ho
     }
     await onSave(next);
   };
-  return <Page><Title eyebrow="CALENDAR">Shared schedule</Title><Card><Text style={styles.cardTitle}>{editing ? "Edit calendar item" : "Add to calendar"}</Text>
+  return <Page><Title eyebrow="CALENDAR">Shared schedule</Title>
+    {photoDraft ? <Card>
+      <Text style={styles.cardTitle}>Reminder from photo</Text>
+      <Image source={{ uri: photoDraft.previewUri }} style={styles.reminderPhotoPreview} resizeMode="contain" />
+      <Text style={styles.muted}>Review what was read from the photo, then add it as a reminder.</Text>
+      {photoDraft.title || photoDraft.date ? null : <Text style={styles.formError}>Couldn't read a title or date from this photo - fill them in below.</Text>}
+      <TextInput style={styles.input} value={photoDraft.title} onChangeText={(value) => setPhotoDraft((prev) => prev ? { ...prev, title: value } : prev)} placeholder="Title" />
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={photoDraft.date} onChangeText={(value) => setPhotoDraft((prev) => prev ? { ...prev, date: value } : prev)} placeholder="YYYY-MM-DD" />
+        <TextInput style={[styles.input, { flex: 1 }]} value={photoDraft.time} onChangeText={(value) => setPhotoDraft((prev) => prev ? { ...prev, time: value } : prev)} placeholder="HH:MM" keyboardType="numbers-and-punctuation" maxLength={5} />
+      </View>
+      <TextInput style={styles.input} value={photoDraft.location} onChangeText={(value) => setPhotoDraft((prev) => prev ? { ...prev, location: value } : prev)} placeholder="Location (optional)" />
+      <View style={styles.actionRow}>
+        <Pressable style={styles.primaryButton} onPress={() => void submitPhotoDraft()}><Text style={styles.primaryButtonText}>Add reminder</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => setPhotoDraft(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+      </View>
+    </Card> : null}
+    <Card><Text style={styles.cardTitle}>{editing ? "Edit calendar item" : "Add to calendar"}</Text>
+    {!editing && !photoDraft ? <Pressable style={styles.secondarySmall} disabled={readingPhoto} onPress={() => void pickPhotoReminder()}>{readingPhoto ? <ActivityIndicator size="small" color={colors.green} /> : <Text style={styles.secondaryButtonText}>📷 Add reminder from a photo</Text>}</Pressable> : null}
     {!editing && <View style={styles.choiceRow}>
       <Pressable style={[styles.choice, addKind === "event" && styles.choiceActive]} onPress={() => setAddKind("event")}><Text style={[styles.choiceText, addKind === "event" && styles.choiceTextActive]}>Reminder</Text></Pressable>
       <Pressable style={[styles.choice, addKind === "chore" && styles.choiceActive]} onPress={() => setAddKind("chore")}><Text style={[styles.choiceText, addKind === "chore" && styles.choiceTextActive]}>Chore</Text></Pressable>
@@ -2386,6 +2433,7 @@ const styles = StyleSheet.create({
   categoryHeader: { flexDirection: "row", gap: 8, alignItems: "center", marginBottom: 4 }, dot: { height: 20, width: 5, borderRadius: 3 },
   note: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 16 }, noteHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 }, noteTitle: { color: colors.text, fontWeight: "800", fontSize: 20 }, noteBody: { color: colors.text, marginVertical: 10, lineHeight: 21 }, checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8 }, checkRowChild: { marginLeft: 24 }, checkText: { flex: 1, color: colors.text, fontSize: 15 }, done: { textDecorationLine: "line-through", color: colors.muted },
   colorSwatch: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: colors.border }, colorSwatchActive: { borderWidth: 3, borderColor: colors.green },
+  reminderPhotoPreview: { width: "100%", height: 180, borderRadius: 8, marginVertical: 8, backgroundColor: colors.panel },
   journalPhotoRow: { marginTop: 10 }, journalPhoto: { width: 72, height: 72, borderRadius: 8, marginRight: 8 },
   multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },

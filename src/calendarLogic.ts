@@ -1,4 +1,4 @@
-import type { ChoreRecurrence, ReminderRecurrence } from "./types";
+import type { CalendarEvent, ChoreRecurrence, ReminderPhotoDraft, ReminderRecurrence } from "./types";
 
 function parseDateKey(value: string): Date {
   const [year, month, day] = value.split("-").map(Number);
@@ -59,4 +59,39 @@ export function advanceChoreDate(value: string, recurrence?: ChoreRecurrence): s
   const months = recurrence ? CHORE_MONTH_STEP_BY_RECURRENCE[recurrence] : undefined;
   if (months) return addMonthsToDateKey(value, months) || value;
   return value;
+}
+
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// The server already validates what the vision model returns, but this is the boundary between the
+// network and an editable form, so it re-checks every field and never throws: anything missing or
+// malformed becomes a blank the user fills in (the AI output is only ever a draft).
+export function normalizeReminderPhotoDraft(raw: unknown): ReminderPhotoDraft {
+  const source = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const text = (value: unknown, max: number) => String(value ?? "").trim().slice(0, max);
+  const date = text(source.date, 10);
+  const time = text(source.time, 5);
+  return { title: text(source.title, 200), date: DATE_PATTERN.test(date) ? date : "", time: TIME_PATTERN.test(time) ? time : "", location: text(source.location, 300) };
+}
+
+export type PhotoReminderInput = { title: string; date: string; time: string; location: string };
+
+// Builds the reminder web's "Reminder from photo" dialog adds (same fields, same 09:00 default when no
+// time was read). Returns null until there is both a title and a valid date - exactly web's submit
+// guard. notifyAt is what makes the server actually send a notification for it, so it is always set.
+// owner/ownerName are mobile's own single-assignee display fields; assignees is web's richer form.
+export function buildPhotoReminderEvent(input: PhotoReminderInput, user: { email: string; name: string }, createId: () => string): CalendarEvent | null {
+  const title = input.title.trim();
+  const date = input.date.trim();
+  if (!title || !DATE_PATTERN.test(date)) return null;
+  const time = TIME_PATTERN.test(input.time.trim()) ? input.time.trim() : "09:00";
+  const dateTime = `${date}T${time}`;
+  const notifyAt = new Date(dateTime);
+  if (Number.isNaN(notifyAt.getTime())) return null;
+  return {
+    id: createId(), title, date, dateTime, notifyAt: notifyAt.toISOString(), reminderAt: dateTime, type: "reminder", annual: false,
+    location: input.location.trim(), recurrence: "once", completedBy: [],
+    owner: user.email, ownerName: user.name, assignees: [{ key: user.email, name: user.name, email: user.email }]
+  };
 }

@@ -1,4 +1,4 @@
-import type { Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
+import type { ReminderPhotoDraft, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://familyloop.net").replace(/\/$/, "");
 
@@ -64,5 +64,8 @@ export const api = {
   updateDocument: (documentId: string, patch: { name?: string; description?: string; folderId?: string | null; noteId?: string | null; wealthItemType?: WealthItemType | null; wealthItemId?: string | null; expiryDate?: string | null }) =>
     request<Document>(`/api/documents/${documentId}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteDocument: (documentId: string) => request<{ ok: boolean }>(`/api/documents/${documentId}`, { method: "DELETE" }),
+  reminderFromImage: (imageBase64: string, mimeType: string) => request<ReminderPhotoDraft>("/api/calendar/reminder-from-image", {
+    method: "POST", body: JSON.stringify({ imageBase64, mimeType })
+  }),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

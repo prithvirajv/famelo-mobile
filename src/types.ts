@@ -16,10 +16,17 @@ export type ReminderRecurrence = "once" | "weekly" | "monthly" | "yearly";
 // recurrence/completedBy only apply to type: "reminder" events (matches web's app.js) - a
 // completed recurring reminder self-advances to its next due date and clears completedBy
 // (see advanceReminderDate in calendarLogic.ts), rather than tracking per-occurrence history.
+export type EventAssignee = { key: string; name: string; email: string };
+// dateTime/notifyAt/reminderAt/location/assignees are what web writes on a reminder; the server only
+// sends a push/email for an event that has notifyAt, and web upgrades owner-only events (the shape
+// mobile's own add form still writes) to assignees lazily. Mobile preserves them untouched on edit.
 export type CalendarEvent = {
   id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string;
   recurrence?: ReminderRecurrence; completedBy?: string[];
+  dateTime?: string; notifyAt?: string; reminderAt?: string; location?: string; annual?: boolean; assignees?: EventAssignee[];
 };
+// What POST /api/calendar/reminder-from-image extracts from a photo; every field may be blank.
+export type ReminderPhotoDraft = { title: string; date: string; time: string; location: string };
 export type ChoreRecurrence = "once" | "weekly" | "biweekly" | "triweekly" | "monthly" | "every3months" | "every4months" | "every6months" | "yearly";
 export type Chore = {
   id?: string; title: string; assignee: string; assigneeName?: string; cadence: string; nextDue: string; startDate?: string;
