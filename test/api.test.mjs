@@ -154,3 +154,18 @@ test("Plan tasks can link to a savings goal, matching web's legacy weekly/monthl
   assert.match(body, /changeTaskGoal/);
   assert.match(body, /task\.goalName/);
 });
+
+test("Budget is editable: lines/categories/transactions save through whole-state onSave, and income is derived from paychecks", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Budget");
+  assert.match(body, /onSave\(updateLine\(/);
+  assert.match(body, /deleteBudgetLines\(/);
+  assert.match(body, /addCategory\(/);
+  assert.match(body, /makeTransaction\(/);
+  assert.match(body, /accountAllowsDate/, "closed accounts must block new transactions dated after closedAt, same as web");
+  assert.match(body, /spentByLineInMonth/, "spent must be month-scoped and split-aware, not a raw sum of every transaction");
+  assert.match(body, /onOpenPaychecks/);
+  assert.doesNotMatch(body, /budget: \{ \.\.\.state\.budget, income/, "income is derived from paychecks (web overwrites it on every render) - never edit it directly");
+  assert.match(app, /budgetIncomeFromPaychecks\(nextState\)/, "the shared save keeps budget.income in sync with paychecks, like web's per-render recompute");
+  assert.match(app, /tab === "budget" \? <Budget state=\{state\} onSave=\{save\}/);
+});

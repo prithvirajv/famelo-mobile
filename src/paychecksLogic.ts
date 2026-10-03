@@ -138,3 +138,25 @@ export function ensurePaycheckOccurrencesGenerated(paychecks: Paycheck[], existi
 
   return { paychecks: nextPaychecks, paycheckOccurrences: occurrences };
 }
+
+function monthEndDateKey(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  const lastDay = new Date(year ?? 1970, month ?? 1, 0).getDate();
+  return `${monthKey}-${String(lastDay).padStart(2, "0")}`;
+}
+
+// Mirrors web's budgetIncomeFromPaychecks (app.js): a month's budget income is always derived from
+// the household's paychecks (one-time income by occurrence count, recurring income from materialized
+// occurrences) - web recomputes it on every render, so the stored state.budget.income is never
+// something a client should edit directly; a stale value just gets overwritten there.
+export function budgetIncomeFromPaychecks(state: { budget: { month: string }; paychecks: Paycheck[]; paycheckOccurrences?: PaycheckOccurrence[] }): number {
+  const monthStart = `${state.budget.month}-01`;
+  const monthEnd = monthEndDateKey(state.budget.month);
+  const oneTimeIncome = state.paychecks
+    .filter((paycheck) => ["once", "bonus"].includes(paycheck.recurrence || "once"))
+    .reduce((sum, paycheck) => sum + Number(paycheck.amount || 0) * paycheckOccurrencesInRange(paycheck, monthStart, monthEnd), 0);
+  const recurringIncome = (state.paycheckOccurrences || [])
+    .filter((occurrence) => occurrence.date >= monthStart && occurrence.date <= monthEnd)
+    .reduce((sum, occurrence) => sum + Number(occurrence.amount || 0), 0);
+  return oneTimeIncome + recurringIncome;
+}

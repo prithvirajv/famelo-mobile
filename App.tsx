@@ -27,13 +27,14 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, ChoreRecurrence, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import { advanceChoreDate, advanceReminderDate, choreCadenceLabels, isReminderComplete } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
-import { ensurePaycheckOccurrencesGenerated } from "./src/paychecksLogic";
+import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks } from "./src/paychecksLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -109,7 +110,9 @@ function AppContent() {
     return () => subscription.remove();
   }, [user?.id]);
 
-  const save = useCallback(async (next: HouseholdState) => {
+  const save = useCallback(async (nextState: HouseholdState) => {
+    // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
+    const next = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
@@ -144,7 +147,7 @@ function AppContent() {
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
-    : tab === "budget" ? <Budget state={state} />
+    : tab === "budget" ? <Budget state={state} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
@@ -220,17 +223,194 @@ function Home({ state }: { state: HouseholdState }) {
   <Card><Text style={styles.cardTitle}>Recent transactions</Text>{state.transactions.slice(-4).reverse().map((item, index) => <Row key={`${item.date}-${item.payee}-${index}`} title={item.payee} detail={item.date} value={money(item.amount, state.household.currency)} />)}</Card></Page>;
 }
 
-function Budget({ state }: { state: HouseholdState }) {
-  const spentByLine = useMemo(() => Object.fromEntries(state.transactions.reduce((map, item) => map.set(item.lineId, (map.get(item.lineId) || 0) + Number(item.amount)), new Map<string, number>())), [state.transactions]);
-  return <Page><Title eyebrow="BUDGET">{state.budget.month}</Title><Card><Text style={styles.cardTitle}>Monthly income</Text><Text style={styles.heroValue}>{money(state.budget.income, state.household.currency)}</Text></Card>
-    {state.budget.categories.map((category) => <Card key={category.name}><View style={styles.categoryHeader}><View style={[styles.dot, { backgroundColor: category.color }]} /><Text style={styles.cardTitle}>{category.name}</Text></View>
+function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onOpenPaychecks: () => void }) {
+  const currency = state.household.currency;
+  const todayKey = () => { const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; };
+  const allLines = allBudgetLines(state);
+  const accounts = (state.accounts || []).filter((account) => !account.closedAt);
+
+  const [editingLineId, setEditingLineId] = useState<string | null>(null);
+  const [lineName, setLineName] = useState(""); const [linePlanned, setLinePlanned] = useState(""); const [lineDueDay, setLineDueDay] = useState("");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<{ title: string; lineIds: string[]; categoryIndex?: number } | null>(null);
+
+  const [editingTxIndex, setEditingTxIndex] = useState<number | null>(null);
+  const [txPayee, setTxPayee] = useState(""); const [txAmount, setTxAmount] = useState(""); const [txDate, setTxDate] = useState(todayKey());
+  const [txLineId, setTxLineId] = useState(allLines[0]?.id || ""); const [txAccountId, setTxAccountId] = useState(""); const [txTags, setTxTags] = useState("");
+  const [showAllTx, setShowAllTx] = useState(false);
+
+  // The picked category can disappear (deleted line) - fall back to the first remaining one.
+  useEffect(() => { if (!allLines.some((line) => line.id === txLineId)) setTxLineId(allLines[0]?.id || ""); }, [allLines.map((line) => line.id).join("|")]);
+
+  const beginLineEdit = (line: BudgetLine) => { setEditingLineId(line.id); setLineName(line.name); setLinePlanned(String(line.planned ?? 0)); setLineDueDay(line.dueDay ? String(line.dueDay) : ""); };
+  const saveLineEdit = async () => {
+    if (!editingLineId) return;
+    if (!lineName.trim()) return Alert.alert("Missing info", "Enter a name.");
+    const dueDay = lineDueDay.trim() ? Math.round(Number(lineDueDay)) : null;
+    if (dueDay !== null && !(dueDay >= 1 && dueDay <= 31)) return Alert.alert("Invalid due day", "Enter a day of the month from 1 to 31, or leave it blank.");
+    await onSave(updateLine(state, editingLineId, { name: lineName.trim(), planned: Math.max(0, Number(linePlanned) || 0), dueDay }));
+    setEditingLineId(null);
+  };
+
+  const submitAddCategory = async () => {
+    const next = addCategory(state, newCategoryName);
+    if (!next) return Alert.alert("Can't add category", "Enter a name that isn't already used by another category.");
+    await onSave(next);
+    setNewCategoryName("");
+  };
+
+  const requestDelete = (title: string, lineIds: string[], categoryIndex?: number) => {
+    const impact = budgetDeletionImpact(state, lineIds);
+    if (impact.total === 0) {
+      Alert.alert(title, "This cannot be undone.", [{ text: "Cancel" }, { text: "Remove", style: "destructive", onPress: () => void onSave(deleteBudgetLines(state, lineIds, "", categoryIndex)) }]);
+      return;
+    }
+    setPendingDelete({ title, lineIds, categoryIndex });
+  };
+  const confirmPendingDelete = async (targetLineId: string) => {
+    if (!pendingDelete) return;
+    await onSave(deleteBudgetLines(state, pendingDelete.lineIds, targetLineId, pendingDelete.categoryIndex));
+    setPendingDelete(null); setEditingLineId(null);
+  };
+  const pendingImpact = pendingDelete ? budgetDeletionImpact(state, pendingDelete.lineIds) : null;
+
+  const resetTxForm = () => { setEditingTxIndex(null); setTxPayee(""); setTxAmount(""); setTxDate(todayKey()); setTxAccountId(""); setTxTags(""); };
+  const beginTxEdit = (index: number) => {
+    const item = state.transactions[index];
+    if (!item) return;
+    if (item.splits?.length) return Alert.alert("Split transaction", "This transaction is split across categories — edit the split on the web app. You can still delete it here.");
+    setEditingTxIndex(index); setTxPayee(item.payee); setTxAmount(String(item.amount)); setTxDate(item.date); setTxLineId(item.lineId || allLines[0]?.id || ""); setTxAccountId(item.accountId || ""); setTxTags((item.tags || []).join(", "));
+  };
+  const submitTransaction = async () => {
+    const amount = Number(txAmount);
+    if (!txPayee.trim() || !txAmount.trim() || !Number.isFinite(amount)) return Alert.alert("Missing info", "Enter a payee and an amount.");
+    if (!txLineId) return Alert.alert("Missing info", "Add a budget subcategory first, then pick one.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(txDate)) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+    const account = (state.accounts || []).find((item) => item.id === txAccountId);
+    if (!accountAllowsDate(account, txDate)) return Alert.alert("Account is closed", `${account?.name || "That account"} is closed — pick a date on or before its close date, or choose a different account.`);
+    const input = { date: txDate, payee: txPayee.trim(), amount, lineId: txLineId, accountId: txAccountId, tags: parseTagsInput(txTags) };
+    if (editingTxIndex !== null) {
+      const existing = state.transactions[editingTxIndex];
+      if (!existing) return;
+      const updated = { ...existing, ...input, ...lineSnapshot(state, txLineId) };
+      await onSave({ ...state, transactions: state.transactions.map((item, index) => index === editingTxIndex ? updated : item) });
+    } else {
+      await onSave({ ...state, transactions: [makeTransaction(state, input), ...state.transactions] });
+    }
+    resetTxForm();
+  };
+  const deleteTransaction = (index: number) => {
+    const item = state.transactions[index];
+    if (!item) return;
+    Alert.alert("Delete transaction?", `${item.payee} · ${money(Number(item.amount), currency)}`, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => {
+      void onSave({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) });
+      if (editingTxIndex === index) resetTxForm();
+    } }]);
+  };
+
+  const orderedTransactions = state.transactions.map((item, index) => ({ item, index })).sort((a, b) => b.item.date.localeCompare(a.item.date));
+  const visibleTransactions = showAllTx ? orderedTransactions : orderedTransactions.slice(0, 15);
+  const accountName = (id?: string) => (state.accounts || []).find((account) => account.id === id)?.name;
+
+  return <Page><Title eyebrow="BUDGET">{state.budget.month}</Title>
+    <Card>
+      <Text style={styles.cardTitle}>Monthly income</Text>
+      <Text style={styles.heroValue}>{money(state.budget.income, currency)}</Text>
+      <Text style={styles.muted}>Calculated from your paychecks for this month.</Text>
+      <Pressable style={styles.secondarySmall} onPress={onOpenPaychecks}><Text style={styles.secondaryButtonText}>Manage in Paychecks</Text></Pressable>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>{editingTxIndex !== null ? "Edit transaction" : "Add transaction"}</Text>
+      <TextInput style={styles.input} value={txPayee} onChangeText={setTxPayee} placeholder="Payee" />
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={txAmount} onChangeText={setTxAmount} placeholder="Amount (negative = refund/income)" keyboardType="numbers-and-punctuation" />
+        <TextInput style={[styles.input, { flex: 1 }]} value={txDate} onChangeText={setTxDate} placeholder="YYYY-MM-DD" />
+      </View>
+      <Text style={styles.label}>Category</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, txLineId === line.id && styles.choiceActive]} onPress={() => setTxLineId(line.id)}><Text style={[styles.choiceText, txLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+      {accounts.length ? <>
+        <Text style={styles.label}>Account (optional)</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          <Pressable style={[styles.choice, !txAccountId && styles.choiceActive]} onPress={() => setTxAccountId("")}><Text style={[styles.choiceText, !txAccountId && styles.choiceTextActive]}>None</Text></Pressable>
+          {accounts.map((account) => <Pressable key={account.id} style={[styles.choice, txAccountId === account.id && styles.choiceActive]} onPress={() => setTxAccountId(account.id)}><Text style={[styles.choiceText, txAccountId === account.id && styles.choiceTextActive]}>{account.name}</Text></Pressable>)}
+        </ScrollView>
+      </> : null}
+      <TextInput style={styles.input} value={txTags} onChangeText={setTxTags} placeholder="Tags (comma separated, optional)" />
+      <View style={styles.actionRow}>
+        <Pressable style={styles.primaryButton} onPress={() => void submitTransaction()}><Text style={styles.primaryButtonText}>{editingTxIndex !== null ? "Save changes" : "Add transaction"}</Text></Pressable>
+        {editingTxIndex !== null ? <Pressable style={styles.secondarySmall} onPress={resetTxForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable> : null}
+      </View>
+    </Card>
+
+    {pendingDelete && pendingImpact ? <Card>
+      <Text style={styles.cardTitle}>{pendingDelete.title}</Text>
+      <Text style={styles.muted}>{[
+        pendingImpact.plannedAmount > 0 ? `${money(pendingImpact.plannedAmount, currency)} planned` : null,
+        pendingImpact.transactionCount ? `${pendingImpact.transactionCount} transaction${pendingImpact.transactionCount === 1 ? "" : "s"}` : null,
+        pendingImpact.draftCount ? `${pendingImpact.draftCount} Bank Stream draft${pendingImpact.draftCount === 1 ? "" : "s"}` : null,
+        pendingImpact.recurringExpenseCount ? `${pendingImpact.recurringExpenseCount} recurring bill${pendingImpact.recurringExpenseCount === 1 ? "" : "s"}` : null,
+        pendingImpact.debtCount ? `${pendingImpact.debtCount} Wealth item${pendingImpact.debtCount === 1 ? "" : "s"}` : null,
+        pendingImpact.paycheckCount ? `${pendingImpact.paycheckCount} paycheck${pendingImpact.paycheckCount === 1 ? "" : "s"}` : null
+      ].filter(Boolean).join(", ")} still linked. Pick where to move them, or leave them unassigned.</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        <Pressable style={styles.choice} onPress={() => void confirmPendingDelete("")}><Text style={styles.choiceText}>Leave unassigned</Text></Pressable>
+        {allLines.filter((line) => !pendingDelete.lineIds.includes(line.id)).map((line) => <Pressable key={line.id} style={styles.choice} onPress={() => void confirmPendingDelete(line.id)}><Text style={styles.choiceText}>{line.category} · {line.name}</Text></Pressable>)}
+      </ScrollView>
+      <Pressable style={styles.secondarySmall} onPress={() => setPendingDelete(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+    </Card> : null}
+
+    {state.budget.categories.map((category, categoryIndex) => <Card key={category.name}>
+      <View style={styles.categoryHeader}>
+        <View style={[styles.dot, { backgroundColor: category.color }]} /><Text style={[styles.cardTitle, { flex: 1 }]}>{category.name}</Text>
+        <Pressable onPress={() => requestDelete(`Remove ${category.name}?`, category.lines.map((line) => line.id), categoryIndex)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>
       {category.lines.map((line) => {
+        const spent = spentByLineInMonth(state.transactions, line.id, state.budget.month);
         const recurring = line.recurringBill?.enabled ? recurringBudgetSetAside(line.recurringBill, state.budget.month) : null;
         const detail = recurring
-          ? `${recurring.frequency} · due ${recurring.nextDueDate} · set aside ${money(recurring.monthlyAmount, state.household.currency)}/mo`
+          ? `${recurring.frequency} · due ${recurring.nextDueDate} · set aside ${money(recurring.monthlyAmount, currency)}/mo`
           : line.dueDay ? `Due day ${line.dueDay}` : "No due date";
-        return <Row key={line.id} title={line.name} detail={detail} value={`${money(spentByLine[line.id] || 0, state.household.currency)} / ${money(recurring?.monthlyAmount ?? line.planned, state.household.currency)}`} />;
-      })}</Card>)}
+        if (editingLineId === line.id) {
+          return <View key={line.id} style={styles.planTaskBlock}>
+            <TextInput style={styles.input} value={lineName} onChangeText={setLineName} placeholder="Subcategory name" />
+            <View style={styles.actionRow}>
+              <TextInput style={[styles.input, { flex: 1 }]} value={linePlanned} onChangeText={setLinePlanned} placeholder="Planned amount" keyboardType="decimal-pad" editable={!recurring} />
+              <TextInput style={[styles.input, { flex: 1 }]} value={lineDueDay} onChangeText={setLineDueDay} placeholder="Due day (1-31)" keyboardType="number-pad" editable={!recurring} />
+            </View>
+            {recurring ? <Text style={styles.muted}>Recurring bill — the amount and due date are managed on the web app.</Text> : null}
+            <View style={styles.actionRow}>
+              <Pressable style={styles.primaryButton} onPress={() => void saveLineEdit()}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
+              <Pressable style={styles.secondarySmall} onPress={() => setEditingLineId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+              <Pressable style={styles.planStepperButton} onPress={() => requestDelete(`Remove ${line.name}?`, [line.id])}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+            </View>
+          </View>;
+        }
+        return <Pressable key={line.id} onPress={() => beginLineEdit(line)}><Row title={line.name} detail={detail} value={`${money(spent, currency)} / ${money(recurring?.monthlyAmount ?? line.planned, currency)}`} /></Pressable>;
+      })}
+      <Pressable style={styles.secondarySmall} onPress={() => void onSave(addLine(state, categoryIndex))}><Text style={styles.secondaryButtonText}>+ Add subcategory</Text></Pressable>
+    </Card>)}
+
+    <Card>
+      <Text style={styles.cardTitle}>Add category</Text>
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={newCategoryName} onChangeText={setNewCategoryName} placeholder="Category name" />
+        <Pressable style={styles.secondarySmall} onPress={() => void submitAddCategory()}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+      </View>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Transactions</Text>
+      {orderedTransactions.length ? visibleTransactions.map(({ item, index }) => <View key={`${index}-${item.date}-${item.payee}`} style={styles.row}>
+        <Pressable style={styles.rowCopy} onPress={() => beginTxEdit(index)}>
+          <Text style={styles.rowTitle}>{item.payee}</Text>
+          <Text style={styles.rowDetail}>{[item.date, transactionAssignmentLabel(state, item), accountName(item.accountId)].filter(Boolean).join(" · ")}</Text>
+        </Pressable>
+        <Text style={styles.rowValue}>{money(Number(item.amount), currency)}</Text>
+        <Pressable onPress={() => deleteTransaction(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>) : <Text style={styles.muted}>No transactions yet</Text>}
+      {orderedTransactions.length > 15 ? <Pressable style={styles.secondarySmall} onPress={() => setShowAllTx((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showAllTx ? "Show fewer" : `Show all (${orderedTransactions.length})`}</Text></Pressable> : null}
+    </Card>
   </Page>;
 }
 

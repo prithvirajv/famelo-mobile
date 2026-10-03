@@ -1,7 +1,11 @@
 export type User = { id: string; email: string; name: string; isAdmin: boolean };
 export type Household = { id: string; name: string; role: string; country: string; currency: string; selected: boolean };
 export type RecurringBudgetBill = { enabled: boolean; amount: number; frequency: "monthly" | "quarterly" | "yearly"; dueDate: string };
-export type BudgetLine = { id: string; name: string; planned: number; dueDay?: number; recurringBill?: RecurringBudgetBill };
+export type BudgetLine = {
+  id: string; name: string; planned: number; dueDay?: number | null; recurringBill?: RecurringBudgetBill;
+  // Not edited on mobile yet, but preserved untouched on every save (all edits spread the existing line).
+  ownerId?: string; rolloverEnabled?: boolean; rolloverAmount?: number;
+};
 export type BudgetCategory = { name: string; color: string; lines: BudgetLine[] };
 export type TransactionSplit = { lineId: string; amount: number };
 export type Transaction = {
@@ -88,6 +92,8 @@ export type Decision = {
   id: string; title: string; notes: string; status: "open" | "decided"; outcome: string; decidedAt: string;
   pros: DecisionComment[]; cons: DecisionComment[]; createdAt: string;
 };
+// Unreviewed Bank Stream rows (web-only for now) - typed minimally so deleting a budget line can reassign them.
+export type InboxDraft = { id?: string; lineId: string; payee?: string; amount?: number; date?: string; accountId?: string };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string };
   budget: { month: string; income: number; categories: BudgetCategory[]; taxonomyUnified?: boolean; dismissedReminders?: Record<string, string[]> };
@@ -108,6 +114,7 @@ export type HouseholdState = {
   friends?: Friend[];
   accounts: Account[];
   transfers: Transfer[];
+  transactionInboxDrafts?: InboxDraft[];
 };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
