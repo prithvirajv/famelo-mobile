@@ -166,3 +166,87 @@ export function paycheckIncomeForMonth(state: { paychecks: Paycheck[]; paycheckO
 export function budgetIncomeFromPaychecks(state: { budget: { month: string }; paychecks: Paycheck[]; paycheckOccurrences?: PaycheckOccurrence[] }): number {
   return paycheckIncomeForMonth(state, state.budget.month);
 }
+
+// ---- editing an existing paycheck, assigning bills to it, and per-month figures (mirrors web's Paycheck/Income plan cards) ----
+
+type PaycheckData = { paychecks: Paycheck[]; paycheckOccurrences: PaycheckOccurrence[] };
+
+export type PaycheckPatch = Partial<Pick<Paycheck, "name" | "amount" | "date" | "recurrence" | "endDate" | "depositAccountId">>;
+
+export function validatePaycheckPatch(patch: PaycheckPatch): string | null {
+  if (patch.name !== undefined && !patch.name.trim()) return "A paycheck needs a name.";
+  if (patch.amount !== undefined && !(Number.isFinite(patch.amount) && patch.amount >= 0)) return "Amount must be zero or more.";
+  for (const [label, value] of [["Date", patch.date], ["End date", patch.endDate]] as const) {
+    if (!value) continue;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    const real = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))) : null;
+    if (!match || !real || real.getUTCMonth() !== Number(match[2]) - 1 || real.getUTCDate() !== Number(match[3])) return `${label} must be a real date as YYYY-MM-DD.`;
+  }
+  if (patch.date === "") return "A paycheck needs a date.";
+  return null;
+}
+
+// Applies an edit like web's field handlers. Changing the date, repeat or end date needs no clean-up here: the screen's
+// ensurePaycheckOccurrencesGenerated pass notices the watermark mismatch and regenerates. A new amount reaches only pay dates still
+// at the old template amount (so a hand-edited bonus week is not overwritten); a new deposit account reaches every pay date.
+export function updatePaycheck(data: PaycheckData, paycheckId: string, patch: PaycheckPatch): PaycheckData {
+  const current = data.paychecks.find((item) => item.id === paycheckId);
+  if (!current) return data;
+  const next: Paycheck = {
+    ...current,
+    ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+    ...(patch.amount !== undefined ? { amount: patch.amount } : {}),
+    ...(patch.date ? { date: patch.date } : {}),
+    ...(patch.recurrence !== undefined ? { recurrence: patch.recurrence } : {}),
+    ...(patch.endDate !== undefined ? { endDate: patch.endDate || "" } : {}),
+    ...(patch.depositAccountId !== undefined ? { depositAccountId: patch.depositAccountId } : {})
+  };
+  const occurrences = data.paycheckOccurrences.map((occurrence) => {
+    if (occurrence.seriesId !== paycheckId) return occurrence;
+    let updated = occurrence;
+    if (patch.amount !== undefined && occurrence.amount === current.amount) updated = { ...updated, amount: patch.amount };
+    if (patch.depositAccountId !== undefined) updated = { ...updated, depositAccountId: patch.depositAccountId };
+    return updated;
+  });
+  return { paychecks: data.paychecks.map((item) => item.id === paycheckId ? next : item), paycheckOccurrences: occurrences };
+}
+
+export function setOccurrenceDate(occurrences: PaycheckOccurrence[], occurrenceId: string, date: string): PaycheckOccurrence[] {
+  return occurrences.map((occurrence) => occurrence.id === occurrenceId ? { ...occurrence, date } : occurrence);
+}
+
+// Assigns a budget line (bill) to a paycheck, optionally setting the line's planned amount, like web's "Assign bill".
+export function assignBillToPaycheck<T extends { paychecks: Paycheck[]; budget: { categories: Array<{ lines: Array<{ id: string; planned: number }> }> } }>(state: T, paycheckId: string, lineId: string, plannedAmount: number | null): T {
+  const paychecks = state.paychecks.map((paycheck) => paycheck.id === paycheckId && !paycheck.assignedLineIds.includes(lineId) ? { ...paycheck, assignedLineIds: [...paycheck.assignedLineIds, lineId] } : paycheck);
+  if (plannedAmount === null || !(plannedAmount >= 0)) return { ...state, paychecks };
+  const categories = state.budget.categories.map((category) => ({ ...category, lines: category.lines.map((line) => line.id === lineId ? { ...line, planned: plannedAmount } : line) }));
+  return { ...state, paychecks, budget: { ...state.budget, categories } };
+}
+
+export function removeAssignedLine(paychecks: Paycheck[], paycheckId: string, lineId: string): Paycheck[] {
+  return paychecks.map((paycheck) => paycheck.id === paycheckId ? { ...paycheck, assignedLineIds: paycheck.assignedLineIds.filter((id) => id !== lineId) } : paycheck);
+}
+
+export function paycheckAssignedAmount(paycheck: Paycheck, lines: Array<{ id: string; planned: number }>): number {
+  return paycheck.assignedLineIds.reduce((sum, id) => sum + Number(lines.find((line) => line.id === id)?.planned || 0), 0);
+}
+
+// How much of this paycheck lands in the month: recurring ones from their materialized pay dates, one-time ones from the date itself.
+export function paycheckMonthlyIncome(paycheck: Paycheck, occurrences: PaycheckOccurrence[], monthKey: string): number {
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = monthEndDateKey(monthKey);
+  if (!["once", "bonus"].includes(paycheck.recurrence || "once")) {
+    return occurrences.filter((occurrence) => occurrence.seriesId === paycheck.id && occurrence.date >= monthStart && occurrence.date <= monthEnd).reduce((sum, occurrence) => sum + Number(occurrence.amount || 0), 0);
+  }
+  return Number(paycheck.amount || 0) * paycheckOccurrencesInRange(paycheck, monthStart, monthEnd);
+}
+
+// Whether the paycheck is a live income source in the month (an ended series, or one that has not started, is not).
+export function paycheckActiveInMonth(paycheck: Paycheck, monthKey: string): boolean {
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = monthEndDateKey(monthKey);
+  if (["once", "bonus"].includes(paycheck.recurrence || "once")) return paycheckOccurrencesInRange(paycheck, monthStart, monthEnd) > 0;
+  if (!paycheck.date || paycheck.date > monthEnd) return false;
+  if (paycheck.endDate && paycheck.endDate < monthStart) return false;
+  return true;
+}

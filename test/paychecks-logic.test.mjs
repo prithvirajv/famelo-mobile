@@ -131,3 +131,61 @@ test("paycheckIncomeForMonth sums one-time income and materialized occurrences f
   assert.equal(paycheckIncomeForMonth(state, "2026-08"), 2100);
   assert.equal(paycheckIncomeForMonth(state, "2026-09"), 0);
 });
+
+import { validatePaycheckPatch, updatePaycheck, setOccurrenceDate, assignBillToPaycheck, removeAssignedLine, paycheckAssignedAmount, paycheckMonthlyIncome, paycheckActiveInMonth } from "../src/paychecksLogic.ts";
+
+const pay = (overrides = {}) => ({ id: "p1", name: "Salary", date: "2026-07-01", amount: 1000, recurrence: "monthly", assignedLineIds: [], ...overrides });
+const occ = (id, amount, extra = {}) => ({ id, seriesId: "p1", date: "2026-07-01", amount, depositAccountId: "", ...extra });
+
+test("validatePaycheckPatch rejects blank names, negative amounts and non-calendar dates", () => {
+  assert.equal(validatePaycheckPatch({ name: "A", amount: 0, date: "2026-02-28", endDate: "" }), null);
+  assert.match(validatePaycheckPatch({ name: " " }), /name/);
+  assert.match(validatePaycheckPatch({ amount: -1 }), /Amount/);
+  assert.match(validatePaycheckPatch({ amount: NaN }), /Amount/);
+  assert.match(validatePaycheckPatch({ date: "2026-02-30" }), /Date/);
+  assert.match(validatePaycheckPatch({ endDate: "soon" }), /End date/);
+  assert.match(validatePaycheckPatch({ date: "" }), /date/);
+});
+
+test("updatePaycheck: a new amount only reaches pay dates still at the old amount, a deposit account reaches all, and inputs are not mutated", () => {
+  const data = { paychecks: [pay(), pay({ id: "p2" })], paycheckOccurrences: [occ("o1", 1000), occ("o2", 1500), occ("o3", 1000, { seriesId: "p2" })] };
+  const result = updatePaycheck(data, "p1", { amount: 1200, depositAccountId: "acct" });
+  assert.deepEqual(result.paycheckOccurrences.map((o) => [o.id, o.amount, o.depositAccountId]), [["o1", 1200, "acct"], ["o2", 1500, "acct"], ["o3", 1000, ""]]);
+  assert.equal(result.paychecks[0].amount, 1200);
+  assert.equal(data.paychecks[0].amount, 1000);
+  assert.equal(data.paycheckOccurrences[0].amount, 1000);
+  assert.equal(updatePaycheck(data, "missing", { amount: 5 }), data);
+  const renamed = updatePaycheck(data, "p1", { name: " Pay ", recurrence: "weekly", endDate: "2026-12-31", date: "2026-07-03" });
+  assert.deepEqual([renamed.paychecks[0].name, renamed.paychecks[0].recurrence, renamed.paychecks[0].endDate, renamed.paychecks[0].date], ["Pay", "weekly", "2026-12-31", "2026-07-03"]);
+  assert.equal(updatePaycheck(data, "p1", { endDate: "" }).paychecks[0].endDate, "");
+});
+
+test("occurrence dates move individually", () => {
+  assert.deepEqual(setOccurrenceDate([occ("o1", 1), occ("o2", 2)], "o2", "2026-07-09").map((o) => o.date), ["2026-07-01", "2026-07-09"]);
+});
+
+test("assigning a bill adds the line once and optionally sets its planned amount; removing drops it; the assigned total sums planned amounts", () => {
+  const state = { paychecks: [pay()], budget: { month: "2026-07", categories: [{ name: "Home", lines: [{ id: "l1", planned: 10 }, { id: "l2", planned: 20 }] }] } };
+  const assigned = assignBillToPaycheck(state, "p1", "l1", 150.48);
+  assert.deepEqual(assigned.paychecks[0].assignedLineIds, ["l1"]);
+  assert.equal(assigned.budget.categories[0].lines[0].planned, 150.48);
+  assert.equal(state.budget.categories[0].lines[0].planned, 10);
+  assert.deepEqual(assignBillToPaycheck(assigned, "p1", "l1", null).paychecks[0].assignedLineIds, ["l1"], "no duplicates");
+  assert.equal(assignBillToPaycheck(assigned, "p1", "l2", null).budget.categories[0].lines[1].planned, 20, "no amount leaves planned alone");
+  assert.deepEqual(removeAssignedLine(assigned.paychecks, "p1", "l1")[0].assignedLineIds, []);
+  const both = { ...pay(), assignedLineIds: ["l1", "l2", "gone"] };
+  assert.equal(paycheckAssignedAmount(both, [{ id: "l1", planned: 10 }, { id: "l2", planned: 20 }]), 30);
+});
+
+test("monthly income comes from pay dates for recurring paychecks and from the date for one-time ones; ended series are inactive", () => {
+  const recurring = pay();
+  const occurrences = [occ("a", 1000, { date: "2026-07-01" }), occ("b", 900, { date: "2026-08-01" })];
+  assert.equal(paycheckMonthlyIncome(recurring, occurrences, "2026-07"), 1000);
+  assert.equal(paycheckMonthlyIncome(recurring, occurrences, "2026-09"), 0);
+  assert.equal(paycheckMonthlyIncome(pay({ recurrence: "once", date: "2026-07-15", amount: 300 }), [], "2026-07"), 300);
+  assert.equal(paycheckMonthlyIncome(pay({ recurrence: "once", date: "2026-07-15", amount: 300 }), [], "2026-08"), 0);
+  assert.equal(paycheckActiveInMonth(recurring, "2026-12"), true);
+  assert.equal(paycheckActiveInMonth(recurring, "2026-06"), false, "not started yet");
+  assert.equal(paycheckActiveInMonth(pay({ endDate: "2026-08-31" }), "2026-09"), false, "ended");
+  assert.equal(paycheckActiveInMonth(pay({ recurrence: "bonus", date: "2026-07-15" }), "2026-08"), false);
+});

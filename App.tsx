@@ -40,7 +40,7 @@ import {
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
-import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
+import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth, validatePaycheckPatch, updatePaycheck, setOccurrenceDate, assignBillToPaycheck, removeAssignedLine, paycheckAssignedAmount, paycheckMonthlyIncome, paycheckActiveInMonth } from "./src/paychecksLogic";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
@@ -4109,6 +4109,37 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
     void onSave({ ...state, paycheckOccurrences: occurrences.map((occurrence) => occurrence.id === occurrenceId ? { ...occurrence, amount } : occurrence) });
   };
 
+  // Editing an existing paycheck (web edits every field in place): text fields are saved together, repeat and deposit account apply
+  // at once. Changing the date/repeat/end date needs no extra work - this screen's effect above regenerates pay dates when the
+  // paycheck no longer matches what they were generated under.
+  const [editingPaycheckId, setEditingPaycheckId] = useState<string | null>(null);
+  const [paycheckDraft, setPaycheckDraft] = useState({ name: "", amount: "", date: "", endDate: "" });
+  const [picker, setPicker] = useState<{ kind: "deposit" | "line"; paycheckId: string } | null>(null);
+  const [assignAmount, setAssignAmount] = useState("");
+  const lines = state.budget.categories.flatMap((category) => category.lines.map((line) => ({ ...line, category: category.name })));
+  const applyPaycheckPatch = async (paycheckId: string, patch: Parameters<typeof updatePaycheck>[2]) => {
+    const problem = validatePaycheckPatch(patch);
+    if (problem) return Alert.alert("Check the paycheck", problem);
+    const result = updatePaycheck({ paychecks, paycheckOccurrences: occurrences }, paycheckId, patch);
+    await onSave({ ...state, paychecks: result.paychecks, paycheckOccurrences: result.paycheckOccurrences });
+  };
+  const startEditPaycheck = (paycheck: Paycheck) => {
+    setPaycheckDraft({ name: paycheck.name, amount: String(paycheck.amount), date: paycheck.date, endDate: paycheck.endDate || "" });
+    setEditingPaycheckId(paycheck.id); setPicker(null); setAssignAmount("");
+  };
+  const savePaycheckDraft = async () => {
+    if (!editingPaycheckId) return;
+    await applyPaycheckPatch(editingPaycheckId, { name: paycheckDraft.name, amount: Number(paycheckDraft.amount), date: paycheckDraft.date, endDate: paycheckDraft.endDate });
+    setEditingPaycheckId(null);
+  };
+  const assignLine = async (paycheckId: string, lineId: string) => {
+    const amount = assignAmount.trim() === "" ? null : Number(assignAmount);
+    if (amount !== null && !(amount >= 0)) return Alert.alert("Check the amount", "Enter an amount of zero or more, or leave it empty.");
+    await onSave(assignBillToPaycheck(state, paycheckId, lineId, amount));
+    setAssignAmount("");
+  };
+  const lineLabel = (lineId: string) => { const line = lines.find((item) => item.id === lineId); return line ? `${line.category} - ${line.name}` : "Removed line"; };
+
   return <Page>
     <SubScreenHeader title="Paycheck/Income" onBack={onBack} />
 
@@ -4120,7 +4151,13 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
             return <View key={occurrence.id} style={styles.row}>
               <View style={styles.rowCopy}>
                 <Text style={styles.rowTitle}>{paycheck?.name || "Paycheck"}</Text>
-                <Text style={styles.rowDetail}>{occurrence.date}</Text>
+                <TextInput key={occurrence.date} style={[styles.input, { height: 38, marginTop: 4 }]} defaultValue={occurrence.date} autoCapitalize="none" accessibilityLabel="Pay date" onEndEditing={(event) => {
+                  const date = event.nativeEvent.text.trim();
+                  if (date === occurrence.date) return;
+                  const problem = validatePaycheckPatch({ date });
+                  if (problem) return Alert.alert("Check the date", problem);
+                  void onSave({ ...state, paycheckOccurrences: setOccurrenceDate(occurrences, occurrence.id, date) });
+                }} />
               </View>
               <TextInput style={[styles.input, { width: 100, height: 42 }]} defaultValue={String(occurrence.amount)} onEndEditing={(event) => updateOccurrenceAmount(occurrence.id, event.nativeEvent.text)} keyboardType="decimal-pad" />
               <Pressable style={styles.planStepperButton} onPress={() => deleteOccurrence(occurrence.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
@@ -4131,14 +4168,55 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
 
     <Card>
       <Text style={styles.cardTitle}>All paychecks</Text>
-      {paychecks.length ? paychecks.map((paycheck) => <View key={paycheck.id} style={styles.row}>
-        <View style={styles.rowCopy}>
-          <Text style={styles.rowTitle}>{paycheck.name}</Text>
-          <Text style={styles.rowDetail}>{PAYCHECK_RECURRENCE_LABELS[paycheck.recurrence || "once"]} · Since {paycheck.date}{paycheck.endDate ? ` · Ends ${paycheck.endDate}` : ""}</Text>
-        </View>
-        <Text style={styles.rowValue}>{money(paycheck.amount, currency)}</Text>
-        <Pressable style={styles.planStepperButton} onPress={() => deletePaycheck(paycheck.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
-      </View>) : <Text style={styles.muted}>No paychecks yet</Text>}
+      {paychecks.length ? paychecks.map((paycheck) => {
+        const isEditing = editingPaycheckId === paycheck.id;
+        const active = paycheckActiveInMonth(paycheck, currentMonth);
+        const income = paycheckMonthlyIncome(paycheck, occurrences, currentMonth);
+        const assigned = paycheckAssignedAmount(paycheck, lines);
+        return <View key={paycheck.id} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
+          <View style={styles.iouPersonHead}>
+            <View style={styles.rowCopy}>
+              <Text style={styles.rowTitle}>{paycheck.name}</Text>
+              <Text style={styles.rowDetail}>{PAYCHECK_RECURRENCE_LABELS[paycheck.recurrence || "once"]} · Since {paycheck.date}{paycheck.endDate ? ` · Ends ${paycheck.endDate}` : ""}{paycheck.depositAccountId ? ` · to ${(state.accounts || []).find((account) => account.id === paycheck.depositAccountId)?.name || "account"}` : ""}</Text>
+            </View>
+            <Text style={styles.rowValue}>{money(paycheck.amount, currency)}</Text>
+            <Pressable accessibilityLabel={`Edit ${paycheck.name}`} hitSlop={8} onPress={() => isEditing ? setEditingPaycheckId(null) : startEditPaycheck(paycheck)}><Ionicons name={isEditing ? "chevron-up" : "create-outline"} size={20} color={colors.text} /></Pressable>
+            <Pressable style={styles.planStepperButton} onPress={() => deletePaycheck(paycheck.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+          </View>
+          {active ? <Text style={styles.rowDetail}>This month: income {money(income, currency)} · assigned to bills {money(assigned, currency)} · {money(income - assigned, currency)} unassigned</Text> : null}
+          {isEditing ? <View>
+            <Text style={styles.label}>Name</Text>
+            <TextInput style={styles.input} value={paycheckDraft.name} onChangeText={(name) => setPaycheckDraft({ ...paycheckDraft, name })} />
+            <Text style={styles.label}>Amount</Text>
+            <TextInput style={styles.input} value={paycheckDraft.amount} onChangeText={(amount) => setPaycheckDraft({ ...paycheckDraft, amount })} keyboardType="decimal-pad" />
+            <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
+            <TextInput style={styles.input} value={paycheckDraft.date} onChangeText={(date) => setPaycheckDraft({ ...paycheckDraft, date })} autoCapitalize="none" />
+            {paycheck.recurrence !== "once" && paycheck.recurrence !== "bonus" ? <>
+              <Text style={styles.label}>End date (optional)</Text>
+              <TextInput style={styles.input} value={paycheckDraft.endDate} onChangeText={(endDate) => setPaycheckDraft({ ...paycheckDraft, endDate })} autoCapitalize="none" placeholder="YYYY-MM-DD" />
+            </> : null}
+            <Pressable style={styles.primaryButton} onPress={() => void savePaycheckDraft()}><Text style={styles.primaryButtonText}>Save changes</Text></Pressable>
+            <Text style={styles.label}>Repeats</Text>
+            <View style={styles.choiceRow}>
+              {(Object.keys(PAYCHECK_RECURRENCE_LABELS) as PaycheckRecurrence[]).map((value) => <Pressable key={value} style={[styles.choice, (paycheck.recurrence || "once") === value && styles.choiceActive]} onPress={() => void applyPaycheckPatch(paycheck.id, { recurrence: value })}>
+                <Text style={[styles.choiceText, (paycheck.recurrence || "once") === value && styles.choiceTextActive]}>{PAYCHECK_RECURRENCE_LABELS[value]}</Text>
+              </Pressable>)}
+            </View>
+            {accounts.length ? <>
+              <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => setPicker({ kind: "deposit", paycheckId: paycheck.id })}><Text style={styles.secondaryButtonText}>Deposit to: {accounts.find((account) => account.id === paycheck.depositAccountId)?.name || "Not linked"}</Text></Pressable>
+              {picker?.kind === "deposit" && picker.paycheckId === paycheck.id ? <OptionList title="Deposit to" onClose={() => setPicker(null)} options={[{ label: "Not linked", onPress: () => void applyPaycheckPatch(paycheck.id, { depositAccountId: "" }) }, ...accounts.filter((account) => account.type !== "credit_card").map((account) => ({ label: account.name, onPress: () => void applyPaycheckPatch(paycheck.id, { depositAccountId: account.id }) }))]} /> : null}
+            </> : null}
+            <Text style={styles.label}>Bills paid from this income</Text>
+            {paycheck.assignedLineIds.length ? paycheck.assignedLineIds.map((lineId) => <View key={lineId} style={styles.checkRow}>
+              <Text style={[styles.rowDetail, { flex: 1 }]}>{lineLabel(lineId)}</Text>
+              <Pressable accessibilityLabel={`Remove ${lineLabel(lineId)}`} hitSlop={8} onPress={() => void onSave({ ...state, paychecks: removeAssignedLine(paychecks, paycheck.id, lineId) })}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+            </View>) : <Text style={styles.muted}>None assigned yet</Text>}
+            <TextInput style={styles.input} value={assignAmount} onChangeText={setAssignAmount} placeholder="Planned amount for the bill (optional)" keyboardType="decimal-pad" />
+            <Pressable style={styles.secondarySmall} onPress={() => setPicker({ kind: "line", paycheckId: paycheck.id })}><Text style={styles.secondaryButtonText}>Assign a bill</Text></Pressable>
+            {picker?.kind === "line" && picker.paycheckId === paycheck.id ? <OptionList title="Assign which subcategory?" onClose={() => setPicker(null)} options={lines.map((line) => ({ label: `${line.category} - ${line.name}`, onPress: () => void assignLine(paycheck.id, line.id) }))} /> : null}
+          </View> : null}
+        </View>;
+      }) : <Text style={styles.muted}>No paychecks yet</Text>}
     </Card>
 
     <Card>

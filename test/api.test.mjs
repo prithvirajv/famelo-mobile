@@ -548,3 +548,14 @@ test("Home is an actionable dashboard: pending items for the viewer, mark done t
   assert.match(home, /onSavePlans\(\{ \.\.\.privateData\.plans/, "plan tasks are private data and save through the plans endpoint, not household state");
   assert.match(app, /<Home state=\{state\} user=\{user\} privateData=\{activePrivateData\}/);
 });
+
+test("Paychecks can edit an existing paycheck, assign bills and move individual pay dates, all through the whole-state save", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const paychecks = extractFunctionSource(app, "Paychecks");
+  assert.match(paychecks, /updatePaycheck\(/);
+  assert.match(paychecks, /assignBillToPaycheck\(state, paycheckId, lineId, amount\)/);
+  assert.match(paychecks, /setOccurrenceDate\(/);
+  assert.match(paychecks, /<OptionList title="Deposit to"/, "account choice is an inline list, not an Alert (Android allows only 3 buttons)");
+  assert.doesNotMatch(paychecks, /Alert\.alert\([^)]*accounts\.map/);
+  assertOnlyWholeStateSaves(paychecks, "Paychecks");
+});
