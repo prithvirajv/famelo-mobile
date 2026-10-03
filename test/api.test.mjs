@@ -125,7 +125,7 @@ test("Notes support real CRUD (add/edit/pin/archive/delete/checklist-add), not j
   const types = fs.readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
   assert.match(types, /createdAt\?: string/);
   const body = extractFunctionSource(app, "Notes");
-  assert.match(body, /trashed: true/, "delete should soft-delete via trashed, matching web");
+  assert.match(body, /trashNote\(item\)/, "delete should soft-delete via the trash (which stamps trashedAt so it is purged after 7 days), matching web");
   assert.match(body, /pinned: !entry\.pinned/);
   assert.match(body, /archived: !entry\.archived/);
   assert.match(body, /checklist: \[\.\.\.entry\.checklist,/, "should support adding a new checklist item, not just toggling existing ones");
@@ -447,4 +447,16 @@ test("Bulk imports are refused (with a clear message) before they push the house
   assert.match(extractFunctionSource(app, "Calendar"), /exceedsStateLimit\(next\)/);
   const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
   assert.match(api, /response\.status === 413/, "an oversized save must not surface as a meaningless 'Request failed'");
+});
+
+test("Notes have views (Notes/Reminders/Archive/Trash/labels), search, labels, a reminder, a bill link, copy, restore, and checklist editing", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Notes");
+  for (const name of ["visibleNotes", "allLabels", "toggleLabel", "setNoteReminder", "setNoteBill", "duplicateNote", "purgeExpiredTrash", "editChecklistText", "deleteChecklistItem", "toggleIndent", "moveNoteItem", "bucketChecklistItems"]) {
+    assert.match(body, new RegExp(name + "\\("), `Notes should use ${name}`);
+  }
+  assertOnlyWholeStateSaves(body, "Notes");
+  assert.match(body, /updateNote\(note\.id, restoreNote\)/);
+  assert.match(body, /Delete permanently/);
+  assert.match(body, /Search notes/);
 });

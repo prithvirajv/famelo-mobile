@@ -44,7 +44,12 @@ export type Chore = {
   endDate?: string; time?: string; location?: string; assignees?: EventAssignee[]; notifyAt?: string;
 };
 export type NoteItem = { id: string; text: string; done: boolean; parentId?: string };
-export type Note = { id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string; createdAt?: string };
+// labels/reminder/billLineId/showChecklist/trashedAt are written by web too; a note created on mobile before they existed simply
+// lacks them. reminder is "YYYY-MM-DDTHH:MM" (device-local) and reminderAt the same instant as ISO - the server notifies off reminderAt.
+export type Note = {
+  id: string; title: string; body: string; checklist: NoteItem[]; pinned: boolean; archived: boolean; trashed: boolean; color: string; createdAt?: string;
+  labels?: string[]; reminder?: string; reminderAt?: string; billLineId?: string | null; showChecklist?: boolean; trashedAt?: string;
+};
 export type Recipe = { id: string; name: string; ingredients: string[]; calories: number; protein: number };
 export type HouseholdAccess = { canManage: boolean; members: Array<{ name: string; email: string; role: string; status: string; isOwner: boolean }> };
 export type PlannedMeal = { month?: string; week?: number; day: string; slot?: string; meal: string; recipeId?: string; servings: number };

@@ -42,6 +42,8 @@ import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDec
 import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
+import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
+import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
@@ -1043,16 +1045,19 @@ const noteColorOptions = [
   { value: "#fff0ee", label: "Coral" }
 ];
 
-function sortNotes(notes: Note[]): Note[] {
-  return [...notes].sort((a, b) => Number(b.pinned) - Number(a.pinned) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-}
-
 function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
   const [addTitle, setAddTitle] = useState(""); const [addBody, setAddBody] = useState(""); const [addColor, setAddColor] = useState("#ffffff");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState(""); const [editBody, setEditBody] = useState(""); const [editColor, setEditColor] = useState("#ffffff");
   const [checklistDrafts, setChecklistDrafts] = useState<Record<string, string>>({});
-  const [showArchived, setShowArchived] = useState(false);
+  const [view, setView] = useState<NotesView>("notes");
+  const [activeLabel, setActiveLabel] = useState("");
+  const [query, setQuery] = useState("");
+  const [moreNoteId, setMoreNoteId] = useState<string | null>(null);
+  const [editListId, setEditListId] = useState<string | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
+  const [reminderDate, setReminderDate] = useState(""); const [reminderTime, setReminderTime] = useState("09:00");
+  const [completedOpen, setCompletedOpen] = useState<Record<string, boolean>>({});
 
   // A note's photos are Documents rows linked to it via noteId (web does the same), so they come from
   // the Documents API; each ready image needs its own short-lived signed URL to display.
@@ -1097,10 +1102,22 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     } }]);
   };
 
-  const notes = sortNotes(state.notes.entries.filter((note) => !note.trashed && !note.archived));
-  const archivedNotes = sortNotes(state.notes.entries.filter((note) => !note.trashed && note.archived));
+  const shownNotes = visibleNotes(state.notes.entries, view, query, activeLabel);
+  const labels = allLabels(state.notes.entries);
+  const bills = billsRows(state);
 
   const saveNotes = (entries: Note[]) => onSave({ ...state, notes: { ...state.notes, entries } });
+  const updateNote = (noteId: string, update: (note: Note) => Note | null) => {
+    const target = state.notes.entries.find((entry) => entry.id === noteId);
+    const next = target ? update(target) : null;
+    if (next) void saveNotes(state.notes.entries.map((entry) => entry.id === noteId ? next : entry));
+  };
+  // Trash empties itself after a week (web does this on every render).
+  useEffect(() => {
+    const kept = purgeExpiredTrash(state.notes.entries);
+    if (kept.length !== state.notes.entries.length) void saveNotes(kept);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.notes.entries.length]);
 
   const addNote = async () => {
     if (!addTitle.trim() && !addBody.trim()) return;
@@ -1121,7 +1138,21 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   const togglePin = (note: Note) => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, pinned: !entry.pinned } : entry));
   const toggleArchive = (note: Note) => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, archived: !entry.archived } : entry));
   const deleteNote = (note: Note) => {
-    Alert.alert("Delete note?", note.title || "Untitled note", [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => void saveNotes(state.notes.entries.map((entry) => entry.id === note.id ? { ...entry, trashed: true } : entry)) }]);
+    Alert.alert("Move to trash?", `${note.title || "Untitled note"} - you can restore it from Trash for 7 days.`, [{ text: "Cancel" }, { text: "Move to trash", style: "destructive", onPress: () => updateNote(note.id, (item) => trashNote(item)) }]);
+  };
+  const deleteForever = (note: Note) => {
+    Alert.alert("Delete permanently?", `${note.title || "Untitled note"} can't be recovered.`, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => void saveNotes(state.notes.entries.filter((entry) => entry.id !== note.id)) }]);
+  };
+  const copyNote = (note: Note) => { void saveNotes([duplicateNote(note, uniqueId), ...state.notes.entries]); setMoreNoteId(null); };
+  const openMore = (note: Note) => {
+    setMoreNoteId(moreNoteId === note.id ? null : note.id);
+    setReminderDate((note.reminder || "").slice(0, 10)); setReminderTime((note.reminder || "").slice(11, 16) || "09:00"); setLabelDraft("");
+  };
+  const saveReminder = (note: Note, clear = false) => {
+    const next = setNoteReminder(note, clear ? "" : reminderDate, clear ? "" : reminderTime);
+    if (!next) return Alert.alert("Invalid reminder", "Enter a real date (YYYY-MM-DD) and a 24-hour time (HH:MM).");
+    updateNote(note.id, () => next);
+    if (clear) { setReminderDate(""); setReminderTime("09:00"); }
   };
 
   const toggle = (note: Note, itemId: string) => {
@@ -1154,23 +1185,82 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
         </View>
       </View>;
     }
+    const inTrash = view === "trash";
+    const showBoxes = note.showChecklist !== false;
+    const { open: openItems, completed: doneItems } = bucketChecklistItems(note.checklist);
+    const editingList = editListId === note.id;
+    const linkedBill = note.billLineId ? bills.find((bill) => bill.id === note.billLineId) : null;
+    const renderItem = (item: Note["checklist"][number]) => editingList
+      ? <View key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]}>
+          <TextInput key={`${item.id}-${item.text}`} style={[styles.input, { flex: 1 }]} defaultValue={item.text} onEndEditing={(event) => updateNote(note.id, (current) => ({ ...current, checklist: editChecklistText(current.checklist, item.id, event.nativeEvent.text) }))} />
+          <Pressable onPress={() => updateNote(note.id, (current) => ({ ...current, checklist: toggleIndent(current.checklist, item.id) }))} accessibilityLabel={item.parentId ? "Move out of sub-item" : "Make a sub-item"}><Ionicons name={item.parentId ? "arrow-back" : "arrow-forward"} size={18} color={colors.text} /></Pressable>
+          <Pressable onPress={() => updateNote(note.id, (current) => ({ ...current, checklist: moveNoteItem(current.checklist, item.id, "up") }))} accessibilityLabel="Move up"><Ionicons name="arrow-up" size={18} color={colors.text} /></Pressable>
+          <Pressable onPress={() => updateNote(note.id, (current) => ({ ...current, checklist: moveNoteItem(current.checklist, item.id, "down") }))} accessibilityLabel="Move down"><Ionicons name="arrow-down" size={18} color={colors.text} /></Pressable>
+          <Pressable onPress={() => updateNote(note.id, (current) => ({ ...current, checklist: deleteChecklistItem(current.checklist, item.id) }))} accessibilityLabel="Delete item"><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+        </View>
+      : <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => toggle(note, item.id)}>
+          {showBoxes ? <Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /> : <Text style={styles.checkText}>•</Text>}
+          <Text style={[styles.checkText, item.done && showBoxes && styles.done]}>{item.text}</Text>
+        </Pressable>;
     return <View key={note.id} style={[styles.note, { backgroundColor: note.color || colors.surface }]}>
       <View style={styles.noteHeader}>
-        <Pressable style={styles.rowCopy} onPress={() => startEdit(note)}><Text style={styles.noteTitle}>{note.title || "Untitled note"}</Text></Pressable>
-        <Pressable disabled={uploadingNoteId === note.id} onPress={() => void addPhoto(note)} accessibilityLabel="Add a photo to this note">{uploadingNoteId === note.id ? <ActivityIndicator size="small" color={colors.green} /> : <Ionicons name="camera-outline" size={18} color={colors.muted} />}</Pressable>
-        <Pressable onPress={() => togglePin(note)}><Ionicons name={note.pinned ? "pin" : "pin-outline"} size={18} color={note.pinned ? colors.gold : colors.muted} /></Pressable>
-        <Pressable onPress={() => toggleArchive(note)}><Ionicons name={note.archived ? "arrow-undo-outline" : "archive-outline"} size={18} color={colors.muted} /></Pressable>
-        <Pressable onPress={() => deleteNote(note)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        <Pressable style={styles.rowCopy} onPress={() => (inTrash ? undefined : startEdit(note))}><Text style={styles.noteTitle}>{note.title || "Untitled note"}</Text></Pressable>
+        {inTrash ? null : <>
+          <Pressable disabled={uploadingNoteId === note.id} onPress={() => void addPhoto(note)} accessibilityLabel="Add a photo to this note">{uploadingNoteId === note.id ? <ActivityIndicator size="small" color={colors.green} /> : <Ionicons name="camera-outline" size={18} color={colors.muted} />}</Pressable>
+          <Pressable onPress={() => togglePin(note)}><Ionicons name={note.pinned ? "pin" : "pin-outline"} size={18} color={note.pinned ? colors.gold : colors.muted} /></Pressable>
+          <Pressable onPress={() => toggleArchive(note)}><Ionicons name={note.archived ? "arrow-undo-outline" : "archive-outline"} size={18} color={colors.muted} /></Pressable>
+          <Pressable onPress={() => openMore(note)} accessibilityLabel="More actions"><Ionicons name="ellipsis-horizontal" size={18} color={moreNoteId === note.id ? colors.green : colors.muted} /></Pressable>
+          <Pressable onPress={() => deleteNote(note)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </>}
       </View>
+      {(note.labels || []).length || note.reminder || linkedBill ? <View style={styles.choiceRow}>
+        {(note.labels || []).map((label) => <Text key={label} style={styles.tagChipText}>#{label}</Text>)}
+        {note.reminder ? <Text style={styles.tagChipText}>⏰ {note.reminder.slice(0, 10)} {note.reminder.slice(11, 16)}</Text> : null}
+        {linkedBill ? <Text style={styles.tagChipText}>🧾 {linkedBill.name}</Text> : null}
+      </View> : null}
       {note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}
       {noteLinkedImages(documents, note.id).length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" style={styles.journalPhotoRow}>{noteLinkedImages(documents, note.id).map((photo) => <Pressable key={photo.id} onPress={() => removePhoto(photo)} accessibilityLabel={`Remove photo ${photo.name}`}>
         {imageUrls[photo.id] ? <Image source={{ uri: imageUrls[photo.id] }} style={styles.journalPhoto} /> : <View style={[styles.journalPhoto, { backgroundColor: colors.panel }]} />}
       </Pressable>)}</ScrollView> : null}
-      {note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}
-      <View style={styles.actionRow}>
+      {openItems.map(renderItem)}
+      {doneItems.length ? <>
+        <Pressable onPress={() => setCompletedOpen((prev) => ({ ...prev, [note.id]: !prev[note.id] }))}><Text style={styles.rowDetail}>{completedOpen[note.id] ? "▾" : "▸"} {doneItems.length} completed item{doneItems.length === 1 ? "" : "s"}</Text></Pressable>
+        {completedOpen[note.id] ? doneItems.map(renderItem) : null}
+      </> : null}
+      {inTrash ? <View style={styles.actionRow}>
+        <Pressable style={styles.primaryButton} onPress={() => updateNote(note.id, restoreNote)}><Text style={styles.primaryButtonText}>Restore</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => deleteForever(note)}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Delete permanently</Text></Pressable>
+      </View> : <View style={styles.actionRow}>
         <TextInput style={[styles.input, { flex: 1 }]} value={checklistDrafts[note.id] || ""} onChangeText={(value) => setChecklistDrafts((prev) => ({ ...prev, [note.id]: value }))} placeholder="Add checklist item" onSubmitEditing={() => addChecklistItem(note)} />
         <Pressable style={styles.secondarySmall} onPress={() => addChecklistItem(note)}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
-      </View>
+      </View>}
+      {moreNoteId === note.id && !inTrash ? <View style={styles.planTaskBlock}>
+        <Text style={styles.label}>Labels</Text>
+        <View style={styles.choiceRow}>{labels.map((label) => <Pressable key={label} style={[styles.choice, (note.labels || []).some((item) => item.toLowerCase() === label.toLowerCase()) && styles.choiceActive]} onPress={() => updateNote(note.id, (current) => toggleLabel(current, label))}><Text style={[styles.choiceText, (note.labels || []).some((item) => item.toLowerCase() === label.toLowerCase()) && styles.choiceTextActive]}>{label}</Text></Pressable>)}</View>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={labelDraft} onChangeText={setLabelDraft} placeholder="New label" autoCapitalize="none" onSubmitEditing={() => { updateNote(note.id, (current) => toggleLabel({ ...current, labels: (current.labels || []).filter((item) => item.toLowerCase() !== labelDraft.trim().toLowerCase()) }, labelDraft)); setLabelDraft(""); }} />
+          <Pressable style={styles.secondarySmall} onPress={() => { updateNote(note.id, (current) => toggleLabel({ ...current, labels: (current.labels || []).filter((item) => item.toLowerCase() !== labelDraft.trim().toLowerCase()) }, labelDraft)); setLabelDraft(""); }}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+        </View>
+        <Text style={styles.label}>Reminder</Text>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={reminderDate} onChangeText={setReminderDate} placeholder="YYYY-MM-DD" />
+          <TextInput style={[styles.input, { flex: 1 }]} value={reminderTime} onChangeText={setReminderTime} placeholder="HH:MM" keyboardType="numbers-and-punctuation" maxLength={5} />
+        </View>
+        <View style={styles.actionRow}>
+          <Pressable style={styles.secondarySmall} onPress={() => saveReminder(note)}><Text style={styles.secondaryButtonText}>Set reminder</Text></Pressable>
+          {note.reminder ? <Pressable style={styles.secondarySmall} onPress={() => saveReminder(note, true)}><Text style={styles.secondaryButtonText}>Clear</Text></Pressable> : null}
+        </View>
+        <Text style={styles.label}>Linked bill</Text>
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          <Pressable style={[styles.choice, !note.billLineId && styles.choiceActive]} onPress={() => updateNote(note.id, (current) => setNoteBill(current, null))}><Text style={[styles.choiceText, !note.billLineId && styles.choiceTextActive]}>None</Text></Pressable>
+          {bills.map((bill) => <Pressable key={bill.id} style={[styles.choice, note.billLineId === bill.id && styles.choiceActive]} onPress={() => updateNote(note.id, (current) => setNoteBill(current, bill.id))}><Text style={[styles.choiceText, note.billLineId === bill.id && styles.choiceTextActive]}>{bill.name}</Text></Pressable>)}
+        </ScrollView>
+        <View style={styles.choiceRow}>
+          <Pressable style={[styles.choice, showBoxes && styles.choiceActive]} onPress={() => updateNote(note.id, (current) => ({ ...current, showChecklist: current.showChecklist === false }))}><Text style={[styles.choiceText, showBoxes && styles.choiceTextActive]}>{showBoxes ? "✓ Show checkboxes" : "Show checkboxes"}</Text></Pressable>
+          <Pressable style={[styles.choice, editingList && styles.choiceActive]} onPress={() => setEditListId(editingList ? null : note.id)}><Text style={[styles.choiceText, editingList && styles.choiceTextActive]}>{editingList ? "✓ Editing list" : "Edit list"}</Text></Pressable>
+          <Pressable style={styles.choice} onPress={() => copyNote(note)}><Text style={styles.choiceText}>Make a copy</Text></Pressable>
+        </View>
+      </View> : null}
     </View>;
   };
 
@@ -1181,11 +1271,14 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
       {renderColorChips(addColor, setAddColor)}
       <Pressable style={styles.primaryButton} onPress={() => void addNote()}><Text style={styles.primaryButtonText}>Add note</Text></Pressable>
     </Card>
-    {notes.map(renderNote)}
-    {archivedNotes.length ? <>
-      <Pressable style={styles.secondarySmall} onPress={() => setShowArchived((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showArchived ? "Hide" : "Show"} archived ({archivedNotes.length})</Text></Pressable>
-      {showArchived ? archivedNotes.map(renderNote) : null}
-    </> : null}
+    <TextInput style={styles.input} value={query} onChangeText={setQuery} placeholder="Search notes" autoCapitalize="none" clearButtonMode="while-editing" />
+    <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      {([["notes", "Notes"], ["reminders", "Reminders"], ["archive", "Archive"], ["trash", "Trash"]] as Array<[NotesView, string]>).map(([value, label]) => <Pressable key={value} style={[styles.choice, view === value && styles.choiceActive]} onPress={() => { setView(value); setActiveLabel(""); }}><Text style={[styles.choiceText, view === value && styles.choiceTextActive]}>{label}</Text></Pressable>)}
+      {labels.map((label) => <Pressable key={label} style={[styles.choice, view === "label" && activeLabel === label && styles.choiceActive]} onPress={() => { setView("label"); setActiveLabel(label); }}><Text style={[styles.choiceText, view === "label" && activeLabel === label && styles.choiceTextActive]}>#{label}</Text></Pressable>)}
+    </ScrollView>
+    {view === "trash" ? <Text style={styles.muted}>Notes in the trash are deleted for good after 7 days.</Text> : null}
+    {shownNotes.map(renderNote)}
+    {shownNotes.length ? null : <Text style={styles.muted}>{query.trim() ? "No notes match your search." : view === "trash" ? "Trash is empty." : view === "archive" ? "Nothing archived." : view === "reminders" ? "No notes with a reminder." : "No notes here yet."}</Text>}
   </Page>;
 }
 
