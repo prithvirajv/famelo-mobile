@@ -537,3 +537,14 @@ test("Journal supports date/tags/editing/search/stats/reflection, and 'today' is
   const plan = fs.readFileSync(new URL("../src/planLogic.ts", import.meta.url), "utf8");
   assert.doesNotMatch(plan, /toISOString\(\)\.slice\(0, 10\)/);
 });
+
+test("Home is an actionable dashboard: pending items for the viewer, mark done through the whole-state save, private plan tasks, funding reminders", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const home = extractFunctionSource(app, "Home");
+  assert.match(home, /homeActionItems\(state\.calendar, user\.email, today\)/);
+  assert.match(home, /homeWeekStrip\(/);
+  assert.match(home, /await onSave\(next\)/);
+  assert.match(home, /onSave\(dismissBudgetReminder\(state/);
+  assert.match(home, /onSavePlans\(\{ \.\.\.privateData\.plans/, "plan tasks are private data and save through the plans endpoint, not household state");
+  assert.match(app, /<Home state=\{state\} user=\{user\} privateData=\{activePrivateData\}/);
+});

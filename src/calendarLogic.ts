@@ -633,3 +633,126 @@ export function updateAnnualEvent(event: CalendarEvent, input: AnnualEventInput,
   const fields = annualFields(input, now);
   return title && fields ? { ...event, title, ...fields } : null;
 }
+
+// ---- Home dashboard: what needs the signed-in viewer's attention (mirrors web's homeActionItems / homeWeekStrip) ----
+
+export function isRelevantToViewer(assignees: Array<{ key: string }> | undefined, viewerKey: string): boolean {
+  if (!assignees || !assignees.length || !viewerKey) return true;
+  return assignees.some((assignee) => assignee.key === viewerKey);
+}
+
+// Pending for THIS viewer: a viewer who is one of the assignees only needs to have done their own part.
+export function isChoreOccurrencePendingFor(chore: Pick<Chore, "completedBy" | "assignees">, date: string, viewerKey: string): boolean {
+  const keys = (chore.assignees || []).map((assignee) => assignee.key);
+  if (viewerKey && keys.includes(viewerKey)) return !choreCompletedKeys(chore, date).includes(viewerKey);
+  return !isChoreOccurrenceComplete(chore, date);
+}
+
+export function isReminderPendingFor(event: Pick<CalendarEvent, "completedBy" | "assignees">, viewerKey: string): boolean {
+  const keys = (event.assignees || []).map((assignee) => assignee.key);
+  if (viewerKey && keys.includes(viewerKey)) return !(event.completedBy || []).includes(viewerKey);
+  return !isReminderComplete(event.completedBy, keys);
+}
+
+// The earliest occurrence of a chore the viewer has not done yet, regardless of the displayed month.
+export function nextPendingChoreOccurrence(chore: Chore, viewerKey: string): { date: string } | null {
+  const recurrence = chore.recurrence || "once";
+  const startKey = chore.startDate || chore.nextDue;
+  if (!startKey || !DATE_PATTERN.test(startKey)) return null;
+  const start = parseDateKey(startKey);
+  const end = chore.endDate && DATE_PATTERN.test(chore.endDate) ? parseDateKey(chore.endDate) : null;
+  if (recurrence === "once") { const key = dateKey(start); return isChoreOccurrencePendingFor(chore, key, viewerKey) ? { date: key } : null; }
+  const monthStep = CHORE_MONTH_STEP_BY_RECURRENCE[recurrence];
+  if (monthStep) {
+    const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+    for (let i = 0; i < 240; i += 1) {
+      const lastDay = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+      const occurrence = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(start.getDate(), lastDay));
+      if (occurrence >= start) {
+        if (end && occurrence > end) return null;
+        const key = dateKey(occurrence);
+        if (isChoreOccurrencePendingFor(chore, key, viewerKey)) return { date: key };
+      }
+      cursor.setMonth(cursor.getMonth() + monthStep);
+    }
+    return null;
+  }
+  const intervalDays = recurrence === "triweekly" ? 21 : recurrence === "biweekly" ? 14 : 7;
+  const cursor = new Date(start);
+  for (let i = 0; i < 3650; i += 1) {
+    if (end && cursor > end) return null;
+    const key = dateKey(cursor);
+    if (isChoreOccurrencePendingFor(chore, key, viewerKey)) return { date: key };
+    cursor.setDate(cursor.getDate() + intervalDays);
+  }
+  return null;
+}
+
+// Marks a reminder done (or undone) for the viewer; completing a recurring reminder rolls it to its next date.
+export function toggleReminderCompletion(event: CalendarEvent, viewerKey: string): CalendarEvent | null {
+  const assignees = effectiveAssignees(event);
+  const key = completionKeyFor(assignees, viewerKey);
+  if (!key) return null;
+  const done = event.completedBy || [];
+  const already = done.includes(key);
+  const target: CalendarEvent = { ...event, completedBy: already ? done.filter((item) => item !== key) : [...done, key] };
+  return !already && isReminderComplete(target.completedBy, assignees.map((assignee) => assignee.key)) ? advanceRecurringReminder(target) : target;
+}
+
+export type HomeActionItem = {
+  kind: "chore" | "annual" | "reminder"; label: string; title: string; date: string; overdue: boolean; detail: string;
+  // Where the item lives in state.calendar so the caller can complete it, plus the occurrence it applies to.
+  index: number; occurrence: string; year?: number;
+};
+
+function assigneeNamesOf(assignees: Array<{ name?: string }> | undefined): string {
+  return (assignees || []).map((assignee) => assignee.name).filter(Boolean).join(", ");
+}
+
+export function homeActionItems(calendar: { events: CalendarEvent[]; chores: Chore[] }, viewerKey: string, today: string, reference: Date = new Date()): HomeActionItem[] {
+  const items: HomeActionItem[] = [];
+  calendar.chores.forEach((chore, index) => {
+    const occurrence = nextPendingChoreOccurrence(chore, viewerKey);
+    if (!occurrence || occurrence.date > today || !isRelevantToViewer(chore.assignees, viewerKey)) return;
+    items.push({ kind: "chore", label: "Chore", title: chore.title, date: occurrence.date, overdue: occurrence.date < today, detail: `${assigneeNamesOf(chore.assignees) || "Unassigned"} · ${choreCadenceLabels[chore.recurrence || "once"] || "Once"}`, index, occurrence: occurrence.date });
+  });
+  calendar.events.forEach((event, index) => {
+    if (ANNUAL_EVENT_TYPES.includes(event.type)) {
+      const occurrence = nextPendingAnnualOccurrence(event, viewerKey, reference);
+      if (!occurrence || occurrence.date > today || !isRelevantToViewer(event.assignees, viewerKey)) return;
+      items.push({ kind: "annual", label: ANNUAL_EVENT_LABELS[event.type] || "Annual", title: annualEventDisplayTitle(event), date: occurrence.date, overdue: occurrence.date < today, detail: assigneeNamesOf(event.assignees) || "Household", index, occurrence: occurrence.date, year: occurrence.year });
+    } else if (event.type === "reminder" && event.date && event.date <= today && isReminderPendingFor(event, viewerKey) && isRelevantToViewer(event.assignees, viewerKey)) {
+      items.push({ kind: "reminder", label: "Reminder", title: event.title, date: event.date, overdue: event.date < today, detail: assigneeNamesOf(event.assignees) || "Household", index, occurrence: event.date });
+    }
+  });
+  return items.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export type WeekStripDay = { dateKey: string; label: string; items: Array<{ title: string; icon: string }> };
+
+// The next 7 days (today first) of what is still pending for the viewer, plus unpaid bills falling due in that window.
+export function homeWeekStrip(calendar: { events: CalendarEvent[]; chores: Chore[] }, viewerKey: string, bills: Array<{ name: string; dueDay: number; paid: boolean }>, today: Date = new Date()): WeekStripDay[] {
+  const days: WeekStripDay[] = [];
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
+    days.push({ dateKey: dateKey(date), label: date.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }), items: [] });
+  }
+  const byKey = new Map(days.map((day) => [day.dateKey, day]));
+  for (const chore of calendar.chores) {
+    const occurrence = nextPendingChoreOccurrence(chore, viewerKey);
+    if (occurrence && isRelevantToViewer(chore.assignees, viewerKey)) byKey.get(occurrence.date)?.items.push({ title: chore.title, icon: "🧹" });
+  }
+  for (const event of calendar.events) {
+    if (ANNUAL_EVENT_TYPES.includes(event.type)) {
+      const occurrence = nextPendingAnnualOccurrence(event, viewerKey, today);
+      if (occurrence && isRelevantToViewer(event.assignees, viewerKey)) byKey.get(occurrence.date)?.items.push({ title: annualEventDisplayTitle(event), icon: event.type === "birthday" ? "🎂" : "💍" });
+    } else if (event.type === "reminder" && event.date && isReminderPendingFor(event, viewerKey) && isRelevantToViewer(event.assignees, viewerKey)) {
+      byKey.get(event.date)?.items.push({ title: event.title, icon: "⏰" });
+    }
+  }
+  for (const bill of bills) {
+    if (bill.paid) continue;
+    byKey.get(dateKey(new Date(today.getFullYear(), today.getMonth(), bill.dueDay)))?.items.push({ title: bill.name, icon: "🧾" });
+  }
+  return days;
+}

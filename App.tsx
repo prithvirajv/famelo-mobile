@@ -33,7 +33,8 @@ import {
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, Recipe, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
-import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
+import type { HomeActionItem } from "./src/calendarLogic";
+import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
@@ -42,6 +43,7 @@ import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
+import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
@@ -196,7 +198,7 @@ function AppContent() {
     : subScreen === "sharing" ? <SharingScreen state={state} access={access} onSave={save} onRefreshAccess={async () => { try { setAccess(await api.householdAccess()); } catch { /* keep the last list */ } }} onBack={() => setSubScreen(null)} />
     : subScreen === "recipes" ? <Recipes state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
-    : tab === "home" ? <Home state={state} />
+    : tab === "home" ? <Home state={state} user={user} privateData={activePrivateData} onSave={save} onSavePlans={savePlans} onGoTab={(next) => { setSubScreen(null); setTab(next); }} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "budget" ? <Budget state={state} members={(access?.members || []).filter((member) => member.status === "active").map((member) => ({ name: member.name, email: member.email }))} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "calendar" ? <Calendar state={state} access={access} user={user} onSave={save} />
     : tab === "notes" ? <Notes state={state} onSave={save} />
@@ -557,16 +559,110 @@ function Card({ children }: React.PropsWithChildren) { return <View style={style
 function Metric({ label, value, accent = colors.green }: { label: string; value: string; accent?: string }) { return <View style={[styles.metric, { borderTopColor: accent }]}><Text style={styles.metricLabel}>{label}</Text><Text style={styles.metricValue}>{value}</Text></View>; }
 function Centered({ children }: React.PropsWithChildren) { return <SafeAreaView style={styles.centered}>{children}</SafeAreaView>; }
 
-function Home({ state }: { state: HouseholdState }) {
+function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPaychecks }: { state: HouseholdState; user: User; privateData: PrivateData; onSave: (next: HouseholdState) => Promise<void>; onSavePlans: (plans: PrivateData["plans"]) => Promise<void>; onGoTab: (tab: Tab) => void; onOpenPaychecks: () => void }) {
+  const currency = state.household.currency;
   const planned = state.budget.categories.flatMap((c) => c.lines).reduce((sum, line) => sum + Number(line.planned || 0), 0);
   const spent = state.transactions.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  return <Page><Title eyebrow="HOUSEHOLD">Today</Title><View style={styles.metricGrid}>
-    <Metric label="Available" value={money(state.budget.income - planned, state.household.currency)} />
-    <Metric label="Spent" value={money(spent, state.household.currency)} accent={colors.blue} />
-    <Metric label="Upcoming" value={String(state.calendar.events.length + state.calendar.chores.length)} accent={colors.gold} />
-    <Metric label="Recipes" value={String(state.meals.recipes.length)} accent={colors.coral} />
-  </View><Card><Text style={styles.cardTitle}>Coming up</Text>{state.calendar.events.slice(0, 4).map((item) => <Row key={`${item.date}-${item.title}`} title={item.title} detail={item.date} badge={item.type} />)}</Card>
-  <Card><Text style={styles.cardTitle}>Recent transactions</Text>{state.transactions.slice(-4).reverse().map((item, index) => <Row key={`${item.date}-${item.payee}-${index}`} title={item.payee} detail={item.date} value={money(item.amount, state.household.currency)} />)}</Card></Page>;
+  const today = localDateKey();
+  const spentOf = (lineId: string) => spentByLineInMonth(state.transactions, lineId, state.budget.month);
+  const dismissed = state.budget.dismissedReminders?.[state.budget.month] || [];
+  const bills = state.budget.categories.flatMap((category) => category.lines)
+    .filter((line) => line.dueDay)
+    .map((line) => ({ name: line.name, dueDay: Number(line.dueDay), paid: spentOf(line.id) >= Number(line.planned || 0) || dismissed.includes(`bill:${line.id}`) }));
+  const actionItems = homeActionItems(state.calendar, user.email, today);
+  const weekStrip = homeWeekStrip(state.calendar, user.email, bills);
+  const planTasks = privateData.plans.tasks
+    .filter((task) => task.bucket === "daily" && dailyTaskOccursOnDate(task, today))
+    .map((task) => ({ task, done: isDailyTaskDoneOnDate(task, today) }))
+    .sort((a, b) => (a.task.startTime ? timeToMinutes(a.task.startTime) ?? Infinity : Infinity) - (b.task.startTime ? timeToMinutes(b.task.startTime) ?? Infinity : Infinity));
+  const funding = billAndGoalReminders(state, spentOf);
+  const noteReminders = homeNoteReminders(state.notes.entries, today);
+  const activity = homeRecentActivity(state);
+
+  const completeItem = async (item: HomeActionItem) => {
+    const next = structuredClone(state);
+    if (item.kind === "chore") {
+      const chore = next.calendar.chores[item.index];
+      const key = chore ? completionKeyFor(effectiveAssignees(chore), user.email) : null;
+      if (!chore || !key) return;
+      next.calendar.chores[item.index] = toggleChoreCompletion(chore, item.occurrence, key);
+    } else if (item.kind === "annual") {
+      const event = next.calendar.events[item.index];
+      if (!event || item.year === undefined) return;
+      next.calendar.events[item.index] = toggleAnnualWished(event, item.year, user.email);
+    } else {
+      const event = next.calendar.events[item.index];
+      const updated = event ? toggleReminderCompletion(event, user.email) : null;
+      if (!updated) return;
+      next.calendar.events[item.index] = updated;
+    }
+    await onSave(next);
+  };
+  const canComplete = (item: HomeActionItem): boolean => {
+    const holder = item.kind === "chore" ? state.calendar.chores[item.index] : state.calendar.events[item.index];
+    return Boolean(holder) && completionKeyFor(effectiveAssignees(holder as { assignees?: Array<{ key: string }> }), user.email) !== null;
+  };
+  const togglePlanTask = async (taskId: string) => {
+    await onSavePlans({ ...privateData.plans, tasks: privateData.plans.tasks.map((task) => task.id === taskId ? toggleDailyTaskDoneOnDate(task, today) : task) });
+  };
+
+  return <Page><Title eyebrow="HOUSEHOLD">Today</Title>
+    <Card>
+      <Text style={styles.cardTitle}>Quick add</Text>
+      <View style={styles.choiceRow}>
+        <Pressable style={styles.choice} onPress={() => onGoTab("calendar")}><Text style={styles.choiceText}>+ Chore / reminder</Text></Pressable>
+        <Pressable style={styles.choice} onPress={() => onGoTab("calendar")}><Text style={styles.choiceText}>+ Birthday</Text></Pressable>
+        <Pressable style={styles.choice} onPress={() => onGoTab("budget")}><Text style={styles.choiceText}>+ Transaction</Text></Pressable>
+        <Pressable style={styles.choice} onPress={onOpenPaychecks}><Text style={styles.choiceText}>+ Income</Text></Pressable>
+      </View>
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>This week</Text>
+      {weekStrip.map((day) => <View key={day.dateKey} style={styles.row}>
+        <Text style={[styles.rowTitle, { width: 64 }, day.dateKey === today && { color: colors.green }]}>{day.label}</Text>
+        <View style={styles.rowCopy}>{day.items.length ? day.items.map((item, index) => <Text key={index} style={styles.rowDetail}>{item.icon} {item.title}</Text>) : <Text style={styles.muted}>—</Text>}</View>
+      </View>)}
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>Action needed</Text>
+      {actionItems.length ? actionItems.map((item) => <View key={`${item.kind}-${item.index}-${item.occurrence}`} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{item.title}</Text>
+          <Text style={[styles.rowDetail, item.overdue && { color: colors.coral }]}>{item.label} · {item.overdue ? "Past due" : "Due today"} · {item.detail}</Text>
+        </View>
+        {canComplete(item) ? <Pressable style={styles.secondarySmall} onPress={() => void completeItem(item)}><Text style={styles.secondaryButtonText}>Mark done</Text></Pressable> : null}
+      </View>) : <Text style={styles.muted}>Nothing past due or due today — you're all caught up.</Text>}
+    </Card>
+    <Card>
+      <View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Today's plan</Text><Pressable onPress={() => onGoTab("plan")}><Text style={[styles.secondaryButtonText, { color: colors.green }]}>Open Plan</Text></Pressable></View>
+      <Text style={styles.muted}>Private to you.</Text>
+      {planTasks.length ? planTasks.map(({ task, done }) => <Pressable key={task.id} style={styles.checkRow} onPress={() => void togglePlanTask(task.id)} accessibilityRole="checkbox" accessibilityState={{ checked: done }}>
+        <Ionicons name={done ? "checkbox" : "square-outline"} size={22} color={done ? colors.green : colors.muted} />
+        <View style={styles.rowCopy}><Text style={[styles.rowTitle, done && { textDecorationLine: "line-through", color: colors.muted }]}>{task.title}</Text>{task.startTime ? <Text style={styles.rowDetail}>{task.startTime}</Text> : null}</View>
+      </Pressable>) : <Text style={styles.muted}>No plan tasks for today.</Text>}
+    </Card>
+    {funding.length ? <Card>
+      <Text style={styles.cardTitle}>Bills & goals</Text>
+      {funding.map((reminder) => <View key={reminder.id} style={styles.row}>
+        <View style={styles.rowCopy}><Text style={styles.rowTitle}>{reminder.title}</Text><Text style={styles.rowDetail}>{money(reminder.amount, currency)} {reminder.kind === "bill" ? "left" : "remaining"}{reminder.detail ? ` · ${reminder.detail}` : ""}</Text></View>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave(dismissBudgetReminder(state, reminder.id))}><Text style={styles.secondaryButtonText}>Done</Text></Pressable>
+      </View>)}
+    </Card> : null}
+    {noteReminders.length ? <Card>
+      <View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Note reminders due</Text><Pressable onPress={() => onGoTab("notes")}><Text style={[styles.secondaryButtonText, { color: colors.green }]}>Open Notes</Text></Pressable></View>
+      {noteReminders.map((note) => <Row key={note.id} title={note.title} detail={`${note.overdue ? "Past due" : "Due today"} · ${note.reminder.replace("T", " ")}`} />)}
+    </Card> : null}
+    {activity.length ? <Card>
+      <Text style={styles.cardTitle}>Recent activity</Text>
+      {activity.map((entry, index) => <Row key={`${entry.at}-${index}`} title={`${entry.icon} ${entry.title}`} detail={`${entry.detail} · ${String(entry.at).slice(0, 10)}`} />)}
+    </Card> : null}
+    <View style={styles.metricGrid}>
+      <Metric label="Available" value={money(state.budget.income - planned, currency)} />
+      <Metric label="Spent" value={money(spent, currency)} accent={colors.blue} />
+      <Metric label="Upcoming" value={String(state.calendar.events.length + state.calendar.chores.length)} accent={colors.gold} />
+      <Metric label="Recipes" value={String(state.meals.recipes.length)} accent={colors.coral} />
+    </View>
+    <Card><Text style={styles.cardTitle}>Recent transactions</Text>{state.transactions.slice(-4).reverse().map((item, index) => <Row key={`${item.date}-${item.payee}-${index}`} title={item.payee} detail={item.date} value={money(item.amount, currency)} />)}</Card></Page>;
 }
 
 // A row's tags as removable chips plus a "+ Add tag" box (comma-separated, duplicates ignored case-insensitively) and
