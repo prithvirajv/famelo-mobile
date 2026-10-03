@@ -204,3 +204,15 @@ test("Savings goals support auto-contribute (round-up / % of paycheck), applied 
   assertOnlyWholeStateSaves(body, "Wealth");
   assert.match(app, /withGoalAutoContributions\(withIncome, localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
 });
+
+test("Notes can attach photos via the Documents pipeline (linked by noteId) and remove them", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Notes");
+  assert.match(body, /requestDocumentUploadUrl\(\{[^}]*noteId: note\.id/, "the upload must link the document to the note");
+  assert.match(body, /confirmDocumentUpload\(documentId\)/);
+  assert.match(body, /noteLinkedImages\(documents, note\.id\)/);
+  assert.match(body, /api\.deleteDocument\(photo\.id\)/);
+  assert.match(body, /api\.documentDownloadUrl/, "thumbnails use the plain download URL, not /open, so viewing a note doesn't count as opening the file");
+  assert.doesNotMatch(body, /openDocument/);
+  assertOnlyWholeStateSaves(body, "Notes");
+});

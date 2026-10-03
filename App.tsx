@@ -38,6 +38,7 @@ import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDec
 import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
+import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
@@ -612,6 +613,51 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
   const [checklistDrafts, setChecklistDrafts] = useState<Record<string, string>>({});
   const [showArchived, setShowArchived] = useState(false);
 
+  // A note's photos are Documents rows linked to it via noteId (web does the same), so they come from
+  // the Documents API; each ready image needs its own short-lived signed URL to display.
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const [uploadingNoteId, setUploadingNoteId] = useState<string | null>(null);
+  const loadDocuments = useCallback(async () => {
+    try { setDocuments((await api.documents()).documents); }
+    catch { /* photos are optional - a failed load just means none show */ }
+  }, []);
+  useEffect(() => { void loadDocuments(); }, [loadDocuments]);
+  useEffect(() => {
+    documents.filter((item) => item.noteId && item.status === "ready" && item.contentType?.startsWith("image/") && !imageUrls[item.id]).forEach((item) => {
+      api.documentDownloadUrl(item.id).then(({ url }) => setImageUrls((prev) => ({ ...prev, [item.id]: url }))).catch(() => undefined);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents]);
+
+  const addPhoto = async (note: Note) => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert("Photo access needed", "Allow photo library access to attach photos to notes.");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.7 });
+    const asset = result.canceled ? null : result.assets?.[0];
+    if (!asset) return;
+    setUploadingNoteId(note.id);
+    try {
+      const contentType = imageContentType(asset.mimeType);
+      const { documentId, uploadUrl } = await api.requestDocumentUploadUrl({ name: photoFileName(asset.fileName, asset.mimeType), contentType, sizeBytes: asset.fileSize || 0, folderId: null, noteId: note.id });
+      // In MEMORY_DB (test/preview) mode the server returns a placeholder URL instead of a signed one.
+      if (/^https?:\/\//.test(uploadUrl)) await FileSystem.uploadAsync(uploadUrl, asset.uri, { httpMethod: "PUT", headers: { "Content-Type": contentType } });
+      await api.confirmDocumentUpload(documentId);
+      await loadDocuments();
+    } catch (cause) {
+      Alert.alert("Couldn't attach that photo", cause instanceof Error ? cause.message : "Unknown error");
+    } finally {
+      setUploadingNoteId(null);
+    }
+  };
+
+  const removePhoto = (photo: Document) => {
+    Alert.alert("Remove this photo from the note?", "This cannot be undone.", [{ text: "Cancel" }, { text: "Remove", style: "destructive", onPress: async () => {
+      try { await api.deleteDocument(photo.id); await loadDocuments(); }
+      catch (cause) { Alert.alert("Couldn't remove the photo", cause instanceof Error ? cause.message : "Unknown error"); }
+    } }]);
+  };
+
   const notes = sortNotes(state.notes.entries.filter((note) => !note.trashed && !note.archived));
   const archivedNotes = sortNotes(state.notes.entries.filter((note) => !note.trashed && note.archived));
 
@@ -672,11 +718,15 @@ function Notes({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     return <View key={note.id} style={[styles.note, { backgroundColor: note.color || colors.surface }]}>
       <View style={styles.noteHeader}>
         <Pressable style={styles.rowCopy} onPress={() => startEdit(note)}><Text style={styles.noteTitle}>{note.title || "Untitled note"}</Text></Pressable>
+        <Pressable disabled={uploadingNoteId === note.id} onPress={() => void addPhoto(note)} accessibilityLabel="Add a photo to this note">{uploadingNoteId === note.id ? <ActivityIndicator size="small" color={colors.green} /> : <Ionicons name="camera-outline" size={18} color={colors.muted} />}</Pressable>
         <Pressable onPress={() => togglePin(note)}><Ionicons name={note.pinned ? "pin" : "pin-outline"} size={18} color={note.pinned ? colors.gold : colors.muted} /></Pressable>
         <Pressable onPress={() => toggleArchive(note)}><Ionicons name={note.archived ? "arrow-undo-outline" : "archive-outline"} size={18} color={colors.muted} /></Pressable>
         <Pressable onPress={() => deleteNote(note)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
       </View>
       {note.body ? <Text style={styles.noteBody}>{note.body}</Text> : null}
+      {noteLinkedImages(documents, note.id).length ? <ScrollView horizontal style={styles.journalPhotoRow}>{noteLinkedImages(documents, note.id).map((photo) => <Pressable key={photo.id} onPress={() => removePhoto(photo)} accessibilityLabel={`Remove photo ${photo.name}`}>
+        {imageUrls[photo.id] ? <Image source={{ uri: imageUrls[photo.id] }} style={styles.journalPhoto} /> : <View style={[styles.journalPhoto, { backgroundColor: colors.panel }]} />}
+      </Pressable>)}</ScrollView> : null}
       {note.checklist.map((item) => <Pressable key={item.id} style={[styles.checkRow, item.parentId && styles.checkRowChild]} onPress={() => toggle(note, item.id)}><Ionicons name={item.done ? "checkbox" : "square-outline"} size={24} color={item.done ? colors.green : colors.muted} /><Text style={[styles.checkText, item.done && styles.done]}>{item.text}</Text></Pressable>)}
       <View style={styles.actionRow}>
         <TextInput style={[styles.input, { flex: 1 }]} value={checklistDrafts[note.id] || ""} onChangeText={(value) => setChecklistDrafts((prev) => ({ ...prev, [note.id]: value }))} placeholder="Add checklist item" onSubmitEditing={() => addChecklistItem(note)} />
