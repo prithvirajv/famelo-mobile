@@ -365,3 +365,11 @@ test("Bank stream has bulk set-account, clear-suggested-categories and sorting, 
   for (const name of ["setAccountForUnlinkedDrafts", "clearHistorySuggestions", "sortDrafts"]) assert.match(body, new RegExp(name + "\\("));
   assertOnlyWholeStateSaves(body, "BankStream");
 });
+
+test("Budget's ledger can be sorted and bulk-categorized (split rows are skipped, not overwritten)", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Budget");
+  assert.match(body, /sortLedgerEntries\(/);
+  assert.match(body, /applyLineToTransactions\(state, selectedTx, bulkLineId\)/);
+  assert.match(body, /skippedSplit/);
+});

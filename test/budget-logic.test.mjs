@@ -192,3 +192,38 @@ test("setTransactionTags replaces one transaction's tags without touching the ot
   assert.equal(state.transactions[1].tags, undefined);
   assert.equal(setTransactionTags(state, 9, ["z"]), state);
 });
+
+import { applyLineToTransactions, sortLedgerEntries } from "../src/budgetLogic.ts";
+
+test("applyLineToTransactions categorizes the selected rows with a name snapshot, skips (and counts) split ones, and never mutates the input", () => {
+  const state = { ...baseState(), transactions: [
+    { date: "2026-07-01", payee: "A", lineId: "", amount: 5 }, { date: "2026-07-02", payee: "B", lineId: "rent", amount: 6, categoryName: "Home", subcategoryName: "Rent" },
+    { date: "2026-07-03", payee: "S", lineId: "", amount: 10, splits: [{ lineId: "rent", amount: 4 }, { lineId: "power", amount: 6 }] }, { date: "2026-07-04", payee: "Z", lineId: "", amount: 1 }
+  ] };
+  const result = applyLineToTransactions(state, [0, 1, 2], "groceries");
+  assert.deepEqual([result.applied, result.skippedSplit], [2, 1]);
+  assert.deepEqual(result.state.transactions.map((t) => t.lineId), ["groceries", "groceries", "", ""]);
+  assert.deepEqual([result.state.transactions[0].categoryName, result.state.transactions[0].subcategoryName], ["Food", "Groceries"]);
+  assert.equal(result.state.transactions[2].splits.length, 2, "a split keeps its splits and gets no category of its own");
+  assert.equal(result.state.transactions[3].lineId, "", "unselected rows are untouched");
+  assert.equal(state.transactions[0].lineId, "");
+  assert.equal(applyLineToTransactions(state, [0], "").applied, 0);
+  assert.equal(applyLineToTransactions(state, [2], "groceries").state, state);
+});
+
+test("sortLedgerEntries sorts by date, amount, payee, category or account in either direction and keeps ties in order", () => {
+  const entries = [
+    { index: 0, item: { date: "2026-07-02", payee: "banana", amount: 5, lineId: "rent", accountId: "b" } },
+    { index: 1, item: { date: "2026-07-03", payee: "Apple", amount: -9, lineId: "groceries", accountId: "a" } },
+    { index: 2, item: { date: "2026-07-01", payee: "cherry", amount: 5, lineId: "power", accountId: "" } }
+  ];
+  const labels = { category: (t) => ({ rent: "Home - Rent", groceries: "Food - Groceries", power: "Home - Power" })[t.lineId] || "", account: (t) => ({ a: "Alpha", b: "Beta" })[t.accountId] || "" };
+  const order = (field, direction) => sortLedgerEntries(entries, field, direction, labels).map((e) => e.index);
+  assert.deepEqual(order("date", "desc"), [1, 0, 2]);
+  assert.deepEqual(order("amount", "asc"), [1, 0, 2]);
+  assert.deepEqual(order("amount", "desc"), [0, 2, 1]);
+  assert.deepEqual(order("payee", "asc"), [1, 0, 2]);
+  assert.deepEqual(order("category", "asc"), [1, 2, 0]);
+  assert.deepEqual(order("account", "asc"), [2, 1, 0]);
+  assert.deepEqual(entries.map((e) => e.index), [0, 1, 2]);
+});

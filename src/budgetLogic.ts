@@ -242,3 +242,48 @@ export function removeSplit(state: HouseholdState, index: number): HouseholdStat
     return { ...rest, lineId, ...lineSnapshot(state, lineId) };
   });
 }
+
+// ---- Bulk category and sorting for the ledger --------------------------------------------------------------------------
+
+export type BulkLineResult = { state: HouseholdState; applied: number; skippedSplit: number };
+
+// Puts the chosen category on every selected transaction, with a fresh name snapshot. A SPLIT transaction has no single
+// category (its splits carry them), so it is skipped and counted rather than given a category that would contradict its
+// splits and double-count it in every total (web's bulk apply writes the category over a split's, leaving both set).
+export function applyLineToTransactions(state: HouseholdState, indices: number[], lineId: string): BulkLineResult {
+  if (!lineId) return { state, applied: 0, skippedSplit: 0 };
+  const chosen = new Set(indices);
+  const snapshot = lineSnapshot(state, lineId);
+  let applied = 0;
+  let skippedSplit = 0;
+  const transactions = state.transactions.map((transaction, index) => {
+    if (!chosen.has(index)) return transaction;
+    if (transaction.splits?.length) { skippedSplit += 1; return transaction; }
+    applied += 1;
+    return { ...transaction, lineId, ...snapshot };
+  });
+  return { state: applied ? { ...state, transactions } : state, applied, skippedSplit };
+}
+
+export type LedgerSortField = "date" | "amount" | "payee" | "category" | "account";
+export type LedgerEntry = { item: Transaction; index: number };
+
+// Sorts ledger rows by date, amount, payee, category name or account name (either direction); ties keep their order so
+// re-sorting never shuffles equal rows. `index` is each transaction's position in the real list, kept for editing.
+export function sortLedgerEntries(entries: LedgerEntry[], field: LedgerSortField, direction: "asc" | "desc", labels: { category: (transaction: Transaction) => string; account: (transaction: Transaction) => string }): LedgerEntry[] {
+  const sign = direction === "asc" ? 1 : -1;
+  const value = (entry: LedgerEntry): string | number => {
+    if (field === "amount") return Number(entry.item.amount || 0);
+    if (field === "date") return entry.item.date || "";
+    if (field === "category") return labels.category(entry.item).toLowerCase();
+    if (field === "account") return labels.account(entry.item).toLowerCase();
+    return String(entry.item.payee || "").toLowerCase();
+  };
+  return entries.map((entry, position) => ({ entry, position })).sort((a, b) => {
+    const left = value(a.entry);
+    const right = value(b.entry);
+    if (left < right) return -sign;
+    if (left > right) return sign;
+    return a.position - b.position;
+  }).map((wrapped) => wrapped.entry);
+}

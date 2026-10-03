@@ -45,7 +45,8 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, ParsedBankRow } from "./src/bankStreamLogic";
-import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "./src/budgetLogic";
+import type { LedgerSortField } from "./src/budgetLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -294,6 +295,10 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const [showAllTx, setShowAllTx] = useState(false);
   // Split editor: which ledger transaction is being split across categories, and its working rows (amounts kept as
   // text so typing "12." doesn't get rewritten under the user).
+  const [ledgerSort, setLedgerSort] = useState<{ field: LedgerSortField; direction: "asc" | "desc" }>({ field: "date", direction: "desc" });
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedTx, setSelectedTx] = useState<number[]>([]);
+  const [bulkLineId, setBulkLineId] = useState("");
   const [splitIndex, setSplitIndex] = useState<number | null>(null);
   const [splitRows, setSplitRows] = useState<Array<{ lineId: string; amount: string }>>([]);
 
@@ -390,7 +395,20 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     } }]);
   };
 
-  const orderedTransactions = state.transactions.map((item, index) => ({ item, index })).sort((a, b) => b.item.date.localeCompare(a.item.date));
+  const orderedTransactions = sortLedgerEntries(state.transactions.map((item, index) => ({ item, index })), ledgerSort.field, ledgerSort.direction, {
+    category: (transaction) => transactionAssignmentLabel(state, transaction),
+    account: (transaction) => (state.accounts || []).find((account) => account.id === transaction.accountId)?.name || ""
+  });
+  const toggleLedgerSort = (field: LedgerSortField) => setLedgerSort((prev) => prev.field === field ? { field, direction: prev.direction === "asc" ? "desc" : "asc" } : { field, direction: field === "date" ? "desc" : "asc" });
+  const toggleSelected = (index: number) => setSelectedTx((prev) => prev.includes(index) ? prev.filter((value) => value !== index) : [...prev, index]);
+  const endSelect = () => { setSelectMode(false); setSelectedTx([]); setBulkLineId(""); };
+  const applyBulkLine = async () => {
+    if (!bulkLineId || !selectedTx.length) return;
+    const result = applyLineToTransactions(state, selectedTx, bulkLineId);
+    if (result.applied) await onSave(result.state);
+    endSelect();
+    if (result.skippedSplit) Alert.alert("Some rows were skipped", `${result.skippedSplit} split transaction${result.skippedSplit === 1 ? " was" : "s were"} left alone - a split has its own categories (edit it with the scissors button).`);
+  };
   const visibleTransactions = showAllTx ? orderedTransactions : orderedTransactions.slice(0, 15);
   const accountName = (id?: string) => (state.accounts || []).find((account) => account.id === id)?.name;
 
@@ -505,9 +523,30 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     </Card>
 
     <Card>
-      <Text style={styles.cardTitle}>Transactions</Text>
+      <View style={styles.iouPersonHead}>
+        <Text style={styles.cardTitle}>Transactions</Text>
+        {orderedTransactions.length ? <Pressable onPress={() => (selectMode ? endSelect() : setSelectMode(true))}><Text style={[styles.secondaryButtonText, { color: colors.green }]}>{selectMode ? "Done" : "Select"}</Text></Pressable> : null}
+      </View>
+      {orderedTransactions.length > 1 ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        {(["date", "amount", "payee", "category", "account"] as LedgerSortField[]).map((field) => <Pressable key={field} style={[styles.choice, ledgerSort.field === field && styles.choiceActive]} onPress={() => toggleLedgerSort(field)}>
+          <Text style={[styles.choiceText, ledgerSort.field === field && styles.choiceTextActive]}>{field.charAt(0).toUpperCase() + field.slice(1)}{ledgerSort.field === field ? (ledgerSort.direction === "asc" ? " ▲" : " ▼") : ""}</Text>
+        </Pressable>)}
+      </ScrollView> : null}
+      {selectMode ? <View style={styles.planTaskBlock}>
+        <Text style={styles.rowTitle}>{selectedTx.length} selected</Text>
+        <View style={styles.actionRow}>
+          <Pressable style={styles.secondarySmall} onPress={() => setSelectedTx(visibleTransactions.map(({ index }) => index))}><Text style={styles.secondaryButtonText}>Select all shown</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => setSelectedTx([])}><Text style={styles.secondaryButtonText}>Clear</Text></Pressable>
+        </View>
+        {selectedTx.length ? <>
+          <Text style={styles.label}>Apply this category to the selected</Text>
+          <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, bulkLineId === line.id && styles.choiceActive]} onPress={() => setBulkLineId(line.id)}><Text style={[styles.choiceText, bulkLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+          <Pressable style={[styles.primaryButton, !bulkLineId && { opacity: 0.5 }]} disabled={!bulkLineId} onPress={() => void applyBulkLine()}><Text style={styles.primaryButtonText}>Apply to {selectedTx.length}</Text></Pressable>
+        </> : null}
+      </View> : null}
       {orderedTransactions.length ? visibleTransactions.map(({ item, index }) => <View key={`${index}-${item.date}-${item.payee}`}><View style={styles.row}>
-        <Pressable style={styles.rowCopy} onPress={() => beginTxEdit(index)}>
+        {selectMode ? <Pressable onPress={() => toggleSelected(index)} accessibilityLabel={`Select ${item.payee}`}><Ionicons name={selectedTx.includes(index) ? "checkbox" : "square-outline"} size={24} color={selectedTx.includes(index) ? colors.green : colors.muted} /></Pressable> : null}
+        <Pressable style={styles.rowCopy} onPress={() => (selectMode ? toggleSelected(index) : beginTxEdit(index))}>
           <Text style={styles.rowTitle}>{item.payee}</Text>
           <Text style={styles.rowDetail}>{[item.date, transactionAssignmentLabel(state, item), accountName(item.accountId)].filter(Boolean).join(" · ")}</Text>
         </Pressable>
