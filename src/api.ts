@@ -99,5 +99,6 @@ export const api = {
     request<{ invitation?: { name: string; email: string; role: string; inviteCode?: string; householdName?: string }; invitations?: Array<{ name: string; email: string; role: string; inviteCode?: string; householdName?: string }>; email: { queued?: boolean; preview?: boolean } }>("/api/households/invitations", { method: "POST", body: JSON.stringify(body) }),
   setMemberAccessLevel: (email: string, accessLevel: "edit" | "view") => request<{ ok?: boolean }>("/api/households/access", { method: "PATCH", body: JSON.stringify({ email, accessLevel }) }),
   revokeMemberAccess: (email: string) => request<{ ok?: boolean; email: { queued?: boolean; preview?: boolean } }>("/api/households/access", { method: "DELETE", body: JSON.stringify({ email }) }),
+  copyDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/copy`, { method: "POST" }),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

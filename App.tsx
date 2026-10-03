@@ -2258,12 +2258,14 @@ function OptionList({ title, options, onClose }: { title: string; options: Picke
   </View>;
 }
 
-function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, viewerName, onDownload, onDelete, onLinkNote, onMove, onLinkWealth, onChangeExpiry }: {
+function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities, viewerName, onDownload, onDelete, onLinkNote, onMove, onLinkWealth, onChangeExpiry, onRename, onCopy }: {
   document: Document; notes: Note[]; folders: DocumentsData["folders"]; wealthAssets: WealthAsset[]; wealthLiabilities: WealthLiability[]; viewerName: string;
   onDownload: () => void; onDelete: () => void; onLinkNote: (noteId: string | null) => void; onMove: (folderId: string | null) => void;
-  onLinkWealth: (wealthItemType: WealthItemType | null, wealthItemId: string | null) => void; onChangeExpiry: (expiryDate: string | null) => void
+  onLinkWealth: (wealthItemType: WealthItemType | null, wealthItemId: string | null) => void; onChangeExpiry: (expiryDate: string | null) => void; onRename: (name: string) => void; onCopy: () => void
 }) {
   const [showNotePicker, setShowNotePicker] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(document.name);
   const [expiryDraft, setExpiryDraft] = useState(document.expiryDate || "");
   const linkedNote = document.noteId ? notes.find((note) => note.id === document.noteId) : null;
   const linkedWealthItem = document.wealthItemId
@@ -2306,6 +2308,14 @@ function DocumentRow({ document, notes, folders, wealthAssets, wealthLiabilities
       <Pressable onPress={() => setPicker(picker === "wealth" ? null : "wealth")}><Ionicons name="cash-outline" size={20} color={linkedWealthItem ? colors.green : colors.muted} /></Pressable>
       <Pressable onPress={onDelete}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>
+    <View style={styles.actionRow}>
+      <Pressable style={styles.secondarySmall} onPress={() => { setNameDraft(document.name); setRenaming((prev) => !prev); }}><Text style={styles.secondaryButtonText}>Rename</Text></Pressable>
+      <Pressable style={styles.secondarySmall} onPress={onCopy}><Text style={styles.secondaryButtonText}>Make a copy</Text></Pressable>
+    </View>
+    {renaming ? <View style={styles.actionRow}>
+      <TextInput style={[styles.input, { flex: 1 }]} value={nameDraft} onChangeText={setNameDraft} autoFocus />
+      <Pressable style={styles.secondarySmall} onPress={() => { const name = nameDraft.trim(); setRenaming(false); if (name && name !== document.name) onRename(name); }}><Text style={styles.secondaryButtonText}>Save</Text></Pressable>
+    </View> : null}
     {showNotePicker ? <View style={styles.subtaskList}>
       <Pressable style={styles.checkRow} onPress={() => { onLinkNote(null); setShowNotePicker(false); }}>
         <Ionicons name={!document.noteId ? "radio-button-on" : "radio-button-off"} size={18} color={colors.muted} />
@@ -2428,6 +2438,16 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }:
     } catch (cause) { showError("Could not open document", cause); }
   };
 
+  const renameDocument = async (documentId: string, name: string) => {
+    try { await api.updateDocument(documentId, { name }); await load(); }
+    catch (cause) { showError("Could not rename document", cause); }
+  };
+
+  const copyDocument = async (documentId: string) => {
+    try { await api.copyDocument(documentId); await load(); }
+    catch (cause) { showError("Could not copy document", cause); }
+  };
+
   const changeExpiry = async (documentId: string, expiryDate: string | null) => {
     try { await api.updateDocument(documentId, { expiryDate }); await load(); }
     catch (cause) { showError("Could not update expiry date", cause); }
@@ -2519,6 +2539,8 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }:
           onMove={(folderId) => void moveDocument(document.id, folderId)}
           onLinkWealth={(wealthItemType, wealthItemId) => void linkWealthItem(document.id, wealthItemType, wealthItemId)}
           onChangeExpiry={(expiryDate) => void changeExpiry(document.id, expiryDate)}
+          onRename={(name) => void renameDocument(document.id, name)}
+          onCopy={() => void copyDocument(document.id)}
         />)
       : <Text style={styles.muted}>No documents in this folder yet.</Text>}</Card>
   </Page>;

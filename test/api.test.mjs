@@ -559,3 +559,12 @@ test("Paychecks can edit an existing paycheck, assign bills and move individual 
   assert.doesNotMatch(paychecks, /Alert\.alert\([^)]*accounts\.map/);
   assertOnlyWholeStateSaves(paychecks, "Paychecks");
 });
+
+test("Documents can be renamed and copied from the phone through the documents API", () => {
+  const apiSource = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(apiSource, /copyDocument:[^\n]*\/copy/);
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const screen = extractFunctionSource(app, "DocumentsScreen");
+  assert.match(screen, /api\.updateDocument\(documentId, \{ name \}\)/);
+  assert.match(screen, /api\.copyDocument\(documentId\)/);
+});
