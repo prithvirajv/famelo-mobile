@@ -277,7 +277,7 @@ test("Reports shows a 'Where your income went' breakdown driven by paycheck inco
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const body = extractFunctionSource(app, "Reports");
   assert.match(body, /paycheckIncomeForMonth\(state, monthKey\)/, "income comes from paychecks like web, not from negative transactions");
-  assert.match(body, /flowSegments\(categories, totalIncome, totalExpenses, FLOW_PALETTE\)/);
+  assert.match(body, /flowSegments\(categories, totalIncome, totalExpenses, theme\.palette, theme\.accent\)/);
   assert.match(body, /resolveFlowSelection\(flow, flowSelectedKey\)/);
   assert.match(body, /transactionsForLines\(/);
   assert.match(body, /transactionAmountForLines\(/, "split transactions show only their share so the list adds up to the segment");
@@ -418,4 +418,15 @@ test("A bank-stream row or ledger transaction can be split with friends: your sh
   assert.match(app, /splitRecordWithFriends\(state, source, shares, options, uniqueId\)/);
   assert.match(extractFunctionSource(app, "BankStream"), /applySplitWithFriends\(state, onSave, \{ type: "draft", id \}/);
   assert.match(extractFunctionSource(app, "Budget"), /applySplitWithFriends\(state, onSave, \{ type: "ledger", index \}/);
+});
+
+test("Reports uses what was actually planned in each month (budget history), offers year-over-year comparison and color themes", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Reports");
+  assert.match(body, /budgetVsActualByCategory\(state\.budget, state\.budgetHistory \|\| \[\], state\.transactions, monthKeys\)/);
+  assert.match(body, /priorYearMonthKeys\(monthKeys\)/);
+  assert.match(body, /yoyDelta\(/);
+  assert.match(body, /REPORT_THEMES/);
+  const logic = fs.readFileSync(new URL("../src/reportsLogic.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(logic, /constant approximation/, "planned is no longer a live-budget approximation");
 });

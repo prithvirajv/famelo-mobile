@@ -27,7 +27,7 @@ import {
 import type { BillSplitParticipant, NetBalanceGroup } from "./src/iouLogic";
 import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth,
-  flowSegments, resolveFlowSelection, transactionAmountForLines, transactionsForLines
+  flowSegments, resolveFlowSelection, transactionAmountForLines, transactionsForLines, priorYearMonthKeys, yoyDelta, yoyLabel, REPORT_THEMES
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
@@ -2442,6 +2442,8 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   const [rangeEnd, setRangeEnd] = useState(today());
   const [scopeYear, setScopeYear] = useState(String(new Date(currentMonth + "-01").getFullYear()));
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [compareLastYear, setCompareLastYear] = useState(false);
+  const [themeKey, setThemeKey] = useState<keyof typeof REPORT_THEMES>("fresh");
   const [flowSelectedKey, setFlowSelectedKey] = useState<string | null>(null);
   const [showAllFlowTransactions, setShowAllFlowTransactions] = useState(false);
 
@@ -2453,7 +2455,7 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   const monthKeys = monthKeysForScope(scope, currentMonth);
 
   const categories = reportCategoriesForScope(state.budget.categories, state.transactions, monthKeys);
-  const budgetVsActual = budgetVsActualByCategory(state.budget.categories, state.transactions, monthKeys);
+  const budgetVsActual = budgetVsActualByCategory(state.budget, state.budgetHistory || [], state.transactions, monthKeys);
   const budgetVsActualByCategoryTotals = new Map<string, { planned: number; actual: number; variance: number }>();
   budgetVsActual.forEach((row) => {
     const existing = budgetVsActualByCategoryTotals.get(row.category) || { planned: 0, actual: 0, variance: 0 };
@@ -2464,7 +2466,15 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   const maxCashFlow = Math.max(...cashFlow.map((month) => Math.max(month.income, month.expenses)), 1);
   const totalIncome = cashFlow.reduce((sum, month) => sum + month.income, 0);
   const totalExpenses = cashFlow.reduce((sum, month) => sum + month.expenses, 0);
-  const flow = flowSegments(categories, totalIncome, totalExpenses, FLOW_PALETTE);
+  const theme = REPORT_THEMES[themeKey] || REPORT_THEMES.fresh!;
+  const flow = flowSegments(categories, totalIncome, totalExpenses, theme.palette, theme.accent);
+  // Same months one year earlier: income and spending from paychecks/transactions, net worth at the period's end.
+  const priorKeys = priorYearMonthKeys(monthKeys);
+  const priorCashFlow = compareLastYear ? cashFlowByMonth(state.transactions, priorKeys, (monthKey) => paycheckIncomeForMonth(state, monthKey)) : [];
+  const priorIncome = priorCashFlow.reduce((sum, month) => sum + month.income, 0);
+  const priorExpenses = priorCashFlow.reduce((sum, month) => sum + month.expenses, 0);
+  const netWorthNow = compareLastYear && monthKeys.length ? computeNetWorthTrend(state, monthKeys).slice(-1)[0]?.value ?? 0 : 0;
+  const netWorthPrior = compareLastYear && priorKeys.length ? computeNetWorthTrend(state, priorKeys).slice(-1)[0]?.value ?? 0 : 0;
   const flowTotal = Math.max(totalIncome, totalExpenses, 1);
   const flowSelection = flowSelectedKey ? resolveFlowSelection(flow, flowSelectedKey) : null;
   const flowTransactions = flowSelection ? transactionsForLines(state.transactions, flowSelection.lineIds, monthKeys) : [];
@@ -2521,6 +2531,19 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
     </Card>
 
     <Card>
+      <Text style={styles.cardTitle}>Compare &amp; style</Text>
+      <View style={styles.choiceRow}>
+        <Pressable style={[styles.choice, compareLastYear && styles.choiceActive]} onPress={() => setCompareLastYear((prev) => !prev)}><Text style={[styles.choiceText, compareLastYear && styles.choiceTextActive]}>{compareLastYear ? "✓ Comparing to last year" : "Compare to last year"}</Text></Pressable>
+      </View>
+      <View style={styles.choiceRow}>{Object.entries(REPORT_THEMES).map(([key, option]) => <Pressable key={key} style={[styles.choice, themeKey === key && styles.choiceActive]} onPress={() => setThemeKey(key as keyof typeof REPORT_THEMES)}><Text style={[styles.choiceText, themeKey === key && styles.choiceTextActive]}>{option.label}</Text></Pressable>)}</View>
+      {compareLastYear ? <>
+        <Text style={styles.rowDetail}>Income {yoyLabel(yoyDelta(totalIncome, priorIncome)) || "- no figures a year ago"}</Text>
+        <Text style={styles.rowDetail}>Spending {yoyLabel(yoyDelta(totalExpenses, priorExpenses)) || "- no figures a year ago"}</Text>
+        <Text style={styles.rowDetail}>Net worth {yoyLabel(yoyDelta(netWorthNow, netWorthPrior)) || "- no figures a year ago"}</Text>
+      </> : null}
+    </Card>
+
+    <Card>
       <Text style={styles.cardTitle}>Cash flow</Text>
       {cashFlow.length ? <View style={styles.cashFlowChart}>
         {cashFlow.map((month) => <View key={month.month} style={styles.cashFlowColumn}>
@@ -2570,9 +2593,6 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
     </Card>
   </Page>;
 }
-
-// Same colors as web's default ("fresh") report theme, so a category reads the same on both apps.
-const FLOW_PALETTE = ["#13936d", "#3569d4", "#c9891e", "#e05252", "#7c5cff"];
 
 const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
 const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];

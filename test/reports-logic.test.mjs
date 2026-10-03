@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { flowSegments, resolveFlowSelection, transactionAmountForLines, transactionHasLine, transactionsForLines,
   monthKeysInRange, monthKeysForScope, spentByLineInMonth, reportCategoriesForScope,
-  budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth
+  budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, plannedForLineInMonth, priorYearMonthKeys, yoyDelta, yoyLabel, REPORT_THEMES
 } from "../src/reportsLogic.ts";
 
 test("monthKeysInRange returns a single key when start and end fall in the same month", () => {
@@ -66,7 +66,7 @@ test("budgetVsActualByCategory omits rows where both planned and actual are zero
     { name: "Empty", color: "#222", lines: [{ id: "unused", name: "Unused", planned: 0 }] }
   ];
   const transactions = [{ date: "2026-05-10", payee: "A", lineId: "groceries", amount: 40 }];
-  const rows = budgetVsActualByCategory(categories, transactions, ["2026-05"]);
+  const rows = budgetVsActualByCategory({ month: "2026-05", categories }, [], transactions, ["2026-05"]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].category, "Food");
   assert.equal(rows[0].planned, 100);
@@ -166,4 +166,39 @@ test("spentByLineInMonth credits each split its own line, counts a plain transac
   assert.equal(spentByLineInMonth(transactions, "house", "2026-07"), 40);
   assert.equal(spentByLineInMonth(transactions, "other", "2026-07"), 0);
   assert.equal(spentByLineInMonth(transactions, "food", "2026-08"), 999);
+});
+
+const hist = (month, planned) => ({ month, income: 0, categories: [{ name: "Food", color: "#1", lines: [{ id: "g", name: "G", planned }] }] });
+const live = { month: "2026-07", categories: [{ name: "Food", color: "#1", lines: [{ id: "g", name: "G", planned: 500 }] }] };
+
+test("plannedForLineInMonth uses the live budget for the viewed month, a month's own snapshot, else the nearest earlier snapshot, else 0", () => {
+  const history = [hist("2026-03", 300), hist("2026-05", 400)];
+  assert.equal(plannedForLineInMonth(live, history, "g", "2026-07"), 500);
+  assert.equal(plannedForLineInMonth(live, history, "g", "2026-05"), 400);
+  assert.equal(plannedForLineInMonth(live, history, "g", "2026-04"), 300);
+  assert.equal(plannedForLineInMonth(live, history, "g", "2026-06"), 400);
+  assert.equal(plannedForLineInMonth(live, history, "g", "2026-01"), 0);
+  assert.equal(plannedForLineInMonth(live, history, "missing", "2026-05"), 0);
+  assert.equal(plannedForLineInMonth(live, [], "g", "2026-05"), 0);
+});
+
+test("budgetVsActualByCategory reports what was planned in each past month, not today's amounts", () => {
+  const history = [hist("2026-05", 400), hist("2026-06", 450)];
+  const transactions = [{ date: "2026-05-10", payee: "A", lineId: "g", amount: 380 }, { date: "2026-06-10", payee: "B", lineId: "g", amount: 500 }];
+  const rows = budgetVsActualByCategory(live, history, transactions, ["2026-05", "2026-06", "2026-07"]);
+  assert.deepEqual(rows.map((r) => [r.month, r.planned, r.actual, r.variance, r.variancePercent]), [["2026-05", 400, 380, 20, 5], ["2026-06", 450, 500, -50, -11], ["2026-07", 500, 0, 500, 100]]);
+});
+
+test("year over year: prior-year months, percent change against the size of the previous figure, and null when there is nothing to compare", () => {
+  assert.deepEqual(priorYearMonthKeys(["2026-01", "2026-12"]), ["2025-01", "2025-12"]);
+  assert.equal(yoyDelta(120, 100), 20);
+  assert.equal(yoyDelta(80, 100), -20);
+  assert.equal(yoyDelta(-50, -100), 50, "a loss shrinking reads as up");
+  assert.equal(yoyDelta(10, 0), null);
+  assert.equal(yoyLabel(12), "▲ 12% vs last year");
+  assert.equal(yoyLabel(-7), "▼ 7% vs last year");
+  assert.equal(yoyLabel(0), "▲ 0% vs last year");
+  assert.equal(yoyLabel(null), "");
+  assert.deepEqual(Object.keys(REPORT_THEMES), ["fresh", "sunset", "ocean"]);
+  assert.ok(Object.values(REPORT_THEMES).every((theme) => theme.palette.length === 5));
 });

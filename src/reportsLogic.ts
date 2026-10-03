@@ -84,18 +84,32 @@ export function reportCategoriesForScope(categories: BudgetCategory[], transacti
 
 export type BudgetVsActualRow = { category: string; month: string; planned: number; actual: number; variance: number; variancePercent: number | null };
 
-// Simplification vs. web: web tracks a per-month budgetHistory snapshot so
-// "planned" reflects what was actually planned back in that historical
-// month; mobile's Budget screen is read-only/single-month with no history
-// concept at all, so "planned" here is the category's current live planned
-// total applied uniformly across every month in the scope. "actual" is
-// still a real per-month sum of transactions, so month-to-month variance is
-// meaningful even though the "planned" side is a constant approximation.
-export function budgetVsActualByCategory(categories: BudgetCategory[], transactions: Transaction[], monthKeys: string[]): BudgetVsActualRow[] {
+type BudgetView = { month: string; categories: BudgetCategory[] };
+
+function plannedByLine(snapshot: { categories: BudgetCategory[] } | undefined): Map<string, number> {
+  const planned = new Map<string, number>();
+  (snapshot?.categories || []).forEach((category) => category.lines.forEach((line) => planned.set(line.id, Number(line.planned || 0))));
+  return planned;
+}
+
+// What a line was planned for in a given month, matching the app's own carry-forward rule: the live budget for the month being
+// viewed; otherwise that month's saved snapshot if one exists; otherwise the nearest EARLIER snapshot; otherwise 0. So a past
+// month shows what was actually planned back then, not today's amounts (planned figures only differ per month once the budget has
+// been switched between months).
+export function plannedForLineInMonth(budget: BudgetView, history: Array<{ month: string; categories: BudgetCategory[] }>, lineId: string, monthKey: string): number {
+  if (monthKey === budget.month) return Number(budget.categories.flatMap((category) => category.lines).find((line) => line.id === lineId)?.planned || 0);
+  const exact = history.find((entry) => entry.month === monthKey);
+  if (exact) return plannedByLine(exact).get(lineId) || 0;
+  const prior = history.filter((entry) => entry.month < monthKey).sort((a, b) => b.month.localeCompare(a.month))[0];
+  return prior ? plannedByLine(prior).get(lineId) || 0 : 0;
+}
+
+// Planned vs actual spend per category per month across whatever scope was picked. Rows where both are zero are dropped.
+export function budgetVsActualByCategory(budget: BudgetView, history: Array<{ month: string; categories: BudgetCategory[] }>, transactions: Transaction[], monthKeys: string[]): BudgetVsActualRow[] {
   const rows: BudgetVsActualRow[] = [];
   monthKeys.forEach((monthKey) => {
-    categories.forEach((category) => {
-      const planned = category.lines.reduce((sum, line) => sum + Number(line.planned || 0), 0);
+    budget.categories.forEach((category) => {
+      const planned = category.lines.reduce((sum, line) => sum + plannedForLineInMonth(budget, history, line.id, monthKey), 0);
       const actual = category.lines.reduce((sum, line) => sum + spentByLineInMonth(transactions, line.id, monthKey), 0);
       const variance = planned - actual;
       rows.push({ category: category.name, month: monthKey, planned, actual, variance, variancePercent: planned ? Math.round((variance / planned) * 100) : null });
@@ -103,6 +117,34 @@ export function budgetVsActualByCategory(categories: BudgetCategory[], transacti
   });
   return rows.filter((row) => row.planned !== 0 || row.actual !== 0);
 }
+
+// ---- Year over year -----------------------------------------------------------------------------------------------------
+// The same months one year earlier, for "compare to last year".
+export function priorYearMonthKeys(monthKeys: string[]): string[] {
+  return monthKeys.map((key) => {
+    const [year, month] = key.split("-");
+    return `${Number(year) - 1}-${month}`;
+  });
+}
+
+// Percent change from previous to current, or null when there is nothing to compare against (no prior figure) rather than a
+// misleading 0% / infinity badge. Measured against the size of the previous figure, so a loss moving toward zero reads as up.
+export function yoyDelta(current: number, previous: number): number | null {
+  if (!previous) return null;
+  return Math.round(((current - previous) / Math.abs(previous)) * 100);
+}
+
+export function yoyLabel(delta: number | null): string {
+  if (delta === null) return "";
+  return `${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta)}% vs last year`;
+}
+
+// Web's three report color themes; the breakdown's category colors cycle through the chosen palette.
+export const REPORT_THEMES: Record<string, { label: string; accent: string; negative: string; palette: string[] }> = {
+  fresh: { label: "Fresh", accent: "#13936d", negative: "#e05252", palette: ["#13936d", "#3569d4", "#c9891e", "#e05252", "#7c5cff"] },
+  sunset: { label: "Sunset", accent: "#d2601a", negative: "#b0304f", palette: ["#d2601a", "#b0304f", "#d99a24", "#8a3f9c", "#3d8f8a"] },
+  ocean: { label: "Ocean", accent: "#0d6e91", negative: "#b0413e", palette: ["#0d6e91", "#4d5fd1", "#0f9e8e", "#b0413e", "#7a5cc7"] }
+};
 
 export type TagGroup = { key: string; label: string; total: number; transactions: Transaction[] };
 
