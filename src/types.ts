@@ -24,6 +24,12 @@ export type CalendarEvent = {
   id?: string; date: string; title: string; type: string; owner?: string; ownerName?: string;
   recurrence?: ReminderRecurrence; completedBy?: string[];
   dateTime?: string; notifyAt?: string; reminderAt?: string; location?: string; annual?: boolean; assignees?: EventAssignee[];
+  monthDay?: string; reminderDays?: number;
+};
+// One row parsed from an .ics or .csv file, in the flat shape web's importer uses for both formats.
+export type CalendarImportDraft = {
+  kind: "event" | "chore"; type: string; title: string; date: string; time: string; recurrence: string;
+  endDate: string; location: string; assigneeKeys: string[]; reminderDays?: number;
 };
 // What POST /api/calendar/reminder-from-image extracts from a photo; every field may be blank.
 export type ReminderPhotoDraft = { title: string; date: string; time: string; location: string };

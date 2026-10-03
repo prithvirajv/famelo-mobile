@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
-  SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View
+  SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system";
+// "expo-file-system/legacy", not the package root: since SDK 54 the root still exports uploadAsync/writeAsStringAsync
+// but every one of those throws at runtime ("imported from expo-file-system is deprecated").
+import * as FileSystem from "expo-file-system/legacy";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
@@ -27,8 +29,8 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
-import { advanceRecurringReminder, buildPhotoReminderEvent, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
+import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import { advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
@@ -474,6 +476,64 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     await onSave(next);
     setPhotoDraft(null);
   };
+  // Export / import (.ics and .csv, same formats as web, so a file from either app imports into the other).
+  // iOS shares a real file from the cache directory; Android's share sheet only takes text, so it gets the
+  // file contents as text instead.
+  const [importDrafts, setImportDrafts] = useState<CalendarImportDraft[] | null>(null);
+  const [importSelected, setImportSelected] = useState<boolean[]>([]);
+  const [importNote, setImportNote] = useState("");
+  const exportCalendar = async (format: "ics" | "csv") => {
+    if (!state.calendar.events.length && !state.calendar.chores.length) return Alert.alert("Nothing to export", "Add a reminder or chore first.");
+    const text = format === "ics" ? buildCalendarIcs(state.calendar.events, state.calendar.chores) : buildCalendarCsv(state.calendar.events, state.calendar.chores);
+    const name = `familyloop-calendar.${format}`;
+    try {
+      if (Platform.OS === "ios" && FileSystem.cacheDirectory) {
+        const uri = `${FileSystem.cacheDirectory}${name}`;
+        await FileSystem.writeAsStringAsync(uri, text);
+        await Share.share({ url: uri, title: name });
+      } else {
+        await Share.share({ title: name, message: text });
+      }
+    } catch (cause) {
+      Alert.alert("Couldn't export the calendar", cause instanceof Error ? cause.message : "Unknown error");
+    }
+  };
+  const pickImportFile = async () => {
+    const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
+    const asset = picked.canceled ? null : picked.assets?.[0];
+    if (!asset) return;
+    if (asset.size && asset.size > 2_000_000) return Alert.alert("File too large", "Calendar files over 2MB can't be imported.");
+    try {
+      const text = await FileSystem.readAsStringAsync(asset.uri);
+      const isIcs = asset.name.toLowerCase().endsWith(".ics") || /^\s*BEGIN:VCALENDAR/i.test(text);
+      const { drafts, skipped } = sanitizeCalendarDrafts(isIcs ? icsEventsToCalendarDrafts(parseIcsText(text)) : parseCalendarCsv(text));
+      if (!drafts.length) return Alert.alert("Nothing to import", `No calendar items found in ${asset.name}.${skipped ? ` ${skipped} row${skipped === 1 ? " was" : "s were"} skipped for a missing title or invalid date.` : ""}`);
+      const capped = drafts.slice(0, 500);
+      setImportDrafts(capped);
+      setImportSelected(capped.map(() => true));
+      setImportNote([skipped ? `${skipped} row${skipped === 1 ? "" : "s"} skipped (missing title or invalid date)` : "", drafts.length > capped.length ? `only the first ${capped.length} are shown` : ""].filter(Boolean).join(" · "));
+    } catch (cause) {
+      Alert.alert("Couldn't read that file", cause instanceof Error ? cause.message : "Unknown error");
+    }
+  };
+  const submitImport = async () => {
+    if (!importDrafts) return;
+    const chosen = importDrafts.filter((_, index) => importSelected[index]);
+    if (!chosen.length) return;
+    const memberList = members.map((member) => ({ name: member.name, email: member.email }));
+    const next = structuredClone(state);
+    let imported = 0;
+    chosen.forEach((draft) => {
+      const assignees = resolveImportAssignees(draft.assigneeKeys, memberList, { email: user.email, name: user.name });
+      const result = calendarDraftToItem(draft, assignees, () => uniqueId(draft.kind));
+      if (!result) return;
+      if (result.kind === "chore") next.calendar.chores.push(result.item); else next.calendar.events.push(result.item);
+      imported += 1;
+    });
+    await onSave(next);
+    setImportDrafts(null);
+    Alert.alert("Import complete", `Imported ${imported} calendar item${imported === 1 ? "" : "s"}.`);
+  };
   const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setChoreRecurrence("once"); };
   const saveItem = async () => {
     if (!title.trim() || !date) return;
@@ -627,7 +687,35 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
         : <Text style={styles.rowDetail}>{choreCompletedKeys(item, occurrence).length}/{assignees.length} done</Text>) : null}
       <Pressable onPress={() => deleteChore(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>;
-  })}</Card></Page>;
+  })}</Card>
+    {importDrafts ? <Card>
+      <Text style={styles.cardTitle}>Import preview</Text>
+      {importNote ? <Text style={styles.muted}>{importNote}</Text> : null}
+      <Pressable style={styles.checkRow} onPress={() => setImportSelected(importSelected.every(Boolean) ? importSelected.map(() => false) : importSelected.map(() => true))}>
+        <Ionicons name={importSelected.every(Boolean) ? "checkbox" : "square-outline"} size={24} color={importSelected.every(Boolean) ? colors.green : colors.muted} />
+        <Text style={styles.checkText}>Select all ({importDrafts.length})</Text>
+      </Pressable>
+      {importDrafts.map((draft, index) => <Pressable key={`${index}-${draft.title}`} style={styles.checkRow} onPress={() => setImportSelected((prev) => prev.map((value, itemIndex) => itemIndex === index ? !value : value))}>
+        <Ionicons name={importSelected[index] ? "checkbox" : "square-outline"} size={24} color={importSelected[index] ? colors.green : colors.muted} />
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{draft.title}</Text>
+          <Text style={styles.rowDetail}>{[draft.date, draft.time, draft.kind === "chore" ? "Chore" : draft.type === "reminder" ? "Reminder" : draft.type, draft.recurrence !== "once" ? `repeats ${draft.recurrence}` : null].filter(Boolean).join(" · ")}</Text>
+        </View>
+      </Pressable>)}
+      <View style={styles.actionRow}>
+        <Pressable style={styles.primaryButton} disabled={!importSelected.some(Boolean)} onPress={() => void submitImport()}><Text style={styles.primaryButtonText}>Import {importSelected.filter(Boolean).length} item{importSelected.filter(Boolean).length === 1 ? "" : "s"}</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => setImportDrafts(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+      </View>
+    </Card> : null}
+    <Card>
+      <Text style={styles.cardTitle}>Export &amp; import</Text>
+      <Text style={styles.muted}>Share your calendar as an .ics (works with Apple, Google and Outlook calendars) or .csv file, or import one - including files exported from the web app.</Text>
+      <View style={styles.actionRow}>
+        <Pressable style={styles.secondarySmall} onPress={() => void exportCalendar("ics")}><Text style={styles.secondaryButtonText}>Export .ics</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => void exportCalendar("csv")}><Text style={styles.secondaryButtonText}>Export .csv</Text></Pressable>
+      </View>
+      <Pressable style={styles.secondarySmall} onPress={() => void pickImportFile()}><Text style={styles.secondaryButtonText}>Import from a file</Text></Pressable>
+    </Card></Page>;
 }
 
 function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {

@@ -241,3 +241,23 @@ test("Reminders created or rescheduled on mobile carry a notifyAt (the server sk
   assert.match(body, /completionKeyFor\(/, "completion keys must match web's assignee keys or the two apps disagree on done");
   assert.match(app, /repairChoreCompletion\(withIncome\)/, "the shared save repairs the old flat-array chore completion shape");
 });
+
+test("expo-file-system is imported from its /legacy entry - the package root's uploadAsync/writeAsStringAsync throw at runtime in SDK 54+", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /from "expo-file-system\/legacy"/);
+  assert.doesNotMatch(app, /from "expo-file-system";/);
+});
+
+test("Calendar can export .ics/.csv through the share sheet and import them behind a selectable preview", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Calendar");
+  assert.match(body, /buildCalendarIcs\(/);
+  assert.match(body, /buildCalendarCsv\(/);
+  assert.match(body, /Share\.share\(/);
+  assert.match(body, /DocumentPicker\.getDocumentAsync/);
+  assert.match(body, /sanitizeCalendarDrafts\(/, "an imported file is untrusted: validate before building items");
+  assert.match(body, /calendarDraftToItem\(/);
+  assert.match(body, /importSelected/, "the user chooses which rows to import, as in web's preview");
+  // nothing is added to the calendar by merely picking a file
+  assert.doesNotMatch(body.slice(body.indexOf("pickImportFile"), body.indexOf("submitImport")), /calendar\.(events|chores)\.push/);
+});
