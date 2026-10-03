@@ -440,3 +440,11 @@ test("Wealth shows asset allocation and can display net worth in another currenc
   assert.match(body, /convertCurrency\(amount, currency, shownCurrency, fxRates\?\.rates\) \?\? amount/, "a missing rate falls back to the original amount");
   assertOnlyWholeStateSaves(body, "Wealth");
 });
+
+test("Bulk imports are refused (with a clear message) before they push the household state past the server's 1 MB request limit", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(extractFunctionSource(app, "BankStream"), /exceedsStateLimit\(importedState\)/);
+  assert.match(extractFunctionSource(app, "Calendar"), /exceedsStateLimit\(next\)/);
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /response\.status === 413/, "an oversized save must not surface as a meaningless 'Request failed'");
+});

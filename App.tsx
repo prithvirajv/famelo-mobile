@@ -43,7 +43,7 @@ import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -757,6 +757,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       if (result.kind === "chore") next.calendar.chores.push(result.item); else next.calendar.events.push(result.item);
       imported += 1;
     });
+    if (exceedsStateLimit(next)) return Alert.alert("Too much to import", "Adding these would push your household data past the 1 MB the server can save, after which nothing could be saved. Import fewer items, or remove some old ones first.");
     await onSave(next);
     setImportDrafts(null);
     Alert.alert("Import complete", `Imported ${imported} calendar item${imported === 1 ? "" : "s"}.`);
@@ -1965,7 +1966,12 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         rows: rows.slice(0, 2000), fileName: asset.name, accountHint, idPrefix: isPdf ? "pdf-import" : "csv-import", transactions: state.transactions,
         existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId
       });
-      await onSave({ ...state, transactionInboxDrafts: result.drafts });
+      const importedState = { ...state, transactionInboxDrafts: result.drafts };
+      if (exceedsStateLimit(importedState)) {
+        setFeedback(`Not imported: adding ${rows.length} rows would push your household data past the 1 MB the server can save, and then nothing could be saved until data is removed. Review or clear some of the rows already waiting here (or import a shorter date range), then try again.`);
+        return;
+      }
+      await onSave(importedState);
       setFeedback(rows.length > 2000 ? `${result.message} Only the first 2000 rows were imported.` : result.message);
     } catch (cause) {
       setFeedback(cause instanceof Error ? cause.message : `Could not read ${asset.name}.`);
