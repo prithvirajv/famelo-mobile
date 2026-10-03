@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: logic files cannot import each other's values (see the repo notes), so the few small
 // helpers it shares with other logic files (CSV splitting, closed-account rule, line snapshots) are repeated here.
-import type { Account, HouseholdState, InboxDraft, Transaction } from "./types";
+import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Transaction } from "./types";
 
 // ---- small shared helpers (repeated copies, see header) ----------------------------------------------------------
 function parseDateKey(value: string): Date {
@@ -561,4 +561,59 @@ export function sortDrafts<T extends InboxDraft>(drafts: T[], field: DraftSortFi
     if (left > right) return sign;
     return a.index - b.index;
   }).map((entry) => entry.draft);
+}
+
+
+// ---- Splitting a purchase with friends -------------------------------------------------------------------------------------
+// "I paid $90 for dinner and two friends owe me $30 each": the row keeps only YOUR share as your own expense, and each friend's
+// share becomes an IOU. Works on a Bank stream row (only your share is accepted into the ledger) or a ledger transaction (its
+// amount is reduced to your share). If friends cover everything there is nothing left to keep, so the row is removed instead of
+// leaving a $0 entry behind - the IOUs already carry what it was for.
+
+export type FriendShare = { person: string; amount: number; email?: string };
+export type IouSource = { type: "draft"; id: string } | { type: "ledger"; index: number };
+export type SplitWithFriendsOptions = { direction: IouDirection; reason: string; date: string };
+
+export function splitRecordWithFriends(state: HouseholdState, source: IouSource, shares: FriendShare[], options: SplitWithFriendsOptions, createId: (prefix: string) => string): ActionResult {
+  const draft = source.type === "draft" ? (state.transactionInboxDrafts || []).find((item) => item.id === source.id) : undefined;
+  const transaction = source.type === "ledger" ? state.transactions[source.index] : undefined;
+  const record = draft || transaction;
+  if (!record) return { ok: false, error: source.type === "ledger" ? "This transaction is no longer in the ledger." : "This item is no longer in Bank stream." };
+  if (transaction?.splits?.length) return { ok: false, error: "This transaction is split across categories - remove that split first, then split it with a friend." };
+
+  const splits = shares.map((row) => ({ person: String(row.person || "").trim(), amount: Number(row.amount) })).filter((row) => row.person && row.amount > 0);
+  if (!splits.length) return { ok: false, error: "Enter at least one friend's name and a positive amount." };
+  const original = Number(record.amount);
+  const total = Math.abs(original);
+  const splitTotal = splits.reduce((sum, row) => sum + row.amount, 0);
+  if (splitTotal > total + 0.005) return { ok: false, error: `Splits add up to ${splitTotal.toFixed(2)}, more than the ${total.toFixed(2)} total.` };
+
+  const sign = original < 0 ? -1 : 1;
+  const rawYourShare = Math.round((total - splitTotal) * 100) / 100;
+  const fullySplit = rawYourShare <= 0.005;
+  const yourShare = fullySplit ? 0 : rawYourShare;
+
+  let next: HouseholdState = state;
+  if (draft && source.type === "draft") {
+    if (fullySplit) {
+      next = { ...state, transactionInboxDone: withDone(state, source.id), transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((item) => item.id !== source.id), household: withActivity(state, `Split ${record.payee} entirely with friends - nothing left to add to the Ledger`) };
+    } else {
+      // Only your remaining share is accepted. If accepting fails (a closed account), nothing changes - no orphan IOUs.
+      const reduced = updateDraft(state, source.id, { amount: sign * yourShare });
+      if (!reduced.ok) return reduced;
+      const accepted = acceptDraft(reduced.state, source.id);
+      if (!accepted.ok) return accepted;
+      next = accepted.state;
+    }
+  } else if (source.type === "ledger") {
+    next = fullySplit
+      ? { ...state, transactions: state.transactions.filter((_, index) => index !== source.index), household: withActivity(state, `Split ${record.payee} entirely with friends - removed from the Ledger`) }
+      : { ...state, transactions: state.transactions.map((item, index) => index === source.index ? { ...item, amount: sign * yourShare } : item) };
+  }
+
+  const ious: Iou[] = splits.map((split) => ({
+    id: createId("iou"), person: split.person, amount: split.amount, direction: options.direction, reason: options.reason.trim(),
+    date: options.date || record.date || "", accountId: record.accountId || "", settled: false, settledDate: ""
+  }));
+  return { ok: true, state: { ...next, ious: [...(next.ious || []), ...ious] } };
 }

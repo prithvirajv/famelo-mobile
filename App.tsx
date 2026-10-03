@@ -43,8 +43,8 @@ import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
-import type { DraftReview, DraftSortField, ParsedBankRow } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
 
@@ -310,6 +310,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const [selectMode, setSelectMode] = useState(false);
   const [selectedTx, setSelectedTx] = useState<number[]>([]);
   const [bulkLineId, setBulkLineId] = useState("");
+  const [friendSplitIndex, setFriendSplitIndex] = useState<number | null>(null);
   const [splitIndex, setSplitIndex] = useState<number | null>(null);
   const [splitRows, setSplitRows] = useState<Array<{ lineId: string; amount: string }>>([]);
 
@@ -637,9 +638,12 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
           <Text style={styles.rowDetail}>{[item.date, transactionAssignmentLabel(state, item), accountName(item.accountId)].filter(Boolean).join(" · ")}</Text>
         </Pressable>
         <Text style={styles.rowValue}>{money(Number(item.amount), currency)}</Text>
+        <Pressable onPress={() => setFriendSplitIndex(friendSplitIndex === index ? null : index)} accessibilityLabel={`Split ${item.payee} with a friend`}><Ionicons name="people-outline" size={18} color={colors.muted} /></Pressable>
         <Pressable onPress={() => openSplit(index)} accessibilityLabel={`Split ${item.payee} across categories`}><Ionicons name="cut-outline" size={18} color={item.splits?.length ? colors.green : colors.muted} /></Pressable>
         <Pressable onPress={() => deleteTransaction(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
       </View>
+      {friendSplitIndex === index ? <SplitWithFriends state={state} payee={item.payee} total={Math.abs(Number(item.amount))} defaultDate={item.date} defaultDirection={Number(item.amount) < 0 ? "i_owe" : "owed_to_me"}
+        onSubmit={async (shares, options) => { const done = await applySplitWithFriends(state, onSave, { type: "ledger", index }, shares, options); if (done) setFriendSplitIndex(null); return done; }} onCancel={() => setFriendSplitIndex(null)} /> : null}
       <TagChips tags={item.tags || []} suggestions={tagSuggestions(state.transactions, item.tags)} onChange={(tags) => void onSave(setTransactionTags(state, index, tags))} />
       </View>) : <Text style={styles.muted}>No transactions yet</Text>}
       {orderedTransactions.length > 15 ? <Pressable style={styles.secondarySmall} onPress={() => setShowAllTx((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showAllTx ? "Show fewer" : `Show all (${orderedTransactions.length})`}</Text></Pressable> : null}
@@ -1921,6 +1925,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const [transferDraftId, setTransferDraftId] = useState<string | null>(null);
   const [transferAccountId, setTransferAccountId] = useState("");
   const [aiBusyId, setAiBusyId] = useState<string | null>(null);
+  const [friendSplitId, setFriendSplitId] = useState<string | null>(null);
 
   // A recurring bill that came due since the last visit becomes a draft to review (the shared save does this too; this catches
   // time passing while nothing was being saved).
@@ -2107,8 +2112,11 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
             <Pressable style={styles.secondarySmall} onPress={() => setTransferDraftId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
           </View>
         </View> : null}
+        {friendSplitId === id ? <SplitWithFriends state={state} payee={draft.payee || ""} total={Math.abs(Number(draft.amount))} defaultDate={draft.date || localDateKey()} defaultDirection={Number(draft.amount) < 0 ? "i_owe" : "owed_to_me"}
+          onSubmit={async (shares, options) => { const done = await applySplitWithFriends(state, onSave, { type: "draft", id }, shares, options); if (done) setFriendSplitId(null); return done; }} onCancel={() => setFriendSplitId(null)} /> : null}
         <View style={styles.actionRow}>
           <Pressable style={styles.primaryButton} onPress={() => void apply(acceptDraft(state, id))}><Text style={styles.primaryButtonText}>✓ Accept</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => setFriendSplitId(friendSplitId === id ? null : id)}><Text style={styles.secondaryButtonText}>👥 Split</Text></Pressable>
           <Pressable style={styles.secondarySmall} onPress={() => openTransfer(draft)}><Text style={styles.secondaryButtonText}>⇄ Transfer</Text></Pressable>
           <Pressable style={styles.secondarySmall} onPress={() => void onSave(dismissDraft(state, id))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Dismiss</Text></Pressable>
         </View>
@@ -2137,6 +2145,75 @@ async function inviteNewFriend(name: string, email: string, householdName: strin
     friend.invitedAt = new Date().toISOString();
   } catch { /* invite email is best-effort; the friend record is kept either way */ }
   return [...existing, friend];
+}
+
+// Applies a split-with-friends to a bank-stream row or ledger transaction, then (best effort) invites any friend who was given
+// an email and isn't already one. Resolves true when it was applied.
+async function applySplitWithFriends(state: HouseholdState, onSave: (next: HouseholdState) => Promise<void>, source: IouSource, shares: FriendShare[], options: SplitWithFriendsOptions): Promise<boolean> {
+  const result = splitRecordWithFriends(state, source, shares, options, uniqueId);
+  if (!result.ok) { Alert.alert("Can't split this", result.error); return false; }
+  let friends = result.state.friends || [];
+  for (const share of shares) if (share.email?.trim()) friends = await inviteNewFriend(share.person, share.email, state.household.name, friends);
+  await onSave({ ...result.state, friends });
+  return true;
+}
+
+// Splits one purchase with friends: you keep only your share as your own expense and each friend's share becomes an IOU. The
+// maths is the same computeBillSplitAmounts the Shared Expenses screen uses (you are always an implicit extra person, so
+// "equal" among one friend is 50/50). The caller applies the result to a bank-stream row or a ledger transaction.
+function SplitWithFriends({ state, payee, total, defaultDate, defaultDirection, onSubmit, onCancel }: {
+  state: HouseholdState; payee: string; total: number; defaultDate: string; defaultDirection: "i_owe" | "owed_to_me";
+  onSubmit: (shares: FriendShare[], options: SplitWithFriendsOptions) => Promise<boolean>; onCancel: () => void;
+}) {
+  const currency = state.household.currency;
+  const friends = state.friends || [];
+  const [direction, setDirection] = useState<"i_owe" | "owed_to_me">(defaultDirection);
+  const [splitType, setSplitType] = useState<"equal" | "exact" | "percentage">("equal");
+  const [rows, setRows] = useState<Array<{ person: string; email: string; amount: string; percent: string }>>([{ person: "", email: "", amount: "", percent: "" }]);
+  const [reason, setReason] = useState(payee);
+  const [date, setDate] = useState(defaultDate);
+  const [busy, setBusy] = useState(false);
+
+  const setRow = (index: number, patch: Partial<{ person: string; email: string; amount: string; percent: string }>) => setRows((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  const computed = computeBillSplitAmounts(splitType, total, rows.map((row) => ({ amount: Number(row.amount) || 0, percent: Number(row.percent) || 0 })));
+  const named = rows.filter((row) => row.person.trim());
+  const usedNames = rows.map((row) => row.person.trim().toLowerCase());
+  const submit = async () => {
+    if (!computed.ok) return Alert.alert("Check the split", computed.error);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+    const shares: FriendShare[] = rows.map((row, index) => ({ person: row.person, amount: computed.friendAmounts[index] ?? 0, email: row.email }));
+    setBusy(true);
+    try { await onSubmit(shares, { direction, reason, date }); } finally { setBusy(false); }
+  };
+
+  return <View style={styles.planTaskBlock}>
+    <Text style={styles.cardTitle}>Split with friends · {money(total, currency)}</Text>
+    <View style={styles.choiceRow}>
+      {([["owed_to_me", "I paid - they owe me"], ["i_owe", "They paid - I owe them"]] as const).map(([value, label]) => <Pressable key={value} style={[styles.choice, direction === value && styles.choiceActive]} onPress={() => setDirection(value)}><Text style={[styles.choiceText, direction === value && styles.choiceTextActive]}>{label}</Text></Pressable>)}
+    </View>
+    <View style={styles.choiceRow}>
+      {([["equal", "Equal"], ["exact", "Exact amounts"], ["percentage", "Percent"]] as const).map(([value, label]) => <Pressable key={value} style={[styles.choice, splitType === value && styles.choiceActive]} onPress={() => setSplitType(value)}><Text style={[styles.choiceText, splitType === value && styles.choiceTextActive]}>{label}</Text></Pressable>)}
+    </View>
+    {rows.map((row, index) => <View key={index} style={styles.planTaskBlock}>
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={row.person} onChangeText={(value) => setRow(index, { person: value })} placeholder="Friend's name" autoCapitalize="words" />
+        {rows.length > 1 ? <Pressable style={styles.planStepperButton} onPress={() => setRows((prev) => prev.filter((_, rowIndex) => rowIndex !== index))} accessibilityLabel="Remove this person"><Ionicons name="close" size={18} color={colors.coral} /></Pressable> : null}
+      </View>
+      {friends.filter((friend) => !usedNames.includes(friend.name.trim().toLowerCase())).length && !row.person.trim() ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{friends.filter((friend) => !usedNames.includes(friend.name.trim().toLowerCase())).map((friend) => <Pressable key={friend.id} style={styles.choice} onPress={() => setRow(index, { person: friend.name, email: friend.email })}><Text style={styles.choiceText}>{friend.name}</Text></Pressable>)}</ScrollView> : null}
+      <TextInput style={styles.input} value={row.email} onChangeText={(value) => setRow(index, { email: value })} placeholder="Email (optional, to invite them)" keyboardType="email-address" autoCapitalize="none" autoCorrect={false} />
+      {splitType === "exact" ? <TextInput style={styles.input} value={row.amount} onChangeText={(value) => setRow(index, { amount: value })} placeholder="Their amount" keyboardType="decimal-pad" /> : null}
+      {splitType === "percentage" ? <TextInput style={styles.input} value={row.percent} onChangeText={(value) => setRow(index, { percent: value })} placeholder="Their percent" keyboardType="decimal-pad" /> : null}
+      {computed.ok ? <Text style={styles.rowDetail}>{row.person.trim() || "They"} {direction === "owed_to_me" ? "owe you" : "are owed"} {money(computed.friendAmounts[index] ?? 0, currency)}</Text> : null}
+    </View>)}
+    <Pressable style={styles.secondarySmall} onPress={() => setRows((prev) => [...prev, { person: "", email: "", amount: "", percent: "" }])}><Text style={styles.secondaryButtonText}>+ Add person</Text></Pressable>
+    {computed.ok ? <Text style={[styles.rowTitle, { marginTop: 8 }]}>{computed.payerAmount > 0.005 ? `You keep ${money(computed.payerAmount, currency)} as your own expense` : "Nothing left for you - the row will be removed"}</Text> : <Text style={[styles.rowDetail, { color: colors.coral }]}>{computed.error}</Text>}
+    <TextInput style={styles.input} value={reason} onChangeText={setReason} placeholder="What was it for?" />
+    <TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
+    <View style={styles.actionRow}>
+      <Pressable style={[styles.primaryButton, (!computed.ok || !named.length || busy) && { opacity: 0.5 }]} disabled={!computed.ok || !named.length || busy} onPress={() => void submit()}>{busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Split it</Text>}</Pressable>
+      <Pressable style={styles.secondarySmall} onPress={onCancel}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+    </View>
+  </View>;
 }
 
 function SharedExpenses({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {

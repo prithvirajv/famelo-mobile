@@ -422,3 +422,53 @@ test("sortDrafts sorts by date, stored amount or payee in either direction, keep
   assert.deepEqual(sortDrafts(drafts, "amount", "asc").map((d) => d.id), ["2", "1", "3"]);
   assert.deepEqual(drafts.map((d) => d.id), ["1", "2", "3"], "never mutates the input");
 });
+
+import { splitRecordWithFriends } from "../src/bankStreamLogic.ts";
+
+const ioStart = () => baseState({ ious: [], transactions: [{ date: "2026-07-01", payee: "Dinner", amount: 90, lineId: "groceries", accountId: "chk" }], transactionInboxDrafts: [{ id: "d1", payee: "Dinner out", amount: 90, date: "2026-07-02", lineId: "groceries", accountId: "chk" }] });
+const ioId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 6)}`;
+const opts = { direction: "owed_to_me", reason: " Dinner ", date: "2026-07-02" };
+
+test("splitting a bank-stream row accepts only YOUR share into the ledger and records an IOU per friend", () => {
+  const result = splitRecordWithFriends(ioStart(), { type: "draft", id: "d1" }, [{ person: " Sam ", amount: 30 }, { person: "Kim", amount: 30 }, { person: "", amount: 5 }, { person: "Zed", amount: 0 }], opts, ioId);
+  assert.equal(result.ok, true);
+  assert.equal(result.state.transactions[0].amount, 30, "your share only");
+  assert.equal(result.state.transactions[0].payee, "Dinner out");
+  assert.deepEqual(result.state.transactionInboxDrafts, []);
+  assert.deepEqual(result.state.transactionInboxDone, ["d1"]);
+  assert.deepEqual(result.state.ious.map((i) => [i.person, i.amount, i.direction, i.reason, i.date, i.accountId, i.settled]), [["Sam", 30, "owed_to_me", "Dinner", "2026-07-02", "chk", false], ["Kim", 30, "owed_to_me", "Dinner", "2026-07-02", "chk", false]]);
+});
+
+test("splitting a ledger transaction reduces it to your share in place, keeping its sign for a refund", () => {
+  const result = splitRecordWithFriends(ioStart(), { type: "ledger", index: 0 }, [{ person: "Sam", amount: 45 }], opts, ioId);
+  assert.equal(result.state.transactions[0].amount, 45);
+  assert.equal(result.state.ious.length, 1);
+  const refund = baseState({ ious: [], transactions: [{ date: "2026-07-01", payee: "Refund", amount: -40, lineId: "groceries" }] });
+  assert.equal(splitRecordWithFriends(refund, { type: "ledger", index: 0 }, [{ person: "Sam", amount: 10 }], { ...opts, direction: "i_owe" }, ioId).state.transactions[0].amount, -30);
+});
+
+test("when friends cover everything nothing is left to keep: the draft or ledger row is removed instead of leaving a $0 entry", () => {
+  const draft = splitRecordWithFriends(ioStart(), { type: "draft", id: "d1" }, [{ person: "Sam", amount: 90 }], opts, ioId);
+  assert.deepEqual(draft.state.transactionInboxDrafts, []);
+  assert.equal(draft.state.transactions.length, 1, "nothing was added to the ledger");
+  assert.deepEqual(draft.state.transactionInboxDone, ["d1"]);
+  assert.match(draft.state.household.activity[0], /Split Dinner out entirely with friends/);
+  const ledger = splitRecordWithFriends(ioStart(), { type: "ledger", index: 0 }, [{ person: "Sam", amount: 45 }, { person: "Kim", amount: 45 }], opts, ioId);
+  assert.deepEqual(ledger.state.transactions, []);
+  assert.equal(ledger.state.ious.length, 2);
+});
+
+test("splitRecordWithFriends rejects bad input without changing anything: no friend, over-allocation, missing row, category-split ledger row, closed account", () => {
+  const start = ioStart();
+  assert.match(splitRecordWithFriends(start, { type: "draft", id: "d1" }, [{ person: "", amount: 5 }], opts, ioId).error, /at least one friend/);
+  assert.match(splitRecordWithFriends(start, { type: "draft", id: "d1" }, [{ person: "Sam", amount: 60 }, { person: "Kim", amount: 40 }], opts, ioId).error, /100\.00, more than the 90\.00 total/);
+  assert.match(splitRecordWithFriends(start, { type: "draft", id: "gone" }, [{ person: "Sam", amount: 5 }], opts, ioId).error, /no longer in Bank stream/);
+  assert.match(splitRecordWithFriends(start, { type: "ledger", index: 9 }, [{ person: "Sam", amount: 5 }], opts, ioId).error, /no longer in the ledger/);
+  const catSplit = baseState({ ious: [], transactions: [{ date: "2026-07-01", payee: "S", amount: 10, lineId: "", splits: [{ lineId: "groceries", amount: 10 }] }] });
+  assert.match(splitRecordWithFriends(catSplit, { type: "ledger", index: 0 }, [{ person: "Sam", amount: 5 }], opts, ioId).error, /remove that split first/);
+  const closed = baseState({ ious: [], accounts: [acct("chk", "Old", { closedAt: "2026-06-30" })], transactionInboxDrafts: [{ id: "d1", payee: "Late", amount: 90, date: "2026-07-02", lineId: "", accountId: "chk" }] });
+  const refused = splitRecordWithFriends(closed, { type: "draft", id: "d1" }, [{ person: "Sam", amount: 30 }], opts, ioId);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /closed/);
+  assert.equal(closed.ious.length, 0, "no orphan IOUs when accepting fails");
+});

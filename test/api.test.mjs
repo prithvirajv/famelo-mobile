@@ -410,3 +410,12 @@ test("Recurring bills can be created from the transaction form, managed, and sur
   assert.match(sharedSaveSource(app), /ensureRecurringExpensesPosted\(/, "the shared save surfaces due periods");
   assert.match(extractFunctionSource(app, "BankStream"), /ensureRecurringExpensesPosted\(state, localDateKey\(\), uniqueId\)/, "opening Bank stream catches time passing without a save");
 });
+
+test("A bank-stream row or ledger transaction can be split with friends: your share stays, each friend's share becomes an IOU", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /function SplitWithFriends\(/);
+  assert.match(app, /computeBillSplitAmounts\(splitType, total,/, "same split maths as the Shared Expenses screen");
+  assert.match(app, /splitRecordWithFriends\(state, source, shares, options, uniqueId\)/);
+  assert.match(extractFunctionSource(app, "BankStream"), /applySplitWithFriends\(state, onSave, \{ type: "draft", id \}/);
+  assert.match(extractFunctionSource(app, "Budget"), /applySplitWithFriends\(state, onSave, \{ type: "ledger", index \}/);
+});
