@@ -2,7 +2,7 @@
 // Every function returns new data and never mutates its input, so callers can hand the result
 // straight to the whole-state save. Decisions are family-wide: the server syncs state.decisions
 // across all of an owner's households on every PUT /api/state, so mobile needs no extra plumbing.
-import type { Decision, DecisionComment } from "./types";
+import type { Decision, DecisionAttachment, DecisionComment } from "./types";
 
 export type DecisionListKey = "pros" | "cons";
 
@@ -58,4 +58,28 @@ export function markDecided(decision: Decision, outcome: string, now: Date = new
 
 export function reopenDecision(decision: Decision): Decision {
   return { ...decision, status: "open", outcome: "", decidedAt: "" };
+}
+
+export const DECISION_ATTACHMENT_MAX_COUNT = 5;
+export const DECISION_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
+export function canAttachToDecision(decision: Decision, sizeBytes: number): { ok: true } | { ok: false; reason: string } {
+  if ((decision.attachments || []).length >= DECISION_ATTACHMENT_MAX_COUNT) return { ok: false, reason: `A decision can have at most ${DECISION_ATTACHMENT_MAX_COUNT} attachments.` };
+  if (sizeBytes > DECISION_ATTACHMENT_MAX_BYTES) return { ok: false, reason: "That file is larger than 25MB." };
+  return { ok: true };
+}
+
+// The attachment is only a reference; the file itself already lives in Documents (uploaded by the caller).
+export function addDecisionAttachment(decision: Decision, file: { name: string; contentType: string; sizeBytes: number; documentId: string }, createId: () => string, now: Date = new Date()): Decision {
+  const attachment: DecisionAttachment = { id: createId(), name: file.name, contentType: file.contentType, sizeBytes: file.sizeBytes, documentId: file.documentId, createdAt: now.toISOString() };
+  return { ...decision, attachments: [...(decision.attachments || []), attachment] };
+}
+
+export function removeDecisionAttachment(decision: Decision, attachmentId: string): Decision {
+  return { ...decision, attachments: (decision.attachments || []).filter((item) => item.id !== attachmentId) };
+}
+
+// Document ids to delete from storage when attachments (or the whole decision) go away; legacy inline ones have no file.
+export function attachmentDocumentIds(attachments: DecisionAttachment[] | undefined): string[] {
+  return (attachments || []).map((item) => item.documentId).filter((id): id is string => Boolean(id));
 }

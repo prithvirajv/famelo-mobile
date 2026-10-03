@@ -40,7 +40,7 @@ import {
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
-import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision } from "./src/decisionsLogic";
+import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
@@ -2099,8 +2099,54 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
     setNewTitle(""); setNewNotes(""); setExpandedId(created.id);
   };
 
+  // Attachments are Documents rows (family-wide, like decisions); the stored file goes when its attachment or decision does.
+  const deleteStoredFiles = async (documentIds: string[]) => {
+    for (const documentId of documentIds) {
+      try { await api.deleteDocument(documentId); } catch (cause) { if (!(cause instanceof ApiError && cause.status === 404)) console.warn("Could not delete attachment file", cause); }
+    }
+  };
+
   const confirmDelete = (decision: Decision) => {
-    Alert.alert("Delete decision?", decision.title, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => void saveDecisions(decisions.filter((item) => item.id !== decision.id)) }]);
+    Alert.alert("Delete decision?", decision.title, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => {
+      void saveDecisions(decisions.filter((item) => item.id !== decision.id));
+      void deleteStoredFiles(attachmentDocumentIds(decision.attachments));
+    } }]);
+  };
+
+  const [attachingId, setAttachingId] = useState<string | null>(null);
+  const attachFile = async (decision: Decision) => {
+    const picked = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: true });
+    if (picked.canceled || !picked.assets?.[0]) return;
+    const asset = picked.assets[0];
+    const contentType = asset.mimeType || "application/octet-stream";
+    const allowed = canAttachToDecision(decision, asset.size || 0);
+    if (!allowed.ok) return Alert.alert("Can't attach that file", allowed.reason);
+    setAttachingId(decision.id);
+    try {
+      const { documentId, uploadUrl } = await api.requestDocumentUploadUrl({ name: asset.name, contentType, sizeBytes: asset.size || 0, folderId: null });
+      // A placeholder (non-http) URL means a local/demo server with no storage bucket; there is nothing to PUT to.
+      if (/^https?:\/\//.test(uploadUrl)) await FileSystem.uploadAsync(uploadUrl, asset.uri, { httpMethod: "PUT", headers: { "Content-Type": contentType } });
+      await api.confirmDocumentUpload(documentId);
+      try { await api.updateDocument(documentId, { description: `Attachment on the decision "${decision.title}"` }); } catch { /* the label is cosmetic */ }
+      change(decision.id, (current) => addDecisionAttachment(current, { name: asset.name, contentType, sizeBytes: asset.size || 0, documentId }, () => uniqueId("attachment")));
+    } catch (cause) {
+      Alert.alert("Upload failed", cause instanceof Error ? cause.message : "Could not attach that file");
+    } finally { setAttachingId(null); }
+  };
+
+  const openAttachment = async (documentId: string) => {
+    try {
+      const { url } = await api.documentDownloadUrl(documentId);
+      await Linking.openURL(url);
+      await api.openDocument(documentId);
+    } catch (cause) { Alert.alert("Could not open file", cause instanceof Error ? cause.message : "Try again"); }
+  };
+
+  const confirmRemoveAttachment = (decision: Decision, attachment: NonNullable<Decision["attachments"]>[number]) => {
+    Alert.alert("Remove attachment?", attachment.documentId ? `${attachment.name} will also be deleted from Documents.` : attachment.name, [{ text: "Cancel" }, { text: "Remove", style: "destructive", onPress: () => {
+      change(decision.id, (current) => removeDecisionAttachment(current, attachment.id));
+      void deleteStoredFiles(attachmentDocumentIds([attachment]));
+    } }]);
   };
 
   const addItem = (decision: Decision, listKey: DecisionListKey) => {
@@ -2165,6 +2211,17 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
         {isExpanded ? <View style={{ marginTop: 8 }}>
           <TextInput style={[styles.input, styles.multilineInput]} value={notesDrafts[decision.id] ?? decision.notes} onChangeText={(value) => setNotesDrafts((prev) => ({ ...prev, [decision.id]: value }))} placeholder="Any context worth remembering (optional)" multiline
             onBlur={() => { const draft = notesDrafts[decision.id]; if (draft !== undefined && draft.trim() !== decision.notes) change(decision.id, (current) => ({ ...current, notes: draft.trim() })); setNotesDrafts((prev) => { const { [decision.id]: _done, ...rest } = prev; return rest; }); }} />
+          <View style={styles.decisionColumn}>
+            <Text style={styles.label}>Attachments</Text>
+            {(decision.attachments || []).map((attachment) => <View key={attachment.id} style={styles.checkRow}>
+              <Pressable style={styles.rowCopy} disabled={!attachment.documentId} onPress={() => attachment.documentId && void openAttachment(attachment.documentId)}>
+                <Text style={[styles.rowTitle, attachment.documentId ? { color: colors.blue } : null]}>{attachment.name}</Text>
+                <Text style={styles.rowDetail}>{attachment.documentId ? formatFileSize(attachment.sizeBytes) : "Saved inline - open it once on the web app to move it to Documents"}</Text>
+              </Pressable>
+              <Pressable accessibilityLabel={`Remove ${attachment.name}`} hitSlop={8} onPress={() => confirmRemoveAttachment(decision, attachment)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+            </View>)}
+            {(decision.attachments || []).length < 5 ? <Pressable style={[styles.secondarySmall, { marginTop: 6 }]} disabled={attachingId === decision.id} onPress={() => void attachFile(decision)}><Text style={styles.secondaryButtonText}>{attachingId === decision.id ? "Uploading..." : "Attach a file"}</Text></Pressable> : null}
+          </View>
           {renderList(decision, "pros")}
           {renderList(decision, "cons")}
           {!isDecided ? <View style={styles.actionRow}>

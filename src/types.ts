@@ -117,7 +117,9 @@ export type DecisionComment = { id: string; text: string; authorKey: string; aut
 // Attachments are stored inline as data URLs on web (5 max, 5MB each) rather than through Documents, because
 // decisions sync across a user's households while documents are per-household. Mobile doesn't show or add
 // them yet, but every edit spreads the existing decision so they are preserved untouched.
-export type DecisionAttachment = { id: string; name: string; contentType: string; sizeBytes: number; dataUrl: string; createdAt: string };
+// New attachments are Documents rows referenced by documentId; older ones carry the file inline as a dataUrl (web moves those
+// to storage the first time its Decisions page is opened). Mobile preserves both and only ever creates the documentId form.
+export type DecisionAttachment = { id: string; name: string; contentType: string; sizeBytes: number; documentId?: string; dataUrl?: string; createdAt: string };
 export type Decision = {
   id: string; title: string; notes: string; status: "open" | "decided"; outcome: string; decidedAt: string;
   pros: DecisionComment[]; cons: DecisionComment[]; createdAt: string; attachments?: DecisionAttachment[];

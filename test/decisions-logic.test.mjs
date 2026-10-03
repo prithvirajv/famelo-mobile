@@ -60,3 +60,20 @@ test("updateDecision only replaces the matching decision", () => {
   const next = updateDecision(list, "y", (item) => ({ ...item, title: "Changed" }));
   assert.deepEqual(next.map((item) => item.title), ["Move?", "Changed"]);
 });
+
+import { canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds, DECISION_ATTACHMENT_MAX_COUNT } from "../src/decisionsLogic.ts";
+
+test("attachments are Documents references: add, remove, limits, and which stored files to delete", () => {
+  const base = decision({ attachments: [{ id: "old", name: "inline.txt", contentType: "text/plain", sizeBytes: 5, dataUrl: "data:text/plain;base64,aGk=", createdAt: "2026-01-01T00:00:00.000Z" }] });
+  const added = addDecisionAttachment(base, { name: "quote.pdf", contentType: "application/pdf", sizeBytes: 1000, documentId: "doc-1" }, () => "att-1", new Date("2026-07-01T00:00:00.000Z"));
+  assert.equal(base.attachments.length, 1, "input is not mutated");
+  assert.deepEqual(added.attachments[1], { id: "att-1", name: "quote.pdf", contentType: "application/pdf", sizeBytes: 1000, documentId: "doc-1", createdAt: "2026-07-01T00:00:00.000Z" });
+  assert.equal(added.attachments[0].dataUrl, "data:text/plain;base64,aGk=", "legacy inline attachments are preserved untouched");
+  assert.deepEqual(attachmentDocumentIds(added.attachments), ["doc-1"], "inline attachments have no stored file to delete");
+  assert.deepEqual(removeDecisionAttachment(added, "att-1").attachments.map((a) => a.id), ["old"]);
+  assert.deepEqual(attachmentDocumentIds(undefined), []);
+  assert.equal(canAttachToDecision(base, 1024).ok, true);
+  assert.equal(canAttachToDecision(base, 26 * 1024 * 1024).ok, false);
+  const full = decision({ attachments: Array.from({ length: DECISION_ATTACHMENT_MAX_COUNT }, (_, i) => ({ id: `a${i}`, name: "x", contentType: "x", sizeBytes: 1, documentId: `d${i}`, createdAt: "" })) });
+  assert.equal(canAttachToDecision(full, 1).ok, false);
+});
