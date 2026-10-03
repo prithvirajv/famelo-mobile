@@ -378,3 +378,47 @@ test("a draft's tags can be edited through updateDraft and carry onto the ledger
   const accepted = acceptDraft(tagged.state, "d1");
   assert.deepEqual(accepted.state.transactions[0].tags, ["Florida trip", "Beach"]);
 });
+
+import { setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "../src/bankStreamLogic.ts";
+
+test("setAccountForUnlinkedDrafts links only rows with no account, skips (and counts) rows dated after a closed account's close date", () => {
+  const state = baseState({
+    accounts: [acct("chk", "Chk"), acct("old", "Old", { closedAt: "2026-06-30" })],
+    transactionInboxDrafts: [
+      { id: "a", lineId: "", date: "2026-06-10", accountHistoryMatch: true }, { id: "b", lineId: "", date: "2026-07-10" },
+      { id: "c", lineId: "", date: "2026-06-11", accountId: "chk" }
+    ]
+  });
+  const open = setAccountForUnlinkedDrafts(state, "chk");
+  assert.deepEqual(open.state.transactionInboxDrafts.map((d) => d.accountId), ["chk", "chk", "chk"]);
+  assert.equal(open.state.transactionInboxDrafts[0].accountHistoryMatch, false);
+  assert.deepEqual([open.applied, open.skippedClosed], [2, 0]);
+  const closed = setAccountForUnlinkedDrafts(state, "old");
+  assert.deepEqual(closed.state.transactionInboxDrafts.map((d) => d.accountId), ["old", undefined, "chk"]);
+  assert.deepEqual([closed.applied, closed.skippedClosed], [1, 1]);
+  const none = setAccountForUnlinkedDrafts(baseState({ transactionInboxDrafts: [{ id: "x", lineId: "", accountId: "chk" }] }), "card");
+  assert.equal(none.applied, 0);
+});
+
+test("clearHistorySuggestions resets only history-suggested categories, leaving hand-picked, rule and refund-pinned rows alone", () => {
+  const state = baseState({ transactionInboxDrafts: [
+    { id: "h", lineId: "groceries", historyMatch: true }, { id: "m", lineId: "groceries", historyMatch: false }, { id: "n", lineId: "" }
+  ] });
+  const { state: next, cleared } = clearHistorySuggestions(state);
+  assert.equal(cleared, 1);
+  assert.deepEqual(next.transactionInboxDrafts.map((d) => [d.id, d.lineId, d.historyMatch]), [["h", "", false], ["m", "groceries", false], ["n", "", undefined]]);
+  assert.equal(clearHistorySuggestions(next).state, next);
+});
+
+test("sortDrafts sorts by date, stored amount or payee in either direction, keeping ties in their original order", () => {
+  const drafts = [
+    { id: "1", payee: "banana", amount: 5, date: "2026-07-02", lineId: "" }, { id: "2", payee: "Apple", amount: -9, date: "2026-07-03", lineId: "" },
+    { id: "3", payee: "cherry", amount: 5, date: "2026-07-01", lineId: "" }
+  ];
+  assert.deepEqual(sortDrafts(drafts, "date", "desc").map((d) => d.id), ["2", "1", "3"]);
+  assert.deepEqual(sortDrafts(drafts, "date", "asc").map((d) => d.id), ["3", "1", "2"]);
+  assert.deepEqual(sortDrafts(drafts, "payee", "asc").map((d) => d.id), ["2", "1", "3"]);
+  assert.deepEqual(sortDrafts(drafts, "amount", "desc").map((d) => d.id), ["1", "3", "2"]);
+  assert.deepEqual(sortDrafts(drafts, "amount", "asc").map((d) => d.id), ["2", "1", "3"]);
+  assert.deepEqual(drafts.map((d) => d.id), ["1", "2", "3"], "never mutates the input");
+});

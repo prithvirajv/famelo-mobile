@@ -514,3 +514,51 @@ export function moveDraftToTransfer(state: HouseholdState, draftId: string, coun
     household: withActivity(state, `Moved ${draft.payee} to Transfers`)
   } };
 }
+
+// ---- Bulk actions and sorting ---------------------------------------------------------------------------------------
+
+export type BulkAccountResult = { state: HouseholdState; applied: number; skippedClosed: number };
+
+// Links every row that has NO account yet to one account (a statement imported without an account match). Rows already
+// linked - by the filename match or by hand - are never overwritten. A closed account is skipped for any row dated after it
+// closed, and those are counted so the caller can say so.
+export function setAccountForUnlinkedDrafts(state: HouseholdState, accountId: string): BulkAccountResult {
+  const account = (state.accounts || []).find((item) => item.id === accountId);
+  let applied = 0;
+  let skippedClosed = 0;
+  const drafts = (state.transactionInboxDrafts || []).map((draft) => {
+    if (draft.accountId) return draft;
+    if (!accountAllowsDate(account, draft.date || "")) { skippedClosed += 1; return draft; }
+    applied += 1;
+    return { ...draft, accountId, accountHistoryMatch: false };
+  });
+  return { state: applied ? { ...state, transactionInboxDrafts: drafts } : state, applied, skippedClosed };
+}
+
+// Resets the category on every row whose category came from a history guess (never a hand-picked one, a rule, or a
+// refund match - those don't carry the history mark), so the user can redo them by hand or with the AI suggestion.
+export function clearHistorySuggestions(state: HouseholdState): { state: HouseholdState; cleared: number } {
+  let cleared = 0;
+  const drafts = (state.transactionInboxDrafts || []).map((draft) => {
+    if (!draft.historyMatch) return draft;
+    cleared += 1;
+    return { ...draft, lineId: "", historyMatch: false };
+  });
+  return { state: cleared ? { ...state, transactionInboxDrafts: drafts } : state, cleared };
+}
+
+export type DraftSortField = "date" | "amount" | "payee";
+
+// Date/Amount/Payee, either direction. Amount sorts on the STORED value (positive = money out), same as web. Ties keep
+// their incoming order, so a re-sort never shuffles equal rows.
+export function sortDrafts<T extends InboxDraft>(drafts: T[], field: DraftSortField, direction: "asc" | "desc"): T[] {
+  const sign = direction === "asc" ? 1 : -1;
+  const value = (draft: T): string | number => field === "amount" ? Number(draft.amount || 0) : field === "date" ? draft.date || "" : String(draft.payee || "").toLowerCase();
+  return drafts.map((draft, index) => ({ draft, index })).sort((a, b) => {
+    const left = value(a.draft);
+    const right = value(b.draft);
+    if (left < right) return -sign;
+    if (left > right) return sign;
+    return a.index - b.index;
+  }).map((entry) => entry.draft);
+}

@@ -358,3 +358,10 @@ test("Cross-platform: reminder times are built from numeric parts, never by pars
   assert.doesNotMatch(logic, /new Date\(`\$\{[^}]*\}T\$\{/, "'YYYY-MM-DDTHH:MM' parsing can differ between JS engines");
   assert.doesNotMatch(logic, /new Date\((dateTime|nextReminderAt)\)/);
 });
+
+test("Bank stream has bulk set-account, clear-suggested-categories and sorting, all through the pure logic", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "BankStream");
+  for (const name of ["setAccountForUnlinkedDrafts", "clearHistorySuggestions", "sortDrafts"]) assert.match(body, new RegExp(name + "\\("));
+  assertOnlyWholeStateSaves(body, "BankStream");
+});

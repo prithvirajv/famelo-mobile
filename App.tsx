@@ -43,8 +43,8 @@ import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount } from "./src/bankStreamLogic";
-import type { DraftReview, ParsedBankRow } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import type { DraftReview, DraftSortField, ParsedBankRow } from "./src/bankStreamLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
@@ -1739,8 +1739,11 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const currency = state.household.currency;
   const accounts = state.accounts || [];
   const lines = allBudgetLines(state);
-  const reviews = reviewDrafts(state).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const [sort, setSort] = useState<{ field: DraftSortField; direction: "asc" | "desc" }>({ field: "date", direction: "desc" });
+  const reviews = sortDrafts(reviewDrafts(state), sort.field, sort.direction);
   const counts = pendingDraftCountsByAccount(reviews);
+  const unlinkedCount = reviews.filter((draft) => !draft.accountId).length;
+  const historyCount = reviews.filter((draft) => draft.historyMatch).length;
   const [feedback, setFeedback] = useState("");
   const [importing, setImporting] = useState(false);
   const [clearAccountId, setClearAccountId] = useState("");
@@ -1787,6 +1790,21 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       setImporting(false);
     }
   };
+
+  const applyBulkAccount = async (accountId: string) => {
+    const result = setAccountForUnlinkedDrafts(state, accountId);
+    if (result.applied) await onSave(result.state);
+    const accountLabel = accounts.find((account) => account.id === accountId)?.name || "That account";
+    setFeedback(result.skippedClosed
+      ? `${accountLabel} was applied to ${result.applied} row${result.applied === 1 ? "" : "s"} - ${result.skippedClosed} skipped because they're dated after that account's close date.`
+      : `${accountLabel} was applied to ${result.applied} row${result.applied === 1 ? "" : "s"}.`);
+  };
+  const confirmClearHistory = () => {
+    Alert.alert(`Clear ${historyCount} suggested categor${historyCount === 1 ? "y" : "ies"}?`, "Rows whose category was guessed from your history go back to Unassigned, so you can pick each one by hand or ask the AI. Categories you picked yourself aren't touched.", [{ text: "Cancel" }, {
+      text: "Clear", style: "destructive", onPress: () => { const result = clearHistorySuggestions(state); void onSave(result.state); setFeedback(`Cleared the suggested category on ${result.cleared} row${result.cleared === 1 ? "" : "s"}.`); }
+    }]);
+  };
+  const toggleSort = (field: DraftSortField) => setSort((prev) => prev.field === field ? { field, direction: prev.direction === "asc" ? "desc" : "asc" } : { field, direction: field === "date" ? "desc" : "asc" });
 
   const confirmClear = () => {
     const account = accounts.find((item) => item.id === clearAccountId);
@@ -1857,7 +1875,21 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       </Pressable>)}</ScrollView>
       {clearAccountId ? <Pressable style={styles.secondarySmall} onPress={confirmClear}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Clear</Text></Pressable> : null}
     </Card> : null}
+    {unlinkedCount && accounts.length ? <Card>
+      <Text style={styles.cardTitle}>Set account for {unlinkedCount} unlinked row{unlinkedCount === 1 ? "" : "s"}</Text>
+      <Text style={styles.muted}>Only rows with no account yet are changed - ones already linked are left alone.</Text>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={styles.choice} onPress={() => void applyBulkAccount(account.id)}><Text style={styles.choiceText}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
+    </Card> : null}
+    {historyCount ? <Card>
+      <Text style={styles.cardTitle}>{historyCount} categor{historyCount === 1 ? "y was" : "ies were"} guessed from history</Text>
+      <Pressable style={styles.secondarySmall} onPress={confirmClearHistory}><Text style={styles.secondaryButtonText}>Clear {historyCount} suggested categor{historyCount === 1 ? "y" : "ies"}</Text></Pressable>
+    </Card> : null}
     <Text style={styles.cardTitle}>{reviews.length ? `${reviews.length} waiting for review` : "Nothing waiting for review"}</Text>
+    {reviews.length > 1 ? <View style={styles.choiceRow}>
+      {(["date", "amount", "payee"] as DraftSortField[]).map((field) => <Pressable key={field} style={[styles.choice, sort.field === field && styles.choiceActive]} onPress={() => toggleSort(field)}>
+        <Text style={[styles.choiceText, sort.field === field && styles.choiceTextActive]}>{field === "date" ? "Date" : field === "amount" ? "Amount" : "Payee"}{sort.field === field ? (sort.direction === "asc" ? " ▲" : " ▼") : ""}</Text>
+      </Pressable>)}
+    </View> : null}
     {reviews.slice(0, visibleCount).map((draft) => {
       const account = accounts.find((item) => item.id === draft.accountId);
       const id = draft.id || "";
