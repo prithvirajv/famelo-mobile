@@ -21,7 +21,8 @@ test("mobile calendar and meal workflows use shared members and persistent state
   assert.match(api, /householdAccess/);
   assert.match(api, /\/api\/households\/access/);
   assert.match(app, /Assign to/);
-  assert.match(app, /slot === "Snack" \? -1/);
+  // One meal per day+slot (Snack included), like web: planning an occupied slot replaces it.
+  assert.match(app, /planMealSlot\(next\.meals\.plannedWeek/);
   assert.match(app, /Save week/);
   assert.match(app, /Post groceries/);
   assert.match(app, /Add a Groceries subcategory before posting/);
@@ -491,4 +492,18 @@ test("global search and onboarding are wired into the app shell with Android-saf
   assert.match(extractFunctionSource(app, "OnboardingModal"), /<Modal[^>]*onRequestClose=\{onDismiss\}/);
   // dismissing onboarding goes through the shared whole-state save, never a partial write
   assert.match(app, /save\(dismissOnboarding\(state\)\)/);
+});
+
+test("recipes screen and meal planner save through the shared whole-state save and use the meals logic", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const recipes = extractFunctionSource(app, "Recipes");
+  assertOnlyWholeStateSaves(recipes);
+  assert.match(recipes, /saveRecipe\(/);
+  assert.match(recipes, /deleteRecipe\(/);
+  assert.match(recipes, /keyboardShouldPersistTaps="handled"/);
+  const meals = extractFunctionSource(app, "Meals");
+  assert.match(meals, /planMealSlot\(/);
+  assert.match(meals, /clearMealSlot\(/);
+  assert.match(meals, /groceryListByAisle\(/);
+  assert.match(app, /<Recipes state=\{state\} onSave=\{save\}/);
 });

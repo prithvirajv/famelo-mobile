@@ -32,7 +32,7 @@ import {
   flowSegments, resolveFlowSelection, transactionAmountForLines, transactionsForLines, priorYearMonthKeys, yoyDelta, yoyLabel, REPORT_THEMES
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, Recipe, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
@@ -40,6 +40,8 @@ import {
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
+import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
+import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
 import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
@@ -100,7 +102,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | "recipes" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingHidden, setOnboardingHidden] = useState(false);
@@ -189,6 +191,7 @@ function AppContent() {
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bankStream" ? <BankStream state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "recipes" ? <Recipes state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} members={(access?.members || []).filter((member) => member.status === "active").map((member) => ({ name: member.name, email: member.email }))} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
@@ -197,12 +200,12 @@ function AppContent() {
     : tab === "journal" ? <Journal privateData={activePrivateData} onSave={saveJournal} />
     : tab === "plan" ? <Plan privateData={activePrivateData} onSave={savePlans} sinkingFundNames={(state.goals?.sinkingFunds || []).map((fund) => fund.name)} />
     : tab === "documents" ? <DocumentsScreen notes={state.notes.entries} wealthAssets={state.goals?.netWorth?.assets || []} wealthLiabilities={state.goals?.netWorth?.liabilities || []} viewerName={user.name} />
-    : tab === "meals" ? <Meals state={state} onSave={save} />
+    : tab === "meals" ? <Meals state={state} onSave={save} onOpenRecipes={() => setSubScreen("recipes")} />
     : <More state={state} user={user} households={households} onSelect={async (id) => {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} onOpenRecipes={() => setSubScreen("recipes")} />;
 
   return <SafeAreaView style={styles.app} edges={["top", "left", "right"]}>
     <StatusBar style="dark" />
@@ -238,6 +241,88 @@ function AppContent() {
       </Pressable>)}
     </View>
   </SafeAreaView>;
+}
+
+// The recipe library: add/edit/delete, search by name or ingredient, filter by "planned this week", and sort. Rules live in
+// src/mealsLogic.ts (names unique case-insensitively; editing renames planned meals; deleting unlinks them).
+function Recipes({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const recipes = state.meals.recipes;
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: "", ingredients: "", calories: "400", protein: "20" });
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<RecipeFilter>("all");
+  const [sortBy, setSortBy] = useState<RecipeSort>("name");
+  const week = state.meals.selectedWeekByMonth?.[state.budget.month] ?? currentMealWeekNumber(state.budget.month);
+  const weekMeals = state.meals.plannedWeek.filter((meal) => (!meal.month || meal.month === state.budget.month) && Number(meal.week || 1) === week);
+  const planned = plannedRecipeIds(weekMeals);
+  const visible = recipesFilteredSorted(recipes, planned, query, filter, sortBy);
+
+  const openForm = (recipe?: Recipe) => {
+    setEditingId(recipe?.id || null);
+    setForm(recipe ? { name: recipe.name, ingredients: recipe.ingredients.join(", "), calories: String(recipe.calories), protein: String(recipe.protein) } : { name: "", ingredients: "", calories: "400", protein: "20" });
+    setFormOpen(true);
+  };
+  const closeForm = () => { setFormOpen(false); setEditingId(null); };
+  const submit = async () => {
+    const problem = validateRecipe(recipes, form, editingId);
+    if (problem) return Alert.alert("Check the recipe", problem);
+    const next = saveRecipe(recipes, state.meals.plannedWeek, form, editingId, () => uniqueId(form.name));
+    await onSave({ ...state, meals: { ...state.meals, recipes: next.recipes, plannedWeek: next.plannedWeek } });
+    closeForm();
+  };
+  const confirmDelete = (recipe: Recipe) => {
+    Alert.alert(`Delete "${recipe.name}"?`, "This removes the recipe from your library. Meals already planned with it keep their name but lose the link.", [
+      { text: "Cancel" },
+      { text: "Delete", style: "destructive", onPress: () => {
+        const next = deleteRecipe(recipes, state.meals.plannedWeek, recipe.id);
+        if (editingId === recipe.id) closeForm();
+        void onSave({ ...state, meals: { ...state.meals, recipes: next.recipes, plannedWeek: next.plannedWeek } });
+      } }
+    ]);
+  };
+  const chip = (label: string, active: boolean, onPress: () => void) => <Pressable key={label} style={[styles.choice, active && styles.choiceActive]} onPress={onPress}><Text style={[styles.choiceText, active && styles.choiceTextActive]}>{label}</Text></Pressable>;
+
+  return <Page>
+    <SubScreenHeader title="Recipes" eyebrow="MEALS" onBack={onBack} />
+    {formOpen ? <Card>
+      <Text style={styles.cardTitle}>{editingId ? "Edit recipe" : "Add recipe"}</Text>
+      <Text style={styles.label}>Name</Text>
+      <TextInput style={styles.input} value={form.name} onChangeText={(name) => setForm({ ...form, name })} placeholder="Vegetable curry" />
+      <Text style={styles.label}>Ingredients (comma separated)</Text>
+      <TextInput style={styles.input} value={form.ingredients} onChangeText={(ingredients) => setForm({ ...form, ingredients })} placeholder="onion, tomato, lentils" autoCapitalize="none" />
+      <View style={styles.actionRow}>
+        <View style={{ flex: 1 }}><Text style={styles.label}>Calories</Text><TextInput style={styles.input} value={form.calories} onChangeText={(calories) => setForm({ ...form, calories })} keyboardType="number-pad" /></View>
+        <View style={{ flex: 1 }}><Text style={styles.label}>Protein (g)</Text><TextInput style={styles.input} value={form.protein} onChangeText={(protein) => setForm({ ...form, protein })} keyboardType="number-pad" /></View>
+      </View>
+      <View style={styles.actionRow}>
+        <Pressable style={[styles.secondarySmall, { flex: 1 }]} onPress={closeForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+        <Pressable style={[styles.primaryButton, { flex: 1, marginTop: 0 }]} onPress={() => void submit()}><Text style={styles.primaryButtonText}>{editingId ? "Update recipe" : "Add recipe"}</Text></Pressable>
+      </View>
+    </Card> : <Pressable style={styles.primaryButton} onPress={() => openForm()}><Text style={styles.primaryButtonText}>Add recipe</Text></Pressable>}
+    {recipes.length ? <Card>
+      <TextInput style={styles.input} value={query} onChangeText={setQuery} placeholder="Search recipes or ingredients" autoCapitalize="none" autoCorrect={false} />
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        {chip("All", filter === "all", () => setFilter("all"))}{chip("In this week", filter === "planned", () => setFilter("planned"))}{chip("Not planned", filter === "unplanned", () => setFilter("unplanned"))}
+      </ScrollView>
+      <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+        {chip("Sort: name", sortBy === "name", () => setSortBy("name"))}{chip("Highest protein", sortBy === "protein", () => setSortBy("protein"))}{chip("Highest calories", sortBy === "calories", () => setSortBy("calories"))}
+      </ScrollView>
+    </Card> : null}
+    {recipes.length === 0 ? <Text style={styles.muted}>No recipes yet - add your first one above.</Text>
+      : visible.length === 0 ? <Text style={styles.muted}>No recipes match.</Text>
+      : visible.map((recipe) => <Card key={recipe.id}>
+        <View style={styles.iouPersonHead}>
+          <View style={styles.rowCopy}>
+            <Text style={styles.cardTitle}>{recipe.name}{planned.has(recipe.id) ? "  (planned this week)" : ""}</Text>
+            <Text style={styles.rowDetail}>{recipe.calories} cal · {recipe.protein}g protein</Text>
+            <Text style={styles.muted}>{recipe.ingredients.slice(0, 6).join(", ")}{recipe.ingredients.length > 6 ? ` +${recipe.ingredients.length - 6}` : ""}</Text>
+          </View>
+          <Pressable accessibilityLabel={`Edit ${recipe.name}`} hitSlop={8} onPress={() => openForm(recipe)}><Ionicons name="create-outline" size={20} color={colors.text} /></Pressable>
+          <Pressable accessibilityLabel={`Delete ${recipe.name}`} hitSlop={8} onPress={() => confirmDelete(recipe)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+      </Card>)}
+  </Page>;
 }
 
 // Global search across transactions, notes, documents and decisions (web's search dialog). Documents are not part of the
@@ -1080,7 +1165,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     </Card></Page>;
 }
 
-function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
+function Meals({ state, onSave, onOpenRecipes }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onOpenRecipes: () => void }) {
   const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
   const slots = ["Breakfast", "Lunch", "Dinner", "Snack"];
   // Defaults to whichever week actually contains today (not always week 1) - opening this screen
@@ -1104,30 +1189,69 @@ function Meals({ state, onSave }: { state: HouseholdState; onSave: (next: Househ
     const recipe = state.meals.recipes.find((item) => item.id === recipeId);
     const mealName = recipe ? recipe.name : customMeal.trim();
     if (!mealName) return Alert.alert("Meal name needed", "Choose a recipe or type a meal name.");
-    const next = structuredClone(state); const planned: PlannedMeal = { month: state.budget.month, week, day, slot, recipeId: recipe?.id || "", meal: mealName, servings: Math.max(1, Number(servings || 3)) };
-    const existing = slot === "Snack" ? -1 : next.meals.plannedWeek.findIndex((item) => (!item.month || item.month === state.budget.month) && Number(item.week || 1) === week && item.day === day && (item.slot || "Dinner") === slot);
-    if (existing >= 0) next.meals.plannedWeek[existing] = planned; else next.meals.plannedWeek.push(planned); next.meals.feedback = `${mealName} planned for ${day} ${slot}.`; await onSave(next);
+    const next = structuredClone(state);
+    // One meal per day+slot, like web: planning an occupied slot replaces what was there.
+    next.meals.plannedWeek = planMealSlot(next.meals.plannedWeek, { month: state.budget.month, week, day, slot, mealName, recipeId: recipe?.id || "", servings: Number(servings) });
+    next.meals.feedback = `${mealName} planned for ${day} ${slot}.`;
+    await onSave(next);
   };
-  const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week ${week}`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; await onSave(next); };
+  const clearSlot = async (mealDay: string, mealSlot: string) => {
+    await onSave({ ...state, meals: { ...state.meals, plannedWeek: clearMealSlot(state.meals.plannedWeek, state.budget.month, week, mealDay, mealSlot) } });
+  };
+  // Loads a planned meal back into the form so tapping it edits it (same as web's click-to-edit slot).
+  const editSlot = (item: PlannedMeal, mealDay: string, mealSlot: string) => {
+    setDay(mealDay); setSlot(mealSlot); setServings(String(item.servings || 3));
+    if (item.recipeId && state.meals.recipes.some((entry) => entry.id === item.recipeId)) { setRecipeId(item.recipeId); setCustomMeal(""); }
+    else { setRecipeId(""); setCustomMeal(item.meal); }
+  };
+  const nutrition = mealNutritionTotals(current, state.meals.recipes);
+  const groceryGroups = groceryListByAisle(current, state.meals.recipes);
+  const goals = state.meals.nutritionGoals;
+  const saveWeek = async () => { const next = structuredClone(state); const label = `${state.budget.month} · Week ${week}`; next.meals.savedWeeks ||= []; if (!next.meals.savedWeeks.includes(label)) next.meals.savedWeeks.push(label); next.meals.feedback = `${label} saved.`; if (next.household.activity) next.household.activity.unshift(`Saved meal week: ${label}`); await onSave(next); };
   const postGroceries = async () => {
     const next = structuredClone(state);
     const line = next.budget.categories.flatMap((category) => category.lines).find((item) => item.name.toLowerCase().includes("grocer"));
     if (!line) return Alert.alert("Budget setup needed", "Add a Groceries subcategory before posting.");
     const estimate = groceryEstimateAmount(current, state.meals.recipes);
     if (estimate <= 0) return Alert.alert("Nothing planned yet", "Plan at least one meal this week before posting a grocery estimate.");
-    const amount = Number(next.meals.groceryEstimate || estimate);
-    next.transactions.unshift({ date: new Date().toISOString().slice(0, 10), payee: "Meal plan groceries", lineId: line.id, amount, memo: "Posted from mobile meal planner" });
-    next.meals.feedback = `${money(amount, state.household.currency)} posted to Groceries.`;
+    const amount = Math.max(0, Number(next.meals.groceryEstimate || estimate));
+    next.transactions.unshift({ date: localDateKey(), payee: "Meal plan groceries", lineId: line.id, amount, memo: `Posted from Week ${week} grocery list` });
+    next.meals.feedback = `${money(amount, state.household.currency)} posted to ${line.name}.`;
+    if (next.household.activity) next.household.activity.unshift(next.meals.feedback);
     await onSave(next);
   };
   return <Page><Title eyebrow="MEALS">Weekly meal plan</Title><Card>
+    <Pressable style={styles.secondarySmall} onPress={onOpenRecipes}><Text style={styles.secondaryButtonText}>Manage recipes ({state.meals.recipes.length})</Text></Pressable>
     <Text style={styles.label}>Week</Text>
     <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{weeks.map((item) => <Pressable key={item.number} style={[styles.choice, week === item.number && styles.choiceActive]} onPress={() => void selectWeek(item.number)}><Text style={[styles.choiceText, week === item.number && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</ScrollView>
     <View style={styles.actionRow}><Pressable style={styles.secondarySmall} onPress={() => void saveWeek()}><Text style={styles.secondaryButtonText}>Save week</Text></Pressable><Pressable style={styles.secondarySmall} onPress={() => void postGroceries()}><Text style={styles.secondaryButtonText}>Post groceries</Text></Pressable></View>{state.meals.feedback ? <Text style={styles.successText}>{state.meals.feedback}</Text> : null}
     <Text style={styles.label}>Day</Text><ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{days.map((item) => <Pressable key={item} style={[styles.choice, day === item && styles.choiceActive]} onPress={() => setDay(item)}><Text style={[styles.choiceText, day === item && styles.choiceTextActive]}>{item.slice(0, 3)}</Text></Pressable>)}</ScrollView>
     <Text style={styles.label}>Meal</Text><View style={styles.choiceRow}>{slots.map((item) => <Pressable key={item} style={[styles.choice, slot === item && styles.choiceActive]} onPress={() => setSlot(item)}><Text style={[styles.choiceText, slot === item && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View>
     <Text style={styles.label}>Recipe</Text>{state.meals.recipes.map((recipe) => <Pressable key={recipe.id} style={[styles.recipeChoice, recipeId === recipe.id && styles.choiceActive]} onPress={() => { setRecipeId(recipe.id); setCustomMeal(""); }}><Text style={[styles.choiceText, recipeId === recipe.id && styles.choiceTextActive]}>{recipe.name}</Text></Pressable>)}<TextInput style={styles.input} value={customMeal} onChangeText={(text) => { setCustomMeal(text); setRecipeId(""); }} placeholder="Or type any meal (no recipe)" /><TextInput style={styles.input} value={servings} onChangeText={setServings} keyboardType="number-pad" placeholder="Servings" /><Pressable style={styles.primaryButton} onPress={() => void plan()}><Text style={styles.primaryButtonText}>Plan meal</Text></Pressable>
-  </Card>{weekDayDates.map(({ day: mealDay, date }) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text><Text style={styles.muted}>{formatShortDate(date)}</Text>{slots.flatMap((mealSlot) => { const items = current.filter((item) => item.day === mealDay && (item.slot || "Dinner") === mealSlot); return items.length ? items.map((item, index) => <Row key={`${mealSlot}-${item.recipeId}-${index}`} title={item.meal} detail={`${mealSlot} · ${item.servings} servings`} />) : [<Pressable key={`${mealSlot}-open`} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>]; })}</Card>)}</Page>;
+  </Card>
+  <Card>
+    <Text style={styles.cardTitle}>Nutrition</Text>
+    {current.length ? <>
+      <Text style={styles.rowDetail}>Daily calories: {nutrition.calories}{goals ? ` of ${goals.calories}` : ""} kcal</Text>
+      <Text style={styles.rowDetail}>Daily protein: {nutrition.protein}{goals ? ` of ${goals.protein}` : ""} g</Text>
+    </> : <Text style={styles.muted}>Nothing planned to measure yet.</Text>}
+  </Card>
+  <Card>
+    <Text style={styles.cardTitle}>Grocery list</Text>
+    {groceryGroups.length ? groceryGroups.map((group) => <View key={group.aisle}>
+      <Text style={styles.label}>{group.aisle}</Text>
+      {group.items.map((item) => <Row key={item.ingredient} title={item.ingredient} detail={item.count > 1 ? `×${item.count} · from meal plan` : "from meal plan"} />)}
+    </View>) : <Text style={styles.muted}>Plan a meal to build your grocery list.</Text>}
+  </Card>
+  {weekDayDates.map(({ day: mealDay, date }) => <Card key={mealDay}><Text style={styles.cardTitle}>{mealDay}</Text><Text style={styles.muted}>{formatShortDate(date)}</Text>{slots.map((mealSlot) => {
+    const item = mealInSlot(current, mealDay, mealSlot);
+    return item
+      ? <View key={mealSlot} style={styles.checkRow}>
+        <Pressable style={styles.rowCopy} onPress={() => editSlot(item, mealDay, mealSlot)}><Text style={styles.rowTitle}>{item.meal}</Text><Text style={styles.rowDetail}>{mealSlot} · {item.servings} serving{item.servings === 1 ? "" : "s"} · tap to edit</Text></Pressable>
+        <Pressable accessibilityLabel={`Clear ${mealSlot} on ${mealDay}`} hitSlop={8} onPress={() => void clearSlot(mealDay, mealSlot)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+      </View>
+      : <Pressable key={mealSlot} onPress={() => { setDay(mealDay); setSlot(mealSlot); }}><Row title="Open" detail={mealSlot} /></Pressable>;
+  })}</Card>)}</Page>;
 }
 
 const noteColorOptions = [
@@ -3697,10 +3821,10 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void }) {
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream, onOpenRecipes }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void; onOpenRecipes: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenRecipes}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Recipes</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes · add, edit, search</Text></Pressable><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
