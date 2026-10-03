@@ -69,7 +69,7 @@ export type Account = {
   // transaction/paycheck-deposit/transfer dated after it - see accountAllowsDate in the web app.
   closedAt?: string;
 };
-export type Transfer = { fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
+export type Transfer = { id?: string; fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
 export type PaycheckRecurrence = "once" | "bonus" | "weekly" | "biweekly" | "monthly";
 export type Paycheck = {
   id: string; date: string; name: string; amount: number; recurrence: PaycheckRecurrence;

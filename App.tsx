@@ -31,7 +31,7 @@ import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt
 import { advanceChoreDate, advanceReminderDate, choreCadenceLabels, isReminderComplete } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks } from "./src/paychecksLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
@@ -1702,6 +1702,30 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     }]);
   };
 
+  const transfers = state.transfers || [];
+  const [transferFrom, setTransferFrom] = useState(""); const [transferTo, setTransferTo] = useState("");
+  const [transferAmount, setTransferAmount] = useState(""); const [transferDate, setTransferDate] = useState(today()); const [transferMemo, setTransferMemo] = useState("");
+  const [showTransferHistory, setShowTransferHistory] = useState(false);
+  const accountLabel = (id: string) => accounts.find((account) => account.id === id)?.name || "Deleted account";
+
+  const submitTransfer = async () => {
+    const transfer = buildTransfer({ fromAccountId: transferFrom, toAccountId: transferTo, amount: Number(transferAmount), date: transferDate, memo: transferMemo }, () => uniqueId("transfer"));
+    if (!transfer) return Alert.alert("Can't record transfer", "Pick two different accounts and enter an amount above zero.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(transferDate)) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+    const closed = [transferFrom, transferTo].map((id) => accounts.find((account) => account.id === id)).find((account) => !accountAllowsDate(account, transferDate));
+    if (closed) return Alert.alert("Account is closed", `${closed.name} is closed — pick a date on or before its close date, or choose a different account.`);
+    await onSave({ ...state, transfers: [transfer, ...transfers] });
+    setTransferAmount(""); setTransferMemo("");
+  };
+
+  const deleteTransfer = (index: number) => {
+    const transfer = transfers[index];
+    if (!transfer) return;
+    Alert.alert("Delete transfer?", `${accountLabel(transfer.fromAccountId)} → ${accountLabel(transfer.toAccountId)} · ${money(transfer.amount, currency)}`, [{ text: "Cancel" }, {
+      text: "Delete", style: "destructive", onPress: () => void onSave({ ...state, transfers: transfers.filter((_, itemIndex) => itemIndex !== index) })
+    }]);
+  };
+
   const [payingDebtId, setPayingDebtId] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
 
@@ -1824,6 +1848,33 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       <Text style={styles.label}>Opening balance</Text>
       <TextInput style={styles.input} value={newAccountOpening} onChangeText={setNewAccountOpening} placeholder="0.00" keyboardType="decimal-pad" />
       <Pressable style={styles.secondarySmall} onPress={() => void submitAddAccount()}><Text style={styles.secondaryButtonText}>Add account</Text></Pressable>
+    </Card>
+
+    <Card>
+      <Text style={styles.cardTitle}>Transfers</Text>
+      {accounts.length >= 2 ? <>
+        <Text style={styles.label}>From</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferFrom === account.id && styles.choiceActive]} onPress={() => setTransferFrom(account.id)}><Text style={[styles.choiceText, transferFrom === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
+        <Text style={styles.label}>To</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{accounts.map((account) => <Pressable key={account.id} style={[styles.choice, transferTo === account.id && styles.choiceActive]} onPress={() => setTransferTo(account.id)}><Text style={[styles.choiceText, transferTo === account.id && styles.choiceTextActive]}>{account.name}{account.closedAt ? " (closed)" : ""}</Text></Pressable>)}</ScrollView>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={transferAmount} onChangeText={setTransferAmount} placeholder="Amount" keyboardType="decimal-pad" />
+          <TextInput style={[styles.input, { flex: 1 }]} value={transferDate} onChangeText={setTransferDate} placeholder="YYYY-MM-DD" />
+        </View>
+        <TextInput style={styles.input} value={transferMemo} onChangeText={setTransferMemo} placeholder="Memo (e.g. Credit card payment)" />
+        <Pressable style={styles.secondarySmall} onPress={() => void submitTransfer()}><Text style={styles.secondaryButtonText}>Record transfer</Text></Pressable>
+      </> : <Text style={styles.muted}>Add at least two accounts to record a transfer, like paying a credit card from checking.</Text>}
+      {transfers.length ? <>
+        <Pressable style={[styles.secondarySmall, { marginTop: 10 }]} onPress={() => setShowTransferHistory((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showTransferHistory ? "Hide" : "Show"} transfer history ({transfers.length})</Text></Pressable>
+        {showTransferHistory ? transfersNewestFirst(transfers).map(({ transfer, index }) => <View key={transfer.id || index} style={styles.row}>
+          <View style={styles.rowCopy}>
+            <Text style={styles.rowTitle}>{accountLabel(transfer.fromAccountId)} → {accountLabel(transfer.toAccountId)}</Text>
+            <Text style={styles.rowDetail}>{[transfer.date, transfer.memo].filter(Boolean).join(" · ")}</Text>
+          </View>
+          <Text style={styles.rowValue}>{money(transfer.amount, currency)}</Text>
+          <Pressable onPress={() => deleteTransfer(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>) : null}
+      </> : null}
     </Card>
 
     <Card>

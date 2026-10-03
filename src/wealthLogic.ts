@@ -276,3 +276,25 @@ export function accountAllowsDate(account: Account | undefined, dateValue: strin
   if (!account?.closedAt) return true;
   return dateValue <= account.closedAt;
 }
+
+export type TransferInput = { fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
+
+// Mirrors web's transferForm submit handler: the two accounts must differ and the amount must be
+// positive (a transfer's amount is always stored positive - direction comes from from/to).
+// Returns null when the input isn't a valid transfer. Whether a closed account blocks the date is
+// checked separately by the caller via accountAllowsDate, so it can show which account is closed.
+export function buildTransfer(input: TransferInput, createId: () => string): Transfer | null {
+  const amount = Number(input.amount);
+  if (!input.fromAccountId || !input.toAccountId || input.fromAccountId === input.toAccountId || !(amount > 0)) return null;
+  return { id: createId(), date: input.date, fromAccountId: input.fromAccountId, toAccountId: input.toAccountId, amount, memo: (input.memo || "").trim() };
+}
+
+// Transfers are stored in insertion order (newest added first via unshift), which drifts from date
+// order the moment someone logs a back-dated one - so display always re-sorts: newest date first,
+// ties broken by whichever was added most recently (web's Transfer history). `index` is the
+// transfer's position in the original array, for deleting the right one.
+export function transfersNewestFirst(transfers: Transfer[]): Array<{ transfer: Transfer; index: number }> {
+  return transfers
+    .map((transfer, index) => ({ transfer, index }))
+    .sort((a, b) => (b.transfer.date || "").localeCompare(a.transfer.date || "") || b.index - a.index);
+}

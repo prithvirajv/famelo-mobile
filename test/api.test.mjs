@@ -169,3 +169,13 @@ test("Budget is editable: lines/categories/transactions save through whole-state
   assert.match(app, /budgetIncomeFromPaychecks\(nextState\)/, "the shared save keeps budget.income in sync with paychecks, like web's per-render recompute");
   assert.match(app, /tab === "budget" \? <Budget state=\{state\} onSave=\{save\}/);
 });
+
+test("Wealth lets you record and delete transfers between accounts, newest-first, blocking closed accounts", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Wealth");
+  assert.match(body, /buildTransfer\(/);
+  assert.match(body, /transfersNewestFirst\(/);
+  assert.match(body, /accountAllowsDate\(account, transferDate\)/);
+  assert.match(body, /transfers: \[transfer, \.\.\.transfers\]/);
+  assertOnlyWholeStateSaves(body, "Wealth");
+});

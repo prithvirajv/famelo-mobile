@@ -269,3 +269,24 @@ test("accountAllowsDate blocks a new entry dated after closedAt but still allows
   assert.equal(accountAllowsDate(open, "2099-01-01"), true, "an open account (no closedAt) allows any date");
   assert.equal(accountAllowsDate(undefined, "2026-07-01"), true, "no account at all is not itself a reason to block");
 });
+
+import { buildTransfer, transfersNewestFirst } from "../src/wealthLogic.ts";
+
+test("buildTransfer requires two different accounts and a positive amount, trims the memo, and stores the amount positive", () => {
+  const ok = buildTransfer({ fromAccountId: "chk", toAccountId: "cc", amount: 620, date: "2026-07-05", memo: "  Card payment " }, () => "t1");
+  assert.deepEqual(ok, { id: "t1", date: "2026-07-05", fromAccountId: "chk", toAccountId: "cc", amount: 620, memo: "Card payment" });
+  assert.equal(buildTransfer({ fromAccountId: "chk", toAccountId: "chk", amount: 5, date: "d" }, () => "x"), null);
+  assert.equal(buildTransfer({ fromAccountId: "chk", toAccountId: "cc", amount: 0, date: "d" }, () => "x"), null);
+  assert.equal(buildTransfer({ fromAccountId: "chk", toAccountId: "cc", amount: -3, date: "d" }, () => "x"), null);
+  assert.equal(buildTransfer({ fromAccountId: "", toAccountId: "cc", amount: 3, date: "d" }, () => "x"), null);
+});
+
+test("transfersNewestFirst sorts by date descending, breaks ties by later insertion index, and keeps original indexes", () => {
+  const transfers = [
+    { fromAccountId: "a", toAccountId: "b", amount: 1, date: "2026-07-01" },
+    { fromAccountId: "a", toAccountId: "b", amount: 2, date: "2026-07-09" },
+    { fromAccountId: "a", toAccountId: "b", amount: 3, date: "2026-07-09" },
+    { fromAccountId: "a", toAccountId: "b", amount: 4, date: "2026-06-30" }
+  ];
+  assert.deepEqual(transfersNewestFirst(transfers).map((row) => [row.transfer.amount, row.index]), [[3, 2], [2, 1], [1, 0], [4, 3]]);
+});
