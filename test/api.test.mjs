@@ -482,3 +482,13 @@ test("Budget lines can be given an owner and filtered by member", () => {
   assert.match(body, /filterCategoriesByOwner\(state\.budget\.categories, memberFilter\)/);
   assert.match(body, /ownerId: lineOwner \|\| null/);
 });
+
+test("global search and onboarding are wired into the app shell with Android-safe modals", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /<GlobalSearchModal[\s\S]*?onPick=/);
+  assert.match(extractFunctionSource(app, "GlobalSearchModal"), /<Modal[^>]*onRequestClose=\{onClose\}/);
+  assert.match(extractFunctionSource(app, "GlobalSearchModal"), /keyboardShouldPersistTaps="handled"/);
+  assert.match(extractFunctionSource(app, "OnboardingModal"), /<Modal[^>]*onRequestClose=\{onDismiss\}/);
+  // dismissing onboarding goes through the shared whole-state save, never a partial write
+  assert.match(app, /save\(dismissOnboarding\(state\)\)/);
+});

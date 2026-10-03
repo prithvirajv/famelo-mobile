@@ -138,6 +138,7 @@ export type HouseholdState = {
   budgetHistory: BudgetHistoryEntry[];
   transactions: Transaction[];
   paychecks: Paycheck[];
+  onboarding?: { dismissed: boolean };
   paycheckOccurrences?: PaycheckOccurrence[];
   recurringExpenses: RecurringExpense[];
   calendar: { events: CalendarEvent[]; chores: Chore[] };

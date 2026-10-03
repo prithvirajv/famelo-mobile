@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator, Alert, AppState, BackHandler, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
+  ActivityIndicator, Alert, AppState, BackHandler, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl,
   ScrollView, Share, StyleSheet, Text, TextInput, View
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -12,6 +12,8 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { api, ApiError } from "./src/api";
+import { globalSearchResults, shouldShowOnboarding, dismissOnboarding, ONBOARDING_STEPS } from "./src/searchLogic";
+import type { SearchResult } from "./src/searchLogic";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
 import { applyChecklistToggle, formatShortDate, formatMonthLabel, shiftMonthKey, switchBudgetMonth, copyBudgetFromMonth, availablePreviousBudgets, toggleRollover, ensureRecurringBudgetBills, enableRecurringBill, disableRecurringBill, updateRecurringBill, groceryEstimateAmount, recurringBudgetSetAside, mealWeeksForMonth, currentMealWeekNumber, weekDayDatesForWeek } from "./src/planningLogic";
@@ -99,6 +101,9 @@ function AppContent() {
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [onboardingHidden, setOnboardingHidden] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -203,10 +208,29 @@ function AppContent() {
     <StatusBar style="dark" />
     <View style={styles.header}>
       <View><Text style={styles.brand}>FamilyLoop</Text><Text style={styles.household}>{selected?.name || state.household.name}</Text></View>
-      {saving ? <ActivityIndicator color={colors.green} /> : <View style={styles.saved}><Ionicons name="cloud-done-outline" size={18} color={colors.green} /><Text style={styles.savedText}>Saved</Text></View>}
+      <View style={styles.headerActions}>
+        {saving ? <ActivityIndicator color={colors.green} /> : <View style={styles.saved}><Ionicons name="cloud-done-outline" size={18} color={colors.green} /><Text style={styles.savedText}>Saved</Text></View>}
+        <Pressable accessibilityRole="button" accessibilityLabel="Search" hitSlop={10} style={styles.headerIcon} onPress={() => setSearchOpen(true)}><Ionicons name="search" size={22} color={colors.text} /></Pressable>
+      </View>
     </View>
     {error ? <Pressable style={styles.error} onPress={() => setError("")}><Text style={styles.errorText}>{error}</Text></Pressable> : null}
     <View style={styles.page}>{page}</View>
+    <GlobalSearchModal visible={searchOpen} state={state} onClose={() => setSearchOpen(false)} onPick={(target) => {
+      setSearchOpen(false);
+      if (target === "decisions") { setSubScreen("decisions"); return; }
+      setSubScreen(null); setTab(target);
+    }} />
+    <OnboardingModal visible={!onboardingHidden && !searchOpen && shouldShowOnboarding(state)} step={onboardingStep}
+      onDismiss={() => { setOnboardingStep(0); void save(dismissOnboarding(state)); }}
+      onBack={() => setOnboardingStep((value) => Math.max(0, value - 1))}
+      onSkipStep={() => setOnboardingStep((value) => Math.min(ONBOARDING_STEPS.length - 1, value + 1))}
+      onOpen={(target) => {
+        // Close the walkthrough so the screen is usable; it returns next launch until the household has some data or it is skipped.
+        setOnboardingHidden(true);
+        if (target === "home") { void save(dismissOnboarding(state)); setSubScreen(null); setTab("home"); }
+        else if (target === "wealth") setSubScreen("wealth");
+        else { setSubScreen(null); setTab(target); }
+      }} />
     <View style={[styles.tabBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
       {tabs.map((item) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: tab === item.id }} style={styles.tab} onPress={() => setTab(item.id)}>
         <Ionicons name={item.icon} size={23} color={tab === item.id ? colors.green : colors.muted} />
@@ -214,6 +238,61 @@ function AppContent() {
       </Pressable>)}
     </View>
   </SafeAreaView>;
+}
+
+// Global search across transactions, notes, documents and decisions (web's search dialog). Documents are not part of the
+// household state, so they are fetched once the first time the overlay opens.
+function GlobalSearchModal({ visible, state, onClose, onPick }: { visible: boolean; state: HouseholdState; onClose: () => void; onPick: (target: SearchResult["target"]) => void }) {
+  const [query, setQuery] = useState("");
+  const [documents, setDocuments] = useState<Array<{ name: string }> | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    setQuery("");
+    if (documents) return;
+    let cancelled = false;
+    api.documents().then((data) => { if (!cancelled) setDocuments(data.documents || []); }).catch(() => { if (!cancelled) setDocuments([]); });
+    return () => { cancelled = true; };
+  }, [visible]);
+  const results = useMemo(() => globalSearchResults(state, documents || [], query), [state, documents, query]);
+  const trimmed = query.trim();
+  return <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+    <SafeAreaView style={styles.app} edges={["top", "left", "right", "bottom"]}>
+      <View style={styles.searchBar}>
+        <Ionicons name="search" size={20} color={colors.muted} />
+        <TextInput style={styles.searchInput} value={query} onChangeText={setQuery} placeholder="Search transactions, notes, documents, decisions" autoFocus autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
+        <Pressable accessibilityRole="button" accessibilityLabel="Close search" hitSlop={10} onPress={onClose}><Text style={styles.searchClose}>Close</Text></Pressable>
+      </View>
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        {trimmed.length < 2 ? <Text style={styles.muted}>Type at least 2 characters to search.</Text>
+          : results.length === 0 ? <Text style={styles.muted}>No matches for "{trimmed}".</Text>
+          : results.map((result, index) => <Pressable key={`${result.type}-${index}`} style={styles.searchResult} onPress={() => onPick(result.target)}>
+            <Text style={styles.searchResultTitle}>{result.title}</Text>
+            <Text style={styles.muted}>{result.type} · {result.detail}</Text>
+          </Pressable>)}
+      </ScrollView>
+    </SafeAreaView>
+  </Modal>;
+}
+
+// First-run walkthrough for a brand-new household; dismissing (or finishing) is stored in state.onboarding so it never returns.
+function OnboardingModal({ visible, step, onDismiss, onBack, onSkipStep, onOpen }: { visible: boolean; step: number; onDismiss: () => void; onBack: () => void; onSkipStep: () => void; onOpen: (target: "wealth" | "budget" | "home") => void }) {
+  const current = ONBOARDING_STEPS[Math.min(step, ONBOARDING_STEPS.length - 1)];
+  if (!current) return null;
+  return <Modal visible={visible} transparent animationType="fade" onRequestClose={onDismiss}>
+    <View style={styles.onboardingBackdrop}>
+      <View style={styles.onboardingCard}>
+        <Text style={styles.eyebrow}>GETTING STARTED · STEP {step + 1} OF {ONBOARDING_STEPS.length}</Text>
+        <Text style={styles.title}>{current.title}</Text>
+        <Text style={styles.muted}>{current.body}</Text>
+        <Pressable style={styles.primaryButton} onPress={() => onOpen(current.target)}><Text style={styles.primaryButtonText}>{current.cta}</Text></Pressable>
+        <View style={styles.onboardingActions}>
+          {step > 0 ? <Pressable style={[styles.secondaryButton, styles.onboardingAction]} onPress={onBack}><Text style={styles.secondaryButtonText}>Back</Text></Pressable> : null}
+          {step < ONBOARDING_STEPS.length - 1 ? <Pressable style={[styles.secondaryButton, styles.onboardingAction]} onPress={onSkipStep}><Text style={styles.secondaryButtonText}>Next</Text></Pressable> : null}
+          <Pressable style={[styles.secondaryButton, styles.onboardingAction]} onPress={onDismiss}><Text style={styles.secondaryButtonText}>Don't show again</Text></Pressable>
+        </View>
+      </View>
+    </View>
+  </Modal>;
 }
 
 function AuthScreen({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
@@ -3574,6 +3653,10 @@ export default function App() { return <SafeAreaProvider><AppContent /></SafeAre
 const styles = StyleSheet.create({
   app: { flex: 1, backgroundColor: colors.background }, centered: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.background },
   header: { height: 68, paddingHorizontal: 20, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, brand: { fontSize: 22, fontWeight: "800", color: colors.text }, household: { marginTop: 2, color: colors.muted, fontSize: 13 }, saved: { flexDirection: "row", gap: 5, alignItems: "center" }, savedText: { color: colors.green, fontWeight: "700" },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 14 }, headerIcon: { padding: 4 },
+  searchBar: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface }, searchInput: { flex: 1, fontSize: 16, color: colors.text, paddingVertical: 8 }, searchClose: { color: colors.green, fontWeight: "700" },
+  searchResult: { backgroundColor: colors.surface, borderRadius: 10, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 3 }, searchResultTitle: { fontWeight: "700", color: colors.text, fontSize: 15 },
+  onboardingBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 }, onboardingActions: { flexDirection: "row", gap: 8 }, onboardingAction: { flex: 1 }, onboardingCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, gap: 12 },
   error: { backgroundColor: "#fff0f0", padding: 10 }, errorText: { color: colors.coral, textAlign: "center", fontWeight: "700" }, page: { flex: 1 }, content: { padding: 18, paddingBottom: 32, gap: 14 },
   titleBlock: { marginBottom: 2 }, eyebrow: { color: colors.muted, fontWeight: "800", fontSize: 12 }, title: { marginTop: 3, color: colors.text, fontWeight: "800", fontSize: 30 },
   card: { backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 16 }, cardTitle: { color: colors.text, fontWeight: "800", fontSize: 18 }, muted: { color: colors.muted, marginTop: 5 }, heroValue: { color: colors.green, fontSize: 32, fontWeight: "800", marginTop: 8 },
