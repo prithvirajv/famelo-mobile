@@ -298,3 +298,128 @@ export function transfersNewestFirst(transfers: Transfer[]): Array<{ transfer: T
     .map((transfer, index) => ({ transfer, index }))
     .sort((a, b) => (b.transfer.date || "").localeCompare(a.transfer.date || "") || b.index - a.index);
 }
+
+
+// ---- Stock / fund holdings editing ---------------------------------------------------------------------
+// Ported from web's "Manage holdings" modal handlers (app.js). A holdings group is every holding-class asset
+// (stock or retirement) sharing a groupId - one brokerage/retirement account. Every function returns new data
+// and never mutates its input, so the caller hands the result straight to the whole-state save.
+
+export type HoldingField = "symbol" | "holdingType" | "shares" | "costBasis" | "price" | "marketValue";
+export type CostEntryMode = "share" | "total";
+
+function nonNegative(raw: string | number): number {
+  return Math.max(0, Number(raw) || 0);
+}
+
+// Applies one edited field to a holding and re-derives what depends on it, as web's input handlers do.
+// - symbol is upper-cased and the holding is renamed "<account> - <SYMBOL>" (just the symbol with no account name).
+// - costBasis is always stored PER SHARE; in "total" entry mode the typed number is the total paid and is divided
+//   by shares (0 shares -> 0), and changing shares in that mode keeps the total fixed and re-derives per-share.
+// - marketValue is for holdings with no live ticker (a 401(k) fund): shares default to 1 when unset so
+//   price = value outright, otherwise price is back-derived so a later share correction still scales sensibly.
+export function updateHolding(asset: WealthAsset, field: HoldingField, raw: string | number, costMode: CostEntryMode = "share"): WealthAsset {
+  let next: WealthAsset = { ...asset };
+  if (field === "symbol") {
+    const symbol = String(raw).toUpperCase().trim();
+    const account = (asset.groupName || "").trim();
+    next = { ...next, symbol, name: account ? `${account} - ${symbol}`.replace(/ - $/, "") : symbol };
+    return next;
+  }
+  if (field === "holdingType") return { ...next, holdingType: raw === "fund" ? "fund" : "stock" };
+  if (field === "shares") {
+    const shares = nonNegative(raw);
+    if (costMode === "total") {
+      const total = Number(asset.costBasis || 0) * Number(asset.shares || 0);
+      next.costBasis = shares > 0 ? total / shares : 0;
+    }
+    next.shares = shares;
+  } else if (field === "costBasis") {
+    const entered = nonNegative(raw);
+    next.costBasis = costMode === "total" ? (Number(asset.shares || 0) > 0 ? entered / Number(asset.shares) : 0) : entered;
+  } else if (field === "price") {
+    next.price = nonNegative(raw);
+  } else {
+    const value = nonNegative(raw);
+    if (!Number(next.shares || 0)) next.shares = 1;
+    next.price = value / Number(next.shares);
+    next.value = value;
+    return next;
+  }
+  next.value = assetValue(next);
+  return next;
+}
+
+// The cost cell's number in the chosen entry mode (per-share, or total paid).
+export function costDisplayValue(asset: WealthAsset, mode: CostEntryMode): number {
+  return mode === "total" ? Number(asset.costBasis || 0) * Number(asset.shares || 0) || 0 : Number(asset.costBasis || 0);
+}
+
+export function applyQuote(asset: WealthAsset, price: number): WealthAsset {
+  const next = { ...asset, price };
+  return { ...next, value: assetValue(next) };
+}
+
+export function holdingsInGroup(assets: WealthAsset[], groupId: string): WealthAsset[] {
+  return assets.filter((asset) => isHoldingAssetClass(asset.assetClass) && (asset.groupId || asset.id) === groupId);
+}
+
+// A legacy solo holding (no groupId/groupName of its own) is adopted into a real group the moment it is opened
+// for editing, with its groupName backfilled BEFORE any edit - otherwise typing a symbol rewrites its own .name
+// and reopening would treat that symbol-suffixed name as the account name (the symbol "leaking" into it).
+export function adoptHoldingGroup(assets: WealthAsset[], groupId: string): WealthAsset[] {
+  const members = holdingsInGroup(assets, groupId);
+  const first = members[0];
+  if (!first) return assets;
+  const accountName = first.groupName || first.name || "";
+  return assets.map((asset) => members.includes(asset) ? { ...asset, groupId, groupName: accountName } : asset);
+}
+
+export function newHoldingRow(groupId: string, accountName: string, assetClass: "stock" | "retirement", createId: () => string): WealthAsset {
+  return { id: createId(), name: accountName, value: 0, assetClass, symbol: "", holdingType: "stock", shares: 0, price: 0, costBasis: 0, groupId, groupName: accountName };
+}
+
+// A new holdings account is its first (blank) holding; the group id is that row's own id.
+export function newHoldingGroup(accountName: string, assetClass: "stock" | "retirement", createId: () => string): WealthAsset {
+  const id = createId();
+  return { ...newHoldingRow(id, accountName, assetClass, () => id) };
+}
+
+export function renameHoldingGroup(assets: WealthAsset[], groupId: string, accountName: string): WealthAsset[] {
+  return assets.map((asset) => holdingsInGroup([asset], groupId).length
+    ? { ...asset, groupName: accountName, name: asset.symbol ? `${accountName} - ${asset.symbol}` : accountName }
+    : asset);
+}
+
+// Moving an account off Stock/Retirement drops its holdings out of isHoldingAssetClass; shares x price is
+// snapshotted into .value first so the amount doesn't read as $0 on the flat row (which only reads .value).
+export function changeHoldingGroupClass(assets: WealthAsset[], groupId: string, assetClass: NonNullable<WealthAsset["assetClass"]>): WealthAsset[] {
+  const leaving = !isHoldingAssetClass(assetClass);
+  return assets.map((asset) => holdingsInGroup([asset], groupId).length
+    ? { ...asset, ...(leaving ? { value: assetValue(asset) } : {}), assetClass }
+    : asset);
+}
+
+// Drops any holding in the group still mid-composition (no symbol AND no value entered) so an abandoned
+// "+ Add holding" never leaves an empty asset behind. A blank symbol alone isn't enough: a holding with no
+// ticker can carry a typed market value instead.
+export function purgeBlankHoldings(assets: WealthAsset[], groupId: string): WealthAsset[] {
+  return assets.filter((asset) => !holdingsInGroup([asset], groupId).length || (asset.symbol || "").trim() || assetValue(asset) > 0);
+}
+
+export function removeHoldingGroup(assets: WealthAsset[], groupId: string): WealthAsset[] {
+  return assets.filter((asset) => !holdingsInGroup([asset], groupId).length);
+}
+
+// "just now" / "5m ago" / "3h ago" / "2d ago" - web's caption under a group's live-price button.
+export function formatRelativeTime(iso: string | undefined, now: Date = new Date()): string | null {
+  if (!iso) return null;
+  const elapsed = now.getTime() - new Date(iso).getTime();
+  if (Number.isNaN(elapsed)) return null;
+  if (elapsed < 60000) return "just now";
+  const minutes = Math.floor(elapsed / 60000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator, Alert, AppState, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl,
   SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View
@@ -34,8 +34,9 @@ import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, Calend
 import { advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
+import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth } from "./src/paychecksLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
@@ -2020,10 +2021,104 @@ const FLOW_PALETTE = ["#13936d", "#3569d4", "#c9891e", "#e05252", "#7c5cff"];
 const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
 const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];
 
-// Stock/fund holdings are shown read-only (grouped, with gain/loss when a cost basis is
-// set) but not editable here. Out of scope for this pass (see the mobile catch-up plan):
-// adding/editing individual holdings, live price refresh, multi-currency display, and
-// debt-to-budget-line auto-EMI linking.
+// Edits one stock/retirement holdings account (a "group"): its name, class, and every holding in it. Every
+// change is saved immediately through the whole-state save (no staged draft), like web's Manage holdings
+// dialog. Number fields commit when they lose focus, so typing doesn't save on every keystroke.
+function HoldingsEditor({ state, groupId, currency, quoteFeedback, refreshingIds, onSave, onRefreshHolding, onRefreshGroup, onClose }: {
+  state: HouseholdState; groupId: string; currency: string; quoteFeedback: Record<string, { message: string; isError: boolean }>; refreshingIds: string[];
+  onSave: (next: HouseholdState) => Promise<void>; onRefreshHolding: (assetId: string) => void; onRefreshGroup: (groupId: string) => void; onClose: () => void;
+}) {
+  const [costModes, setCostModes] = useState<Record<string, CostEntryMode>>({});
+  const netWorth = state.goals?.netWorth || { assets: [], liabilities: [] };
+  const items = holdingsInGroup(netWorth.assets, groupId);
+  const accountName = items[0]?.groupName || items[0]?.name || "";
+  const groupClass = items[0]?.assetClass || "stock";
+  const groupBusy = items.some((item) => refreshingIds.includes(item.id || ""));
+
+  const saveAssets = (assets: WealthAsset[]) => onSave({ ...state, goals: { ...state.goals, netWorth: { ...netWorth, assets } } });
+  const commit = (assetId: string | undefined, field: HoldingField, raw: string | number) => {
+    if (!assetId) return;
+    void saveAssets(netWorth.assets.map((asset) => asset.id === assetId ? updateHolding(asset, field, raw, costModes[assetId] || "share") : asset));
+  };
+  const toggleCostMode = (assetId: string) => setCostModes((prev) => ({ ...prev, [assetId]: prev[assetId] === "total" ? "share" : "total" }));
+
+  const rename = (name: string) => { if (name.trim() && name.trim() !== accountName) void saveAssets(renameHoldingGroup(netWorth.assets, groupId, name.trim())); };
+  const changeClass = (assetClass: NonNullable<WealthAsset["assetClass"]>) => {
+    if (assetClass === groupClass) return;
+    void saveAssets(changeHoldingGroupClass(netWorth.assets, groupId, assetClass));
+    if (!isHoldingAssetClass(assetClass)) onClose();
+  };
+  const addRow = () => void saveAssets([...netWorth.assets, newHoldingRow(groupId, accountName, groupClass === "retirement" ? "retirement" : "stock", () => uniqueId(`${groupId}-holding`))]);
+  const removeRow = (assetId: string | undefined) => void saveAssets(netWorth.assets.filter((asset) => asset.id !== assetId));
+  const done = () => { void saveAssets(purgeBlankHoldings(netWorth.assets, groupId)); onClose(); };
+  const deleteAccount = () => Alert.alert(`Delete ${accountName || "this account"}?`, "Every holding in it will be removed. This cannot be undone.", [{ text: "Cancel" }, {
+    text: "Delete", style: "destructive", onPress: () => { void saveAssets(removeHoldingGroup(netWorth.assets, groupId)); onClose(); }
+  }]);
+
+  const total = items.reduce((sum, item) => sum + assetValue(item), 0);
+  const numberInput = (item: WealthAsset, field: HoldingField, value: number, placeholder: string, extraKey = "") => (
+    <TextInput key={`${item.id}-${field}-${extraKey}-${value}`} style={[styles.input, { flex: 1 }]} defaultValue={value ? String(Math.round(value * 10000) / 10000) : ""} placeholder={placeholder}
+      keyboardType="decimal-pad" onEndEditing={(event) => commit(item.id, field, event.nativeEvent.text)} accessibilityLabel={placeholder} />
+  );
+
+  return <Card>
+    <View style={styles.iouPersonHead}>
+      <Text style={styles.cardTitle}>Manage holdings</Text>
+      <Text style={styles.rowValue}>{money(total, currency)}</Text>
+    </View>
+    <Text style={styles.label}>Account name</Text>
+    <TextInput key={accountName} style={styles.input} defaultValue={accountName} placeholder="Fidelity brokerage" onEndEditing={(event) => rename(event.nativeEvent.text)} />
+    <Text style={styles.label}>Account type</Text>
+    <View style={styles.choiceRow}>
+      {([["stock", "Stock"], ["retirement", "Retirement"], ["cash", "Cash"], ["property", "Property"], ["other", "Other"]] as Array<[NonNullable<WealthAsset["assetClass"]>, string]>).map(([value, label]) => <Pressable key={value} style={[styles.choice, groupClass === value && styles.choiceActive]} onPress={() => changeClass(value)}>
+        <Text style={[styles.choiceText, groupClass === value && styles.choiceTextActive]}>{label}</Text>
+      </Pressable>)}
+    </View>
+    <Text style={styles.muted}>Choosing Cash, Property or Other turns this account back into a normal asset.</Text>
+
+    {items.map((item) => {
+      const mode = costModes[item.id || ""] || "share";
+      const gain = holdingGainLoss(item);
+      const feedback = item.id ? quoteFeedback[item.id] : undefined;
+      const refreshing = refreshingIds.includes(item.id || "");
+      return <View key={item.id} style={styles.planTaskBlock}>
+        <View style={styles.actionRow}>
+          <TextInput key={`${item.id}-symbol-${item.symbol}`} style={[styles.input, { flex: 1 }]} defaultValue={item.symbol || ""} placeholder="Symbol, e.g. AAPL" autoCapitalize="characters" autoCorrect={false} onEndEditing={(event) => commit(item.id, "symbol", event.nativeEvent.text)} />
+          <Pressable style={styles.planStepperButton} onPress={() => removeRow(item.id)} accessibilityLabel={`Remove ${item.symbol || "this holding"}`}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+        <View style={styles.choiceRow}>
+          {(["stock", "fund"] as const).map((type) => <Pressable key={type} style={[styles.choice, (item.holdingType || "stock") === type && styles.choiceActive]} onPress={() => commit(item.id, "holdingType", type)}>
+            <Text style={[styles.choiceText, (item.holdingType || "stock") === type && styles.choiceTextActive]}>{type === "stock" ? "Stock" : "Mutual fund"}</Text>
+          </Pressable>)}
+        </View>
+        <View style={styles.actionRow}>
+          {numberInput(item, "shares", Number(item.shares || 0), "Shares")}
+          {numberInput(item, "costBasis", costDisplayValue(item, mode), mode === "total" ? "Total paid" : "Avg. cost / share", mode)}
+          <Pressable style={styles.planStepperButton} onPress={() => item.id && toggleCostMode(item.id)} accessibilityLabel="Switch between per-share cost and total paid"><Text style={styles.secondaryButtonText}>{mode === "total" ? "Total" : "/sh"}</Text></Pressable>
+        </View>
+        <View style={styles.actionRow}>
+          {numberInput(item, "price", Number(item.price || 0), "Price / share")}
+          <Pressable style={styles.planStepperButton} disabled={refreshing} onPress={() => item.id && onRefreshHolding(item.id)} accessibilityLabel={`Refresh live price for ${item.symbol || "this holding"}`}>{refreshing ? <ActivityIndicator size="small" color={colors.green} /> : <Ionicons name="refresh" size={18} color={colors.text} />}</Pressable>
+          {numberInput(item, "marketValue", assetValue(item), "Market value")}
+        </View>
+        <Text style={[styles.rowDetail, feedback?.isError && { color: colors.coral }]}>{feedback ? feedback.message : "Price not refreshed yet"}{gain.hasCostBasis ? ` · ${gain.amount >= 0 ? "+" : ""}${money(gain.amount, currency)} (${gain.percent >= 0 ? "+" : ""}${gain.percent.toFixed(1)}%)` : ""}</Text>
+      </View>;
+    })}
+    <Text style={styles.muted}>No ticker (a 401(k) fund, say)? Type the market value directly.</Text>
+    <View style={styles.actionRow}>
+      <Pressable style={styles.secondarySmall} onPress={addRow}><Text style={styles.secondaryButtonText}>+ Add holding</Text></Pressable>
+      <Pressable style={styles.secondarySmall} disabled={groupBusy} onPress={() => onRefreshGroup(groupId)}><Text style={styles.secondaryButtonText}>{groupBusy ? "Refreshing…" : "Refresh all prices"}</Text></Pressable>
+    </View>
+    <View style={styles.actionRow}>
+      <Pressable style={styles.primaryButton} onPress={done}><Text style={styles.primaryButtonText}>Done</Text></Pressable>
+      <Pressable style={styles.secondarySmall} onPress={deleteAccount}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Delete account</Text></Pressable>
+    </View>
+  </Card>;
+}
+
+// Stock/fund holdings: grouped by account with gain/loss, editable (HoldingsEditor) with live price refresh on
+// demand. Out of scope (see the mobile catch-up plan): web's 5-minute background price polling (a phone
+// shouldn't poll silently), multi-currency display, and debt-to-budget-line auto-EMI linking.
 function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
   const currency = state.household.currency;
   const today = () => new Date().toISOString().slice(0, 10);
@@ -2070,12 +2165,71 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
         goals: state.goals ? {
           ...state.goals,
           netWorth: state.goals.netWorth ? {
+            ...state.goals.netWorth,
             assets: state.goals.netWorth.assets.filter((asset) => !accounts.find((account) => account.id === accountId && account.netWorthAssetId === asset.id)),
             liabilities: state.goals.netWorth.liabilities.filter((liability) => !accounts.find((account) => account.id === accountId && account.netWorthLiabilityId === liability.id))
           } : state.goals.netWorth
         } : state.goals
       })
     }]);
+  };
+
+  // ---- Stock / fund holdings: edit a group, refresh live prices --------------------------------------------
+  // After an await the closed-over `state` can be stale (the user may have edited meanwhile), so the quote
+  // results are applied onto the latest state through this ref instead.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [quoteFeedback, setQuoteFeedback] = useState<Record<string, { message: string; isError: boolean }>>({});
+  const [refreshingIds, setRefreshingIds] = useState<string[]>([]);
+  const [newHoldingName, setNewHoldingName] = useState("");
+  const [newHoldingClass, setNewHoldingClass] = useState<"stock" | "retirement">("stock");
+
+  // One bad symbol or a rate limit only drops that holding's update, never the batch. `report` shows a
+  // per-holding message (the editor); the group-level button stays quiet about holdings with no symbol.
+  const refreshQuotes = async (assetIds: string[], options: { stampGroupId?: string; report: boolean }) => {
+    const targets = (stateRef.current.goals?.netWorth?.assets || []).filter((asset) => asset.id && assetIds.includes(asset.id));
+    const withSymbol = targets.filter((asset) => (asset.symbol || "").trim());
+    const feedback: Record<string, { message: string; isError: boolean }> = {};
+    if (options.report) targets.filter((asset) => !(asset.symbol || "").trim()).forEach((asset) => { feedback[asset.id as string] = { message: "Enter a symbol first.", isError: true }; });
+    if (!withSymbol.length) { setQuoteFeedback((prev) => ({ ...prev, ...feedback })); return; }
+    setRefreshingIds((prev) => [...prev, ...withSymbol.map((asset) => asset.id as string)]);
+    const results = await Promise.all(withSymbol.map(async (asset) => {
+      try { return { id: asset.id as string, price: (await api.stockQuote((asset.symbol || "").trim().toUpperCase())).price, error: "" }; }
+      catch (cause) { return { id: asset.id as string, price: null as number | null, error: cause instanceof Error ? cause.message : "Couldn't fetch a price" }; }
+    }));
+    results.forEach((result) => { feedback[result.id] = result.price !== null ? { message: `Updated to ${money(result.price, currency)}`, isError: false } : { message: result.error, isError: true }; });
+    const latest = stateRef.current;
+    const latestNetWorth = latest.goals?.netWorth;
+    if (latestNetWorth && results.some((result) => result.price !== null)) {
+      const assets = latestNetWorth.assets.map((asset) => {
+        const hit = results.find((result) => result.id === asset.id && result.price !== null);
+        return hit && hit.price !== null ? applyQuote(asset, hit.price) : asset;
+      });
+      const priceLastUpdated = options.stampGroupId ? { ...(latestNetWorth.priceLastUpdated || {}), [options.stampGroupId]: new Date().toISOString() } : latestNetWorth.priceLastUpdated;
+      await onSave({ ...latest, goals: { ...latest.goals, netWorth: { ...latestNetWorth, assets, ...(priceLastUpdated ? { priceLastUpdated } : {}) } } });
+    }
+    setQuoteFeedback((prev) => ({ ...prev, ...feedback }));
+    setRefreshingIds((prev) => prev.filter((id) => !withSymbol.some((asset) => asset.id === id)));
+  };
+  const groupAssetIds = (groupId: string) => holdingsInGroup(stateRef.current.goals?.netWorth?.assets || [], groupId).map((asset) => asset.id as string).filter(Boolean);
+
+  const openHoldingsEditor = async (groupId: string) => {
+    const assets = state.goals?.netWorth?.assets || [];
+    const adopted = adoptHoldingGroup(assets, groupId);
+    if (state.goals?.netWorth && adopted.some((asset, index) => asset !== assets[index])) {
+      await onSave({ ...state, goals: { ...state.goals, netWorth: { ...state.goals.netWorth, assets: adopted } } });
+    }
+    setEditingGroupId(groupId);
+  };
+  const submitNewHoldingGroup = async () => {
+    if (!newHoldingName.trim()) return Alert.alert("Missing info", "Enter an account name, like Fidelity brokerage.");
+    if (!state.goals) return;
+    const netWorth = state.goals.netWorth || { assets: [], liabilities: [] };
+    const first = newHoldingGroup(newHoldingName.trim(), newHoldingClass, () => uniqueId("holdings"));
+    await onSave({ ...state, goals: { ...state.goals, netWorth: { ...netWorth, assets: [...netWorth.assets, first] } } });
+    setNewHoldingName("");
+    setEditingGroupId(first.groupId || first.id || null);
   };
 
   const transfers = state.transfers || [];
@@ -2197,6 +2351,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       text: "Delete", style: "destructive", onPress: () => void onSave({
         ...state, goals: {
           ...state.goals, netWorth: {
+            ...state.goals!.netWorth!,
             assets: kind === "asset" ? state.goals!.netWorth!.assets.filter((item) => item.id !== id) : state.goals!.netWorth!.assets,
             liabilities: kind === "liability" ? state.goals!.netWorth!.liabilities.filter((item) => item.id !== id) : state.goals!.netWorth!.liabilities
           }
@@ -2338,12 +2493,16 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       <Pressable style={styles.secondarySmall} onPress={() => void submitAddFund()}><Text style={styles.secondaryButtonText}>Add goal</Text></Pressable>
     </Card>
 
-    <Card>
+    {editingGroupId ? <HoldingsEditor state={state} groupId={editingGroupId} currency={currency} quoteFeedback={quoteFeedback} refreshingIds={refreshingIds}
+      onSave={onSave} onRefreshHolding={(assetId) => void refreshQuotes([assetId], { report: true })}
+      onRefreshGroup={(groupId) => void refreshQuotes(groupAssetIds(groupId), { stampGroupId: groupId, report: true })} onClose={() => setEditingGroupId(null)} /> : <Card>
       <Text style={styles.cardTitle}>Stock &amp; fund holdings</Text>
-      <Text style={styles.muted}>Read-only here — add, edit, and refresh live prices from the web app.</Text>
       {holdingGroups.length ? holdingGroups.map((group) => {
         const groupTotal = group.items.reduce((sum, item) => sum + assetValue(item), 0);
         const gainLoss = groupGainLoss(group.items);
+        const lastUpdated = formatRelativeTime(state.goals?.netWorth?.priceLastUpdated?.[group.groupId]);
+        const hasSymbols = group.items.some((item) => (item.symbol || "").trim());
+        const groupRefreshing = group.items.some((item) => refreshingIds.includes(item.id || ""));
         return <View key={group.groupId} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
           <View style={styles.iouPersonHead}>
             <Text style={styles.rowTitle}>{group.groupName}</Text>
@@ -2355,9 +2514,22 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
             const detail = [item.symbol ? `${item.symbol}${item.shares ? ` · ${item.shares} sh` : ""}` : null, itemGainLoss.hasCostBasis ? `${itemGainLoss.percent >= 0 ? "+" : ""}${itemGainLoss.percent.toFixed(1)}%` : null].filter(Boolean).join(" · ");
             return <Row key={item.id || item.name} title={item.name} detail={detail} value={money(assetValue(item), currency)} />;
           })}
+          <View style={[styles.actionRow, { marginTop: 8 }]}>
+            <Pressable style={styles.secondarySmall} onPress={() => void openHoldingsEditor(group.groupId)}><Text style={styles.secondaryButtonText}>Edit holdings</Text></Pressable>
+            {hasSymbols ? <Pressable style={styles.secondarySmall} disabled={groupRefreshing} onPress={() => void refreshQuotes(group.items.map((item) => item.id as string).filter(Boolean), { stampGroupId: group.groupId, report: false })}><Text style={styles.secondaryButtonText}>{groupRefreshing ? "Refreshing…" : "↻ Live price"}</Text></Pressable> : null}
+          </View>
+          {lastUpdated ? <Text style={styles.muted}>Prices updated {lastUpdated}</Text> : null}
         </View>;
       }) : <Text style={styles.muted}>No stock or fund holdings yet</Text>}
-    </Card>
+      <Text style={[styles.label, { marginTop: 14 }]}>Add a stock or retirement account</Text>
+      <TextInput style={styles.input} value={newHoldingName} onChangeText={setNewHoldingName} placeholder="Fidelity brokerage" />
+      <View style={styles.choiceRow}>
+        {(["stock", "retirement"] as const).map((value) => <Pressable key={value} style={[styles.choice, newHoldingClass === value && styles.choiceActive]} onPress={() => setNewHoldingClass(value)}>
+          <Text style={[styles.choiceText, newHoldingClass === value && styles.choiceTextActive]}>{value === "stock" ? "Stock / brokerage" : "Retirement"}</Text>
+        </Pressable>)}
+      </View>
+      <Pressable style={styles.secondarySmall} onPress={() => void submitNewHoldingGroup()}><Text style={styles.secondaryButtonText}>Add account</Text></Pressable>
+    </Card>}
 
     <Card>
       <Text style={styles.cardTitle}>Other assets &amp; liabilities</Text>

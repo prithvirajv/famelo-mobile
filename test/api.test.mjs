@@ -43,7 +43,8 @@ function extractFunctionSource(source, name) {
 // all required on every PUT /api/state).
 function assertOnlyWholeStateSaves(body, label) {
   const saveCalls = body.match(/onSave\(\{/g) || [];
-  const spreadStateCalls = body.match(/onSave\(\{\s*\.\.\.state,/g) || [];
+  // `...latest` is the same full-state clone, read from a ref after an await (the closed-over `state` may be stale).
+  const spreadStateCalls = body.match(/onSave\(\{\s*\.\.\.(?:state|latest),/g) || [];
   assert.ok(saveCalls.length > 0, `${label} should actually call onSave somewhere`);
   assert.equal(saveCalls.length, spreadStateCalls.length, `every onSave call in ${label} must spread the full state, not a hand-built partial object`);
 }
@@ -271,4 +272,23 @@ test("Reports shows a 'Where your income went' breakdown driven by paycheck inco
   assert.match(body, /transactionsForLines\(/);
   assert.match(body, /transactionAmountForLines\(/, "split transactions show only their share so the list adds up to the segment");
   assert.doesNotMatch(body, /react-native-svg/);
+});
+
+test("Wealth holdings are editable (add account, edit holdings, live prices) through whole-state saves, with a quote API that exists", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /\/api\/stock-quote\?symbol=/);
+  const wealth = extractFunctionSource(app, "Wealth");
+  assert.match(wealth, /<HoldingsEditor /);
+  assert.match(wealth, /api\.stockQuote\(/);
+  assert.match(wealth, /stateRef\.current/, "quote results must apply onto the LATEST state after the await, not a stale closure");
+  assert.match(wealth, /newHoldingGroup\(/);
+  assert.match(wealth, /adoptHoldingGroup\(/);
+  assert.match(wealth, /priceLastUpdated/);
+  assert.doesNotMatch(wealth, /setInterval/, "no silent background polling on a phone");
+  assertOnlyWholeStateSaves(wealth, "Wealth");
+  const editor = extractFunctionSource(app, "HoldingsEditor");
+  for (const name of ["updateHolding", "renameHoldingGroup", "changeHoldingGroupClass", "purgeBlankHoldings", "removeHoldingGroup", "newHoldingRow"]) assert.match(editor, new RegExp(name + "\\("), `HoldingsEditor should use ${name}`);
+  assertOnlyWholeStateSaves(editor, "HoldingsEditor");
+  assert.match(editor, /\.\.\.netWorth, assets/, "saving holdings must keep netWorth.priceLastUpdated and liabilities");
 });

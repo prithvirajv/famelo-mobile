@@ -55,6 +55,8 @@ export type WealthAsset = {
   symbol?: string; shares?: number; price?: number; costBasis?: number;
   groupId?: string; groupName?: string; holdingType?: "stock" | "fund";
 };
+// priceLastUpdated: when each holdings group's live prices were last refreshed, keyed by group id (ISO time).
+export type NetWorth = { assets: WealthAsset[]; liabilities: WealthLiability[]; priceLastUpdated?: Record<string, string> };
 export type WealthLiability = { id?: string; name: string; value: number };
 export type DebtPayment = { id?: string; date: string; amount: number; interest: number; principal: number; extra: number; balance?: number };
 export type Debt = {
@@ -129,7 +131,7 @@ export type HouseholdState = {
   notes: { entries: Note[] };
   decisions: Decision[];
   meals: { recipes: Recipe[]; plannedWeek: PlannedMeal[]; savedWeeks?: string[]; nutritionGoals?: { calories: number; protein: number }; selectedWeekByMonth?: Record<string, number>; feedback?: string; groceryEstimate?: number };
-  goals?: { sinkingFunds?: SinkingFund[]; debts?: Debt[]; netWorth?: { assets: WealthAsset[]; liabilities: WealthLiability[] } };
+  goals?: { sinkingFunds?: SinkingFund[]; debts?: Debt[]; netWorth?: NetWorth };
   ious: Iou[];
   friends?: Friend[];
   accounts: Account[];

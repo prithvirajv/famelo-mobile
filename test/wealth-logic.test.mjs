@@ -290,3 +290,125 @@ test("transfersNewestFirst sorts by date descending, breaks ties by later insert
   ];
   assert.deepEqual(transfersNewestFirst(transfers).map((row) => [row.transfer.amount, row.index]), [[3, 2], [2, 1], [1, 0], [4, 3]]);
 });
+
+import { updateHolding, costDisplayValue, applyQuote, holdingsInGroup, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime } from "../src/wealthLogic.ts";
+
+const holding = (overrides = {}) => ({ id: "h1", name: "Fidelity - AAPL", value: 0, assetClass: "stock", symbol: "AAPL", holdingType: "stock", shares: 10, price: 100, costBasis: 80, groupId: "g1", groupName: "Fidelity", ...overrides });
+
+test("updateHolding: symbol upper-cases and renames the holding after its account", () => {
+  const next = updateHolding(holding({ symbol: "", name: "Fidelity" }), "symbol", " msft ");
+  assert.equal(next.symbol, "MSFT");
+  assert.equal(next.name, "Fidelity - MSFT");
+  assert.equal(updateHolding(holding({ groupName: "" }), "symbol", "tsla").name, "TSLA");
+  assert.equal(updateHolding(holding(), "symbol", "").name, "Fidelity");
+});
+
+test("updateHolding: shares/price/cost recompute the value, clamp negatives and junk to 0, and never mutate the input", () => {
+  const input = holding();
+  assert.equal(updateHolding(input, "shares", "12").value, 1200);
+  assert.equal(updateHolding(input, "price", "150.5").value, 1505);
+  assert.equal(updateHolding(input, "price", "-5").price, 0);
+  assert.equal(updateHolding(input, "shares", "abc").shares, 0);
+  assert.equal(updateHolding(input, "costBasis", "90").costBasis, 90);
+  assert.equal(input.shares, 10);
+  assert.equal(input.price, 100);
+});
+
+test("updateHolding: in 'total' cost mode the typed amount is divided by shares, and changing shares keeps the total fixed", () => {
+  assert.equal(updateHolding(holding(), "costBasis", "1000", "total").costBasis, 100);
+  assert.equal(updateHolding(holding({ shares: 0 }), "costBasis", "1000", "total").costBasis, 0);
+  // 10 shares at $80 = $800 paid; selling down to 8 shares keeps $800 paid -> $100/share
+  const resized = updateHolding(holding(), "shares", "8", "total");
+  assert.equal(resized.costBasis, 100);
+  assert.equal(resized.shares, 8);
+  assert.equal(updateHolding(holding(), "shares", "8", "share").costBasis, 80);
+  assert.equal(updateHolding(holding(), "shares", "0", "total").costBasis, 0);
+  assert.equal(costDisplayValue(holding(), "total"), 800);
+  assert.equal(costDisplayValue(holding(), "share"), 80);
+  assert.equal(costDisplayValue(holding({ costBasis: undefined }), "total"), 0);
+});
+
+test("updateHolding: a typed market value defaults shares to 1 when unset, else back-derives the price", () => {
+  const noShares = updateHolding(holding({ shares: 0, price: 0 }), "marketValue", "5000");
+  assert.deepEqual([noShares.shares, noShares.price, noShares.value], [1, 5000, 5000]);
+  const withShares = updateHolding(holding(), "marketValue", "2500");
+  assert.deepEqual([withShares.shares, withShares.price, withShares.value], [10, 250, 2500]);
+  assert.equal(updateHolding(holding(), "marketValue", "-3").value, 0);
+});
+
+test("updateHolding: holdingType only accepts stock or fund", () => {
+  assert.equal(updateHolding(holding(), "holdingType", "fund").holdingType, "fund");
+  assert.equal(updateHolding(holding({ holdingType: "fund" }), "holdingType", "whatever").holdingType, "stock");
+});
+
+test("applyQuote sets the price and recomputes the value", () => {
+  const next = applyQuote(holding(), 123.45);
+  assert.equal(next.price, 123.45);
+  assert.equal(next.value, 1234.5);
+});
+
+test("holdingsInGroup finds a group by groupId, or by the holding's own id for a legacy solo holding", () => {
+  const assets = [holding(), holding({ id: "h2" }), holding({ id: "solo", groupId: undefined, groupName: undefined }), holding({ id: "cash", assetClass: "cash", groupId: "g1" }), holding({ id: "other", groupId: "g2" })];
+  assert.deepEqual(holdingsInGroup(assets, "g1").map((a) => a.id), ["h1", "h2"]);
+  assert.deepEqual(holdingsInGroup(assets, "solo").map((a) => a.id), ["solo"]);
+});
+
+test("adoptHoldingGroup backfills groupId/groupName on a legacy solo holding BEFORE any edit so the symbol can't leak into the account name", () => {
+  const legacy = holding({ id: "solo", groupId: undefined, groupName: undefined, name: "Old 401k" });
+  const adopted = adoptHoldingGroup([legacy], "solo");
+  assert.equal(adopted[0].groupId, "solo");
+  assert.equal(adopted[0].groupName, "Old 401k");
+  const edited = updateHolding(adopted[0], "symbol", "vti");
+  assert.equal(edited.name, "Old 401k - VTI");
+  assert.equal(edited.groupName, "Old 401k");
+  assert.deepEqual(adoptHoldingGroup([legacy], "missing"), [legacy]);
+});
+
+test("newHoldingGroup is a blank first holding whose group id is its own id; newHoldingRow joins an existing group", () => {
+  const group = newHoldingGroup("Vanguard", "retirement", () => "g-new");
+  assert.deepEqual(group, { id: "g-new", name: "Vanguard", value: 0, assetClass: "retirement", symbol: "", holdingType: "stock", shares: 0, price: 0, costBasis: 0, groupId: "g-new", groupName: "Vanguard" });
+  const row = newHoldingRow("g1", "Fidelity", "stock", () => "r2");
+  assert.equal(row.id, "r2");
+  assert.equal(row.groupId, "g1");
+  assert.equal(row.groupName, "Fidelity");
+});
+
+test("renameHoldingGroup renames the group and every holding's name, touching nothing outside the group", () => {
+  const assets = [holding(), holding({ id: "h2", symbol: "", name: "Fidelity" }), holding({ id: "o", groupId: "g2", groupName: "Other", name: "Other - X" })];
+  const renamed = renameHoldingGroup(assets, "g1", "Schwab");
+  assert.deepEqual(renamed.map((a) => [a.groupName, a.name]), [["Schwab", "Schwab - AAPL"], ["Schwab", "Schwab"], ["Other", "Other - X"]]);
+});
+
+test("changeHoldingGroupClass snapshots shares x price into value when leaving holdings, and just retags within holdings", () => {
+  const assets = [holding(), holding({ id: "h2", shares: 2, price: 50 })];
+  const toCash = changeHoldingGroupClass(assets, "g1", "cash");
+  assert.deepEqual(toCash.map((a) => [a.assetClass, a.value]), [["cash", 1000], ["cash", 100]]);
+  const toRetirement = changeHoldingGroupClass(assets, "g1", "retirement");
+  assert.deepEqual(toRetirement.map((a) => [a.assetClass, a.value]), [["retirement", 0], ["retirement", 0]]);
+});
+
+test("purgeBlankHoldings drops only abandoned rows (no symbol AND no value) in that group", () => {
+  const assets = [
+    holding({ id: "keep-symbol" }),
+    holding({ id: "blank", symbol: "", shares: 0, price: 0, value: 0 }),
+    holding({ id: "keep-value", symbol: "", shares: 1, price: 5000 }),
+    holding({ id: "other-group-blank", groupId: "g2", symbol: "", shares: 0, price: 0, value: 0 }),
+    { id: "cash", name: "Cash", value: 0, assetClass: "cash" }
+  ];
+  assert.deepEqual(purgeBlankHoldings(assets, "g1").map((a) => a.id), ["keep-symbol", "keep-value", "other-group-blank", "cash"]);
+});
+
+test("removeHoldingGroup removes every holding in the group and nothing else", () => {
+  const assets = [holding(), holding({ id: "h2" }), holding({ id: "o", groupId: "g2" }), { id: "cash", name: "Cash", value: 5, assetClass: "cash" }];
+  assert.deepEqual(removeHoldingGroup(assets, "g1").map((a) => a.id), ["o", "cash"]);
+});
+
+test("formatRelativeTime gives web's just now / minutes / hours / days captions", () => {
+  const now = new Date("2026-07-10T12:00:00.000Z");
+  assert.equal(formatRelativeTime(undefined, now), null);
+  assert.equal(formatRelativeTime("garbage", now), null);
+  assert.equal(formatRelativeTime("2026-07-10T11:59:30.000Z", now), "just now");
+  assert.equal(formatRelativeTime("2026-07-10T11:55:00.000Z", now), "5m ago");
+  assert.equal(formatRelativeTime("2026-07-10T09:00:00.000Z", now), "3h ago");
+  assert.equal(formatRelativeTime("2026-07-08T12:00:00.000Z", now), "2d ago");
+});

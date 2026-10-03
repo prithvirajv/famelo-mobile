@@ -67,5 +67,6 @@ export const api = {
   reminderFromImage: (imageBase64: string, mimeType: string) => request<ReminderPhotoDraft>("/api/calendar/reminder-from-image", {
     method: "POST", body: JSON.stringify({ imageBase64, mimeType })
   }),
+  stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };
