@@ -45,7 +45,7 @@ import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, planne
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
-import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
+import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions, validateGoalFields, editGoalFields } from "./src/goalsLogic";
 import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
@@ -3495,6 +3495,23 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
   const [newFundDate, setNewFundDate] = useState("");
   const [contributingFundIndex, setContributingFundIndex] = useState<number | null>(null);
   const [contributionAmount, setContributionAmount] = useState("");
+  const [editingFundIndex, setEditingFundIndex] = useState<number | null>(null);
+  const [fundDraft, setFundDraft] = useState({ name: "", target: "", saved: "", targetDate: "" });
+
+  const startEditFund = (index: number) => {
+    const fund = sinkingFunds[index];
+    if (!fund) return;
+    setFundDraft({ name: fund.name, target: String(fund.target ?? 0), saved: String(fund.saved ?? 0), targetDate: fund.targetDate || "" });
+    setEditingFundIndex(index);
+  };
+  const saveFundEdit = async () => {
+    if (editingFundIndex === null) return;
+    const problem = validateGoalFields(fundDraft);
+    if (problem) return Alert.alert("Check the goal", problem);
+    const index = editingFundIndex;
+    await onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.map((fund, itemIndex) => itemIndex === index ? editGoalFields(fund, fundDraft) : fund) } });
+    setEditingFundIndex(null);
+  };
 
   const submitAddFund = async () => {
     if (!newFundName.trim()) return Alert.alert("Missing info", "Enter a goal name.");
@@ -3505,7 +3522,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
 
   const deleteFund = (index: number) => {
     Alert.alert("Delete this goal?", "This cannot be undone.", [{ text: "Cancel" }, {
-      text: "Delete", style: "destructive", onPress: () => void onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.filter((_, itemIndex) => itemIndex !== index) } })
+      text: "Delete", style: "destructive", onPress: () => { setEditingFundIndex(null); void onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.filter((_, itemIndex) => itemIndex !== index) } }); }
     }]);
   };
 
@@ -3669,8 +3686,23 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
         return <View key={`${fund.name}-${index}`} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
           <View style={styles.iouPersonHead}>
             <Text style={styles.rowTitle}>{fund.name}</Text>
-            <Pressable onPress={() => deleteFund(index)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+            <Pressable accessibilityLabel={`Edit ${fund.name}`} hitSlop={8} onPress={() => startEditFund(index)}><Ionicons name="create-outline" size={18} color={colors.text} /></Pressable>
+            <Pressable accessibilityLabel={`Delete ${fund.name}`} hitSlop={8} onPress={() => deleteFund(index)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
           </View>
+          {editingFundIndex === index ? <View>
+            <Text style={styles.label}>Goal name</Text>
+            <TextInput style={styles.input} value={fundDraft.name} onChangeText={(name) => setFundDraft({ ...fundDraft, name })} />
+            <Text style={styles.label}>Target amount</Text>
+            <TextInput style={styles.input} value={fundDraft.target} onChangeText={(target) => setFundDraft({ ...fundDraft, target })} keyboardType="decimal-pad" />
+            <Text style={styles.label}>Saved so far</Text>
+            <TextInput style={styles.input} value={fundDraft.saved} onChangeText={(saved) => setFundDraft({ ...fundDraft, saved })} keyboardType="decimal-pad" />
+            <Text style={styles.label}>Target date (YYYY-MM-DD, optional)</Text>
+            <TextInput style={styles.input} value={fundDraft.targetDate} onChangeText={(targetDate) => setFundDraft({ ...fundDraft, targetDate })} placeholder="2026-12-31" autoCapitalize="none" />
+            <View style={styles.actionRow}>
+              <Pressable style={[styles.secondarySmall, { flex: 1 }]} onPress={() => setEditingFundIndex(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+              <Pressable style={[styles.primaryButton, { flex: 1, marginTop: 0 }]} onPress={() => void saveFundEdit()}><Text style={styles.primaryButtonText}>Save goal</Text></Pressable>
+            </View>
+          </View> : null}
           <Text style={styles.rowDetail}>{money(fund.saved, currency)} of {money(fund.target, currency)}{fund.targetDate ? ` · by ${fund.targetDate}` : ""}</Text>
           <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${progress}%` }]} /></View>
           <Text style={styles.muted}>{progress}% saved · {money(Math.max(0, fund.target - fund.saved), currency)} remaining</Text>

@@ -91,3 +91,25 @@ export function withGoalAutoContributions<T extends HouseholdState>(state: T, to
   const result = applyGoalAutoContributions(state, funds, today);
   return result.changed ? { ...state, goals: { ...state.goals, sinkingFunds: result.sinkingFunds } } : state;
 }
+
+export type GoalFieldsInput = { name: string; target: string | number; saved: string | number; targetDate: string };
+
+// Web lets every goal field be edited in place; here they are edited together and validated first.
+export function validateGoalFields(input: GoalFieldsInput): string | null {
+  if (!input.name.trim()) return "Enter a goal name.";
+  const target = Number(input.target); const saved = Number(input.saved);
+  if (!Number.isFinite(target) || target < 0) return "Target must be zero or more.";
+  if (!Number.isFinite(saved) || saved < 0) return "Saved so far must be zero or more.";
+  const date = input.targetDate.trim();
+  if (date) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    const real = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))) : null;
+    if (!match || !real || real.getUTCMonth() !== Number(match[2]) - 1 || real.getUTCDate() !== Number(match[3])) return "Use a real target date as YYYY-MM-DD, or leave it empty.";
+  }
+  return null;
+}
+
+// Keeps every other field (auto-contribute settings and watermarks) untouched.
+export function editGoalFields(fund: SinkingFund, input: GoalFieldsInput): SinkingFund {
+  return { ...fund, name: input.name.trim(), target: Number(input.target), saved: Math.round(Number(input.saved) * 100) / 100, targetDate: input.targetDate.trim() };
+}

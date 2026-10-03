@@ -86,3 +86,24 @@ test("goals with auto-contribute off are never touched, and withGoalAutoContribu
   assert.equal(next.goals.sinkingFunds[0].saved, 100.5);
   assert.equal(on.goals.sinkingFunds[0].saved, 100);
 });
+
+import { validateGoalFields, editGoalFields } from "../src/goalsLogic.ts";
+
+test("goal fields validate name, non-negative amounts and a real date, and editing keeps auto-contribute state", () => {
+  const ok = { name: "Trip", target: "1500", saved: "200.456", targetDate: "2026-12-31" };
+  assert.equal(validateGoalFields(ok), null);
+  assert.equal(validateGoalFields({ ...ok, targetDate: "" }), null);
+  assert.match(validateGoalFields({ ...ok, name: "  " }), /name/);
+  assert.match(validateGoalFields({ ...ok, target: "-1" }), /Target/);
+  assert.match(validateGoalFields({ ...ok, saved: "abc" }), /Saved/);
+  assert.match(validateGoalFields({ ...ok, targetDate: "2026-02-30" }), /real target date/);
+  assert.match(validateGoalFields({ ...ok, targetDate: "12/31/2026" }), /real target date/);
+  const fund = fund_({ autoContribute: { enabled: true, mode: "roundup" }, roundupProcessedCount: 7 });
+  const edited = editGoalFields(fund, ok);
+  assert.deepEqual([edited.name, edited.target, edited.saved, edited.targetDate], ["Trip", 1500, 200.46, "2026-12-31"]);
+  assert.equal(edited.roundupProcessedCount, 7);
+  assert.deepEqual(edited.autoContribute, { enabled: true, mode: "roundup" });
+  assert.equal(fund.name, "Trip", "input fund is not mutated (same name here, but target stays 1000)");
+  assert.equal(fund.target, 1000);
+});
+function fund_(overrides) { return { name: "Trip", target: 1000, saved: 100, targetDate: "", ...overrides }; }
