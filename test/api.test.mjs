@@ -179,3 +179,17 @@ test("Wealth lets you record and delete transfers between accounts, newest-first
   assert.match(body, /transfers: \[transfer, \.\.\.transfers\]/);
   assertOnlyWholeStateSaves(body, "Wealth");
 });
+
+test("Decisions is reachable from More, saves through the whole-state pattern, and supports pros/cons ranking and deciding", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /subScreen === "decisions"/);
+  assert.match(app, /onOpenDecisions=\{\(\) => setSubScreen\("decisions"\)\}/);
+  const body = extractFunctionSource(app, "Decisions");
+  assertOnlyWholeStateSaves(body, "Decisions");
+  for (const name of ["createDecision", "addDecisionItem", "moveDecisionItem", "markDecided", "reopenDecision", "sortDecisions"]) {
+    assert.match(body, new RegExp(name), `Decisions should use ${name}`);
+  }
+  // decisions sync across households server-side (user_shared_modules) on every PUT /api/state - no dedicated endpoint exists
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(api, /\/api\/decisions/);
+});

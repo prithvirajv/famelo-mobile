@@ -27,13 +27,15 @@ import {
   monthKeysForScope, reportCategoriesForScope, budgetVsActualByCategory, groupTransactionsByTag, cashFlowByMonth, spentByLineInMonth
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
-import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
+import type { Account, AccountType, ActualLog, BudgetLine, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import { advanceChoreDate, advanceReminderDate, choreCadenceLabels, isReminderComplete } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks } from "./src/paychecksLogic";
+import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision } from "./src/decisionsLogic";
+import type { DecisionListKey } from "./src/decisionsLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
@@ -75,7 +77,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -146,6 +148,7 @@ function AppContent() {
     : subScreen === "wealth" ? <Wealth state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "decisions" ? <Decisions state={state} user={user} onSave={save} onBack={() => setSubScreen(null)} />
     : tab === "home" ? <Home state={state} />
     : tab === "budget" ? <Budget state={state} onSave={save} onOpenPaychecks={() => setSubScreen("paychecks")} />
     : tab === "calendar" ? <Calendar state={state} access={access} onSave={save} />
@@ -158,7 +161,7 @@ function AppContent() {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} />;
 
   return <SafeAreaView style={styles.app}>
     <StatusBar style="dark" />
@@ -1306,10 +1309,106 @@ function DocumentsScreen({ notes, wealthAssets, wealthLiabilities, viewerName }:
   </Page>;
 }
 
-function SubScreenHeader({ title, onBack }: { title: string; onBack: () => void }) {
+function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; user: User; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
+  const decisions = state.decisions || [];
+  const [newTitle, setNewTitle] = useState(""); const [newNotes, setNewNotes] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [itemDrafts, setItemDrafts] = useState<Record<string, string>>({});
+  const [outcomeDrafts, setOutcomeDrafts] = useState<Record<string, string>>({});
+  const author = { key: user.email, name: user.name };
+
+  const saveDecisions = (next: Decision[]) => onSave({ ...state, decisions: next });
+  const change = (decisionId: string, update: (decision: Decision) => Decision) => void saveDecisions(updateDecision(decisions, decisionId, update));
+
+  const submitNew = async () => {
+    const created = createDecision(newTitle, newNotes, () => uniqueId("decision"));
+    if (!created) return Alert.alert("Missing info", "Enter the question you're deciding.");
+    await saveDecisions([...decisions, created]);
+    setNewTitle(""); setNewNotes(""); setExpandedId(created.id);
+  };
+
+  const confirmDelete = (decision: Decision) => {
+    Alert.alert("Delete decision?", decision.title, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => void saveDecisions(decisions.filter((item) => item.id !== decision.id)) }]);
+  };
+
+  const addItem = (decision: Decision, listKey: DecisionListKey) => {
+    const draftKey = `${decision.id}:${listKey}`;
+    const text = (itemDrafts[draftKey] || "").trim();
+    if (!text) return;
+    change(decision.id, (current) => addDecisionItem(current, listKey, text, author, () => uniqueId("item")));
+    setItemDrafts((prev) => ({ ...prev, [draftKey]: "" }));
+  };
+
+  const decide = (decision: Decision) => {
+    change(decision.id, (current) => markDecided(current, outcomeDrafts[decision.id] || ""));
+    setOutcomeDrafts((prev) => ({ ...prev, [decision.id]: "" }));
+  };
+
+  const renderList = (decision: Decision, listKey: DecisionListKey) => {
+    const items = decision[listKey];
+    const kind = listKey === "pros" ? "pro" : "con";
+    return <View style={styles.decisionColumn}>
+      <Text style={[styles.label, { color: listKey === "pros" ? colors.green : colors.coral }]}>{listKey === "pros" ? "Pros" : "Cons"}</Text>
+      {items.length ? items.map((item, index) => <View key={item.id} style={styles.checkRow}>
+        <View style={styles.rowCopy}>
+          <TextInput key={item.text} style={styles.input} defaultValue={item.text} onEndEditing={(event) => change(decision.id, (current) => editDecisionItem(current, listKey, item.id, event.nativeEvent.text))} accessibilityLabel={`Edit this ${kind}`} />
+          <Text style={styles.rowDetail}>{item.authorName}</Text>
+        </View>
+        <Pressable disabled={index === 0} onPress={() => change(decision.id, (current) => moveDecisionItem(current, listKey, item.id, "up"))}><Ionicons name="arrow-up" size={18} color={index === 0 ? colors.border : colors.text} /></Pressable>
+        <Pressable disabled={index === items.length - 1} onPress={() => change(decision.id, (current) => moveDecisionItem(current, listKey, item.id, "down"))}><Ionicons name="arrow-down" size={18} color={index === items.length - 1 ? colors.border : colors.text} /></Pressable>
+        <Pressable onPress={() => change(decision.id, (current) => removeDecisionItem(current, listKey, item.id))}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
+      </View>) : <Text style={styles.muted}>None yet</Text>}
+      <View style={styles.actionRow}>
+        <TextInput style={[styles.input, { flex: 1 }]} value={itemDrafts[`${decision.id}:${listKey}`] || ""} onChangeText={(value) => setItemDrafts((prev) => ({ ...prev, [`${decision.id}:${listKey}`]: value }))} placeholder={`Add a ${kind}`} onSubmitEditing={() => addItem(decision, listKey)} />
+        <Pressable style={styles.secondarySmall} onPress={() => addItem(decision, listKey)}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
+      </View>
+    </View>;
+  };
+
+  return <Page>
+    <SubScreenHeader title="Decisions" eyebrow="FAMILY" onBack={onBack} />
+    <Text style={styles.muted}>Weigh a family decision together — add pros and cons, then mark it decided once you've chosen. Shared across all your households.</Text>
+    <Card>
+      <Text style={styles.cardTitle}>New decision</Text>
+      <TextInput style={styles.input} value={newTitle} onChangeText={setNewTitle} placeholder="Should we move to a bigger apartment?" />
+      <TextInput style={[styles.input, styles.multilineInput]} value={newNotes} onChangeText={setNewNotes} placeholder="Notes (optional)" multiline />
+      <Pressable style={styles.primaryButton} onPress={() => void submitNew()}><Text style={styles.primaryButtonText}>Add decision</Text></Pressable>
+    </Card>
+    {sortDecisions(decisions).map((decision) => {
+      const isDecided = decision.status === "decided";
+      const isExpanded = expandedId === decision.id;
+      return <Card key={decision.id}>
+        <View style={styles.iouPersonHead}>
+          <Pressable style={styles.rowCopy} onPress={() => setExpandedId(isExpanded ? null : decision.id)}>
+            <Text style={styles.cardTitle}>{decision.title}</Text>
+            <Text style={styles.rowDetail}>{isDecided ? "Decided" : "Open"} · {decision.pros.length} pro{decision.pros.length === 1 ? "" : "s"} · {decision.cons.length} con{decision.cons.length === 1 ? "" : "s"}{decision.notes ? " · has notes" : ""}</Text>
+          </Pressable>
+          <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={20} color={colors.muted} />
+          <Pressable onPress={() => confirmDelete(decision)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+        {isDecided ? <View style={{ marginTop: 8 }}>
+          <Text style={styles.rowTitle}>Outcome: {decision.outcome || "No outcome noted"}{decision.decidedAt ? ` · ${decision.decidedAt.slice(0, 10)}` : ""}</Text>
+          <Pressable style={[styles.secondarySmall, { marginTop: 8 }]} onPress={() => change(decision.id, reopenDecision)}><Text style={styles.secondaryButtonText}>Reopen</Text></Pressable>
+        </View> : null}
+        {isExpanded ? <View style={{ marginTop: 8 }}>
+          <TextInput key={decision.notes} style={[styles.input, styles.multilineInput]} defaultValue={decision.notes} placeholder="Any context worth remembering (optional)" multiline onEndEditing={(event) => change(decision.id, (current) => ({ ...current, notes: event.nativeEvent.text.trim() }))} />
+          {renderList(decision, "pros")}
+          {renderList(decision, "cons")}
+          {!isDecided ? <View style={styles.actionRow}>
+            <TextInput style={[styles.input, { flex: 1 }]} value={outcomeDrafts[decision.id] || ""} onChangeText={(value) => setOutcomeDrafts((prev) => ({ ...prev, [decision.id]: value }))} placeholder="What did you decide? (optional)" />
+            <Pressable style={styles.secondarySmall} onPress={() => decide(decision)}><Text style={styles.secondaryButtonText}>Mark decided</Text></Pressable>
+          </View> : null}
+        </View> : null}
+      </Card>;
+    })}
+    {decisions.length ? null : <Text style={styles.muted}>No decisions yet — add one above to start weighing it together.</Text>}
+  </Page>;
+}
+
+function SubScreenHeader({ title, onBack, eyebrow = "MONEY" }: { title: string; onBack: () => void; eyebrow?: string }) {
   return <View style={styles.subScreenHeader}>
     <Pressable style={styles.subScreenBack} onPress={onBack}><Ionicons name="arrow-back" size={22} color={colors.text} /></Pressable>
-    <Title eyebrow="MONEY">{title}</Title>
+    <Title eyebrow={eyebrow}>{title}</Title>
   </View>;
 }
 
@@ -2176,10 +2275,10 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void }) {
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Meals and recipes</Text><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes</Text></Card><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }
@@ -2206,7 +2305,7 @@ const styles = StyleSheet.create({
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" },
   subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
-  iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  iouPersonHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, decisionColumn: { marginTop: 10 },
   reportSubcategoryRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 5 },
   cashFlowChart: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", height: 120, marginTop: 10 }, cashFlowColumn: { alignItems: "center", gap: 6 }, cashFlowBars: { flexDirection: "row", alignItems: "flex-end", gap: 3, height: 100 }, cashFlowBar: { width: 12, borderRadius: 3 }, cashFlowLabel: { color: colors.muted, fontSize: 11, fontWeight: "700" }, cashFlowLegendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
   progressTrack: { height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: "hidden", marginTop: 8 }, progressFill: { height: 8, borderRadius: 4, backgroundColor: colors.green }

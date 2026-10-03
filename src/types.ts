@@ -88,11 +88,14 @@ export type RecurringExpense = {
 };
 export type BudgetHistoryEntry = { month: string; income: number; categories: BudgetCategory[] };
 export type DecisionComment = { id: string; text: string; authorKey: string; authorName: string };
+// Attachments are stored inline as data URLs on web (5 max, 5MB each) rather than through Documents, because
+// decisions sync across a user's households while documents are per-household. Mobile doesn't show or add
+// them yet, but every edit spreads the existing decision so they are preserved untouched.
+export type DecisionAttachment = { id: string; name: string; contentType: string; sizeBytes: number; dataUrl: string; createdAt: string };
 export type Decision = {
   id: string; title: string; notes: string; status: "open" | "decided"; outcome: string; decidedAt: string;
-  pros: DecisionComment[]; cons: DecisionComment[]; createdAt: string;
+  pros: DecisionComment[]; cons: DecisionComment[]; createdAt: string; attachments?: DecisionAttachment[];
 };
-// Unreviewed Bank Stream rows (web-only for now) - typed minimally so deleting a budget line can reassign them.
 export type InboxDraft = { id?: string; lineId: string; payee?: string; amount?: number; date?: string; accountId?: string };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string };
