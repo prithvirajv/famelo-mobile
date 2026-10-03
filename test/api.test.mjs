@@ -193,3 +193,14 @@ test("Decisions is reachable from More, saves through the whole-state pattern, a
   const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
   assert.doesNotMatch(api, /\/api\/decisions/);
 });
+
+test("Savings goals support auto-contribute (round-up / % of paycheck), applied on every save and when Wealth opens", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Wealth");
+  assert.match(body, /setAutoContributeMode\(/);
+  assert.match(body, /setAutoContributePercent\(/);
+  assert.match(body, /withGoalAutoContributions\(/);
+  assert.match(body, /ensurePaycheckOccurrencesGenerated/, "percent goals need paycheck occurrences materialized before they can be counted");
+  assertOnlyWholeStateSaves(body, "Wealth");
+  assert.match(app, /withGoalAutoContributions\(withIncome, localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
+});

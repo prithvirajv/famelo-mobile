@@ -48,7 +48,8 @@ export type Debt = {
   // already been applied as a payment (format "date|amount") so relinking never double-counts.
   assetId?: string; lineId?: string; appliedPaymentSignatures?: string[]; payments?: DebtPayment[];
 };
-export type SinkingFundAutoContribute = { enabled: boolean; mode: "roundup" | "percent"; percent?: number };
+// Web stores { enabled: false } with no mode when auto-contribute is switched off.
+export type SinkingFundAutoContribute = { enabled: boolean; mode?: "roundup" | "percent"; percent?: number };
 export type SinkingFund = {
   name: string; target: number; saved: number; targetDate: string;
   autoContribute?: SinkingFundAutoContribute;

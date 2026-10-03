@@ -36,6 +36,8 @@ import {
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks } from "./src/paychecksLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision } from "./src/decisionsLogic";
 import type { DecisionListKey } from "./src/decisionsLogic";
+import { autoContributeChoice, setAutoContributeMode, setAutoContributePercent, withGoalAutoContributions } from "./src/goalsLogic";
+import type { AutoContributeChoice } from "./src/goalsLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, parseTagsInput, transactionAssignmentLabel } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
@@ -52,6 +54,10 @@ const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap
 ];
 
 const journalMoods = ["Happy", "Calm", "Neutral", "Stressed", "Sad", "Grateful", "Excited"];
+
+function localDateKey(now: Date = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
 
 function money(value: number, currency = "USD") {
   return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 0 }).format(value || 0);
@@ -114,7 +120,9 @@ function AppContent() {
 
   const save = useCallback(async (nextState: HouseholdState) => {
     // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
-    const next = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
+    const withIncome = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
+    // Savings goals with auto-contribute on keep accumulating as purchases/paychecks are recorded (web does this every render).
+    const next = withGoalAutoContributions(withIncome, localDateKey());
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
@@ -1825,6 +1833,24 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     }]);
   };
 
+  // Keeps auto-contributing goals current when this screen opens (same convention as web, which runs
+  // it on every render) - percent-of-paycheck goals need paycheck occurrences materialized first. Only
+  // saves when something actually changed, so it settles after one pass instead of looping.
+  useEffect(() => {
+    const funds = state.goals?.sinkingFunds || [];
+    if (!funds.some((fund) => autoContributeChoice(fund) !== "off")) return;
+    let base = state;
+    let materialized = false;
+    if (funds.some((fund) => autoContributeChoice(fund) === "percent")) {
+      const result = ensurePaycheckOccurrencesGenerated(state.paychecks || [], state.paycheckOccurrences || [], () => uniqueId("paycheck-occurrence"));
+      materialized = JSON.stringify(result.paychecks) !== JSON.stringify(state.paychecks || []) || JSON.stringify(result.paycheckOccurrences) !== JSON.stringify(state.paycheckOccurrences || []);
+      if (materialized) base = { ...state, paychecks: result.paychecks, paycheckOccurrences: result.paycheckOccurrences };
+    }
+    const credited = withGoalAutoContributions(base, localDateKey());
+    if (materialized || credited !== base) void onSave(credited);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.transactions, state.paycheckOccurrences, state.goals?.sinkingFunds]);
+
   const [payingDebtId, setPayingDebtId] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
 
@@ -1845,9 +1871,6 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     setPayingDebtId(null); setPaymentAmount("");
   };
 
-  // Out of scope for this pass: auto-contribution (roundup/percent-of-paycheck),
-  // which needs its own watermarked processing against transactions/paycheck
-  // occurrences to avoid double-crediting - manual contributions only for now.
   const sinkingFunds = state.goals?.sinkingFunds || [];
   const [newFundName, setNewFundName] = useState("");
   const [newFundTarget, setNewFundTarget] = useState("");
@@ -1874,6 +1897,13 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     const nextFunds = sinkingFunds.map((fund, itemIndex) => itemIndex === index ? { ...fund, saved: Math.max(0, Number(fund.saved || 0) + amount) } : fund);
     await onSave({ ...state, goals: { ...state.goals, sinkingFunds: nextFunds } });
     setContributingFundIndex(null); setContributionAmount("");
+  };
+
+  const changeAutoMode = (index: number, choice: AutoContributeChoice) => {
+    void onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.map((fund, itemIndex) => itemIndex === index ? setAutoContributeMode(fund, choice) : fund) } });
+  };
+  const changeAutoPercent = (index: number, value: string) => {
+    void onSave({ ...state, goals: { ...state.goals, sinkingFunds: sinkingFunds.map((fund, itemIndex) => itemIndex === index ? setAutoContributePercent(fund, Number(value)) : fund) } });
   };
 
   const [newItemKind, setNewItemKind] = useState<"asset" | "liability">("asset");
@@ -2012,6 +2042,16 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
           <Text style={styles.rowDetail}>{money(fund.saved, currency)} of {money(fund.target, currency)}{fund.targetDate ? ` · by ${fund.targetDate}` : ""}</Text>
           <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${progress}%` }]} /></View>
           <Text style={styles.muted}>{progress}% saved · {money(Math.max(0, fund.target - fund.saved), currency)} remaining</Text>
+          <Text style={styles.label}>Auto-contribute</Text>
+          <View style={styles.choiceRow}>
+            {([["off", "Off"], ["roundup", "Round-up purchases"], ["percent", "% of each paycheck"]] as Array<[AutoContributeChoice, string]>).map(([choice, label]) => <Pressable key={choice} style={[styles.choice, autoContributeChoice(fund) === choice && styles.choiceActive]} onPress={() => changeAutoMode(index, choice)}>
+              <Text style={[styles.choiceText, autoContributeChoice(fund) === choice && styles.choiceTextActive]}>{label}</Text>
+            </Pressable>)}
+          </View>
+          {autoContributeChoice(fund) === "percent" ? <View style={styles.actionRow}>
+            <TextInput key={fund.autoContribute?.percent} style={[styles.input, { flex: 1 }]} defaultValue={String(fund.autoContribute?.percent ?? 5)} keyboardType="decimal-pad" placeholder="Percent (0-100)" onEndEditing={(event) => changeAutoPercent(index, event.nativeEvent.text)} />
+          </View> : null}
+          {autoContributeChoice(fund) !== "off" ? <Text style={styles.muted}>{autoContributeChoice(fund) === "roundup" ? "Rounds every purchase up to the next dollar" : `Sets aside ${Number(fund.autoContribute?.percent || 0)}% of every paycheck`} automatically, counting what's already recorded.</Text> : null}
           {isContributing
             ? <View style={[styles.actionRow, { marginTop: 8 }]}>
                 <TextInput style={[styles.input, { flex: 1 }]} value={contributionAmount} onChangeText={setContributionAmount} keyboardType="decimal-pad" placeholder="Amount to add" />
