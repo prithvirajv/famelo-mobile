@@ -41,6 +41,16 @@ function extractFunctionSource(source, name) {
 // rather than hand-constructing a partial object - a partial save would 400 against the
 // server's REQUIRED_STATE_KEYS check (accounts/transfers/paychecks/budgetHistory/etc. are
 // all required on every PUT /api/state).
+
+// The shared save() normalizes the state every screen hands it (derived income, recurring bills, chore completion shape,
+// goal auto-contribution). Tests check each step is in that function rather than matching the exact chain, so adding a step
+// doesn't break the checks for the others.
+function sharedSaveSource(app) {
+  const start = app.indexOf("const save = useCallback(");
+  assert.ok(start >= 0, "shared save() not found");
+  return app.slice(start, app.indexOf("}, []);", start));
+}
+
 function assertOnlyWholeStateSaves(body, label) {
   const saveCalls = body.match(/onSave\(\{/g) || [];
   // `...latest` is the same full-state clone, read from a ref after an await (the closed-over `state` may be stale).
@@ -205,7 +215,7 @@ test("Savings goals support auto-contribute (round-up / % of paycheck), applied 
   assert.match(body, /withGoalAutoContributions\(/);
   assert.match(body, /ensurePaycheckOccurrencesGenerated/, "percent goals need paycheck occurrences materialized before they can be counted");
   assertOnlyWholeStateSaves(body, "Wealth");
-  assert.match(app, /withGoalAutoContributions\(repairChoreCompletion\(ensureRecurringBudgetBills\(withIncome, localDateKey\(\)\.slice\(0, 7\)\)\), localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
+  assert.match(sharedSaveSource(app), /withGoalAutoContributions\(/, "the shared save must keep goals current as purchases/paychecks are recorded");
 });
 
 test("Notes can attach photos via the Documents pipeline (linked by noteId) and remove them", () => {
@@ -240,7 +250,7 @@ test("Reminders created or rescheduled on mobile carry a notifyAt (the server sk
   assert.match(body, /reminderTiming\(date, time\)/);
   assert.match(body, /advanceRecurringReminder\(target\)/);
   assert.match(body, /completionKeyFor\(/, "completion keys must match web's assignee keys or the two apps disagree on done");
-  assert.match(app, /repairChoreCompletion\(ensureRecurringBudgetBills\(withIncome/, "the shared save repairs the old flat-array chore completion shape");
+  assert.match(sharedSaveSource(app), /repairChoreCompletion\(/, "the shared save repairs the old flat-array chore completion shape");
 });
 
 test("expo-file-system is imported from its /legacy entry - the package root's uploadAsync/writeAsStringAsync throw at runtime in SDK 54+", () => {
@@ -379,7 +389,7 @@ test("Budget can switch months (with rollover and history), copy an earlier mont
   const body = extractFunctionSource(app, "Budget");
   for (const name of ["switchBudgetMonth", "copyBudgetFromMonth", "availablePreviousBudgets", "toggleRollover", "enableRecurringBill", "disableRecurringBill", "updateRecurringBill"]) assert.match(body, new RegExp(name + "\\("));
   assert.match(body, /spentByLineInMonth\(state\.transactions, lineId, monthKey\)/, "rollover needs the previous month's real spend");
-  assert.match(app, /ensureRecurringBudgetBills\(withIncome, localDateKey\(\)\.slice\(0, 7\)\)/, "web re-derives recurring bills on every render, so the shared save does too");
+  assert.match(sharedSaveSource(app), /ensureRecurringBudgetBills\(/, "web re-derives recurring bills on every render, so the shared save does too");
   assert.doesNotMatch(body, /managed on the web app/);
 });
 
@@ -391,4 +401,12 @@ test("Calendar can add and edit birthdays/anniversaries (yearly, remind N days b
   assert.match(body, /Mark wished/);
   assert.match(body, /Birthday/);
   assert.match(body, /Anniversary/);
+});
+
+test("Recurring bills can be created from the transaction form, managed, and surface themselves in Bank stream as time passes", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const budget = extractFunctionSource(app, "Budget");
+  for (const name of ["addRecurringExpense", "updateRecurringExpense", "deleteRecurringExpense"]) assert.match(budget, new RegExp(name + "\\("));
+  assert.match(sharedSaveSource(app), /ensureRecurringExpensesPosted\(/, "the shared save surfaces due periods");
+  assert.match(extractFunctionSource(app, "BankStream"), /ensureRecurringExpensesPosted\(state, localDateKey\(\), uniqueId\)/, "opening Bank stream catches time passing without a save");
 });

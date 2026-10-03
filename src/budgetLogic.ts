@@ -1,6 +1,6 @@
 // Pure Budget editing helpers, mirroring app.js's category/line/transaction handlers. Every function
 // returns a NEW HouseholdState (never mutates) so callers can pass it straight to the whole-state save.
-import type { BudgetCategory, BudgetLine, HouseholdState, Transaction } from "./types";
+import type { BudgetCategory, BudgetLine, HouseholdState, InboxDraft, RecurringExpense, Transaction } from "./types";
 
 export const CATEGORY_COLOR_PALETTE = ["#13936d", "#3569d4", "#d99a24", "#e05252", "#8a5cf6", "#0891b2", "#c2410c", "#be185d"];
 
@@ -287,3 +287,89 @@ export function sortLedgerEntries(entries: LedgerEntry[], field: LedgerSortField
     return a.position - b.position;
   }).map((wrapped) => wrapped.entry);
 }
+
+
+// ---- Recurring bills that post themselves -------------------------------------------------------------------------------
+// A recurring expense (rent, a subscription) is a rule: payee, amount, category, repeat (weekly / every 2 weeks / monthly) and
+// an optional end date. Each elapsed period surfaces as a Bank stream DRAFT for review - not straight into the ledger, since the
+// amount can vary month to month (a utility bill) - and only becomes a real transaction once accepted. `postedDates` records which
+// periods were already surfaced (accepted or dismissed), so reopening the screen never re-adds the same period.
+
+function localKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+function keyToDate(key: string): Date {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
+}
+
+export type RecurringRepeat = RecurringExpense["recurrence"];
+
+// Every date a recurring bill should have come due by referenceDateKey, including its first date. An end date stops it from
+// that date on without touching anything before it. A monthly bill on the 31st lands on each shorter month's last day.
+export function recurringExpenseOccurrenceDates(recurring: Pick<RecurringExpense, "anchorDate" | "endDate" | "recurrence">, referenceDateKey: string): string[] {
+  if (!recurring?.anchorDate || referenceDateKey < recurring.anchorDate) return [];
+  const effectiveReference = recurring.endDate && referenceDateKey > recurring.endDate ? recurring.endDate : referenceDateKey;
+  if (effectiveReference < recurring.anchorDate) return [];
+  const anchor = keyToDate(recurring.anchorDate);
+  const reference = keyToDate(effectiveReference);
+  const dates: string[] = [];
+  if (recurring.recurrence === "weekly" || recurring.recurrence === "biweekly") {
+    const stepDays = recurring.recurrence === "weekly" ? 7 : 14;
+    for (let cursor = anchor; cursor <= reference; cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + stepDays)) dates.push(localKey(cursor));
+    return dates;
+  }
+  if (recurring.recurrence === "monthly") {
+    let monthsElapsed = 0;
+    for (let cursor = anchor; cursor <= reference;) {
+      dates.push(localKey(cursor));
+      monthsElapsed += 1;
+      const lastDayOfNext = new Date(anchor.getFullYear(), anchor.getMonth() + monthsElapsed + 1, 0).getDate();
+      cursor = new Date(anchor.getFullYear(), anchor.getMonth() + monthsElapsed, Math.min(anchor.getDate(), lastDayOfNext));
+    }
+    return dates;
+  }
+  return [recurring.anchorDate];
+}
+
+// Surfaces every elapsed, not-yet-surfaced period of every recurring bill as a Bank stream draft (newest on top). Safe to run
+// as often as you like: postedDates rules out anything already surfaced. Returns the SAME state object when nothing is new.
+export function ensureRecurringExpensesPosted(state: HouseholdState, todayKey: string, createId: (prefix: string) => string): HouseholdState {
+  const newDrafts: InboxDraft[] = [];
+  const recurringExpenses = (state.recurringExpenses || []).map((recurring) => {
+    const posted = recurring.postedDates || [];
+    const due = recurringExpenseOccurrenceDates(recurring, todayKey).filter((date) => !posted.includes(date));
+    if (!due.length) return recurring;
+    due.forEach((date) => newDrafts.unshift({ id: createId("recurring-bank-stream"), payee: recurring.payee, amount: Number(recurring.amount || 0), lineId: recurring.lineId, accountId: recurring.accountId || "", date, recurringId: recurring.id }));
+    return { ...recurring, postedDates: [...posted, ...due] };
+  });
+  if (!newDrafts.length) return state;
+  return { ...state, recurringExpenses, transactionInboxDrafts: [...newDrafts, ...(state.transactionInboxDrafts || [])] };
+}
+
+export type RecurringInput = { payee: string; amount: number; lineId: string; accountId?: string; recurrence: RecurringRepeat; anchorDate: string; endDate?: string };
+
+export function addRecurringExpense(state: HouseholdState, input: RecurringInput, createId: (prefix: string) => string): HouseholdState {
+  const recurring: RecurringExpense = {
+    id: createId("recurring-expense"), payee: input.payee, amount: input.amount, lineId: input.lineId, accountId: input.accountId || "",
+    recurrence: input.recurrence, anchorDate: input.anchorDate, endDate: input.endDate || "", postedDates: []
+  };
+  return { ...state, recurringExpenses: [recurring, ...(state.recurringExpenses || [])] };
+}
+
+// Edits a recurring bill. Setting or lowering an end date also drops any still-unreviewed draft it had already surfaced past
+// that date - they would otherwise sit in Bank stream forever (paycheck occurrences get the same cleanup).
+export function updateRecurringExpense(state: HouseholdState, id: string, patch: Partial<Omit<RecurringExpense, "id" | "postedDates">>): HouseholdState {
+  const recurringExpenses = (state.recurringExpenses || []).map((recurring) => recurring.id === id ? { ...recurring, ...patch } : recurring);
+  const updated = recurringExpenses.find((recurring) => recurring.id === id);
+  const drafts = updated?.endDate
+    ? (state.transactionInboxDrafts || []).filter((draft) => draft.recurringId !== id || (draft.date || "") <= (updated.endDate as string))
+    : state.transactionInboxDrafts;
+  return { ...state, recurringExpenses, ...(drafts ? { transactionInboxDrafts: drafts } : {}) };
+}
+
+export function deleteRecurringExpense(state: HouseholdState, id: string): HouseholdState {
+  return { ...state, recurringExpenses: (state.recurringExpenses || []).filter((recurring) => recurring.id !== id) };
+}
+
+export const RECURRING_REPEAT_LABELS: Record<RecurringRepeat, string> = { weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly" };

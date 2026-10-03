@@ -45,8 +45,8 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
 import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, ParsedBankRow } from "./src/bankStreamLogic";
-import type { LedgerSortField } from "./src/budgetLogic";
-import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries } from "./src/budgetLogic";
+import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
+import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
 
 type Tab = "home" | "budget" | "calendar" | "notes" | "journal" | "plan" | "documents" | "meals" | "more";
 const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
@@ -146,7 +146,8 @@ function AppContent() {
     // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
     const withIncome = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
     // Savings goals with auto-contribute on keep accumulating as purchases/paychecks are recorded (web does this every render).
-    const next = withGoalAutoContributions(repairChoreCompletion(ensureRecurringBudgetBills(withIncome, localDateKey().slice(0, 7))), localDateKey());
+    const withBills = ensureRecurringExpensesPosted(withIncome, localDateKey(), uniqueId);
+    const next = withGoalAutoContributions(repairChoreCompletion(ensureRecurringBudgetBills(withBills, localDateKey().slice(0, 7))), localDateKey());
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
@@ -300,6 +301,11 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const [showAllTx, setShowAllTx] = useState(false);
   // Split editor: which ledger transaction is being split across categories, and its working rows (amounts kept as
   // text so typing "12." doesn't get rewritten under the user).
+  const [txRepeat, setTxRepeat] = useState<"none" | RecurringRepeat>("none");
+  const [txEndDate, setTxEndDate] = useState("");
+  const [editingRecurringId, setEditingRecurringId] = useState<string | null>(null);
+  const [recPayee, setRecPayee] = useState(""); const [recAmount, setRecAmount] = useState(""); const [recRepeat, setRecRepeat] = useState<RecurringRepeat>("monthly");
+  const [recEnd, setRecEnd] = useState(""); const [recLineId, setRecLineId] = useState(""); const [recAccountId, setRecAccountId] = useState("");
   const [ledgerSort, setLedgerSort] = useState<{ field: LedgerSortField; direction: "asc" | "desc" }>({ field: "date", direction: "desc" });
   const [selectMode, setSelectMode] = useState(false);
   const [selectedTx, setSelectedTx] = useState<number[]>([]);
@@ -355,7 +361,7 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   };
   const pendingImpact = pendingDelete ? budgetDeletionImpact(state, pendingDelete.lineIds) : null;
 
-  const resetTxForm = () => { setEditingTxIndex(null); setTxPayee(""); setTxAmount(""); setTxDate(todayKey()); setTxAccountId(""); setTxTags(""); };
+  const resetTxForm = () => { setEditingTxIndex(null); setTxPayee(""); setTxAmount(""); setTxDate(todayKey()); setTxAccountId(""); setTxTags(""); setTxRepeat("none"); setTxEndDate(""); };
   const beginTxEdit = (index: number) => {
     const item = state.transactions[index];
     if (!item) return;
@@ -369,6 +375,14 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     const account = (state.accounts || []).find((item) => item.id === txAccountId);
     if (!accountAllowsDate(account, txDate)) return Alert.alert("Account is closed", `${account?.name || "That account"} is closed — pick a date on or before its close date, or choose a different account.`);
     const input = { date: txDate, payee: txPayee.trim(), amount, lineId: txLineId, accountId: txAccountId, tags: addTagsDeduped([], txTags) };
+    if (editingTxIndex === null && txRepeat !== "none") {
+      if (txEndDate.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(txEndDate.trim())) return Alert.alert("Invalid end date", "Use the format YYYY-MM-DD, or leave it blank.");
+      // The bill becomes a rule; each period that has come due appears in Bank stream for review (the shared save posts them).
+      await onSave(addRecurringExpense(state, { payee: input.payee, amount, lineId: txLineId, accountId: txAccountId, recurrence: txRepeat, anchorDate: txDate, endDate: txEndDate.trim() }, uniqueId));
+      Alert.alert("Recurring bill added", "Each time it comes due it will show up in Bank stream for you to review and accept.");
+      resetTxForm();
+      return;
+    }
     if (editingTxIndex !== null) {
       const existing = state.transactions[editingTxIndex];
       if (!existing) return;
@@ -467,6 +481,11 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         </ScrollView>
       </> : null}
       <TextInput style={styles.input} value={txTags} onChangeText={setTxTags} placeholder="Tags (comma separated, optional)" />
+      {editingTxIndex === null ? <>
+        <Text style={styles.label}>Repeats</Text>
+        <View style={styles.choiceRow}>{(["none", "weekly", "biweekly", "monthly"] as const).map((value) => <Pressable key={value} style={[styles.choice, txRepeat === value && styles.choiceActive]} onPress={() => setTxRepeat(value)}><Text style={[styles.choiceText, txRepeat === value && styles.choiceTextActive]}>{value === "none" ? "Doesn't repeat" : RECURRING_REPEAT_LABELS[value]}</Text></Pressable>)}</View>
+        {txRepeat !== "none" ? <TextInput style={styles.input} value={txEndDate} onChangeText={setTxEndDate} placeholder="Stop repeating after (YYYY-MM-DD, optional)" /> : null}
+      </> : null}
       <View style={styles.actionRow}>
         <Pressable style={styles.primaryButton} onPress={() => void submitTransaction()}><Text style={styles.primaryButtonText}>{editingTxIndex !== null ? "Save changes" : "Add transaction"}</Text></Pressable>
         {editingTxIndex !== null ? <Pressable style={styles.secondarySmall} onPress={resetTxForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable> : null}
@@ -559,6 +578,35 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
         <Pressable style={styles.secondarySmall} onPress={() => void submitAddCategory()}><Text style={styles.secondaryButtonText}>Add</Text></Pressable>
       </View>
     </Card>
+
+    {(state.recurringExpenses || []).length ? <Card>
+      <Text style={styles.cardTitle}>Recurring bills</Text>
+      <Text style={styles.muted}>Each one that comes due is added to Bank stream for you to review.</Text>
+      {(state.recurringExpenses || []).map((recurring) => editingRecurringId === recurring.id ? <View key={recurring.id} style={styles.planTaskBlock}>
+        <TextInput style={styles.input} value={recPayee} onChangeText={setRecPayee} placeholder="Payee" />
+        <TextInput style={styles.input} value={recAmount} onChangeText={setRecAmount} placeholder="Amount" keyboardType="decimal-pad" />
+        <View style={styles.choiceRow}>{(["weekly", "biweekly", "monthly"] as const).map((value) => <Pressable key={value} style={[styles.choice, recRepeat === value && styles.choiceActive]} onPress={() => setRecRepeat(value)}><Text style={[styles.choiceText, recRepeat === value && styles.choiceTextActive]}>{RECURRING_REPEAT_LABELS[value]}</Text></Pressable>)}</View>
+        <TextInput style={styles.input} value={recEnd} onChangeText={setRecEnd} placeholder="Stop repeating after (YYYY-MM-DD, optional)" />
+        <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{allLines.map((line) => <Pressable key={line.id} style={[styles.choice, recLineId === line.id && styles.choiceActive]} onPress={() => setRecLineId(line.id)}><Text style={[styles.choiceText, recLineId === line.id && styles.choiceTextActive]}>{line.category} · {line.name}</Text></Pressable>)}</ScrollView>
+        {accounts.length ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+          <Pressable style={[styles.choice, !recAccountId && styles.choiceActive]} onPress={() => setRecAccountId("")}><Text style={[styles.choiceText, !recAccountId && styles.choiceTextActive]}>Not linked</Text></Pressable>
+          {accounts.map((account) => <Pressable key={account.id} style={[styles.choice, recAccountId === account.id && styles.choiceActive]} onPress={() => setRecAccountId(account.id)}><Text style={[styles.choiceText, recAccountId === account.id && styles.choiceTextActive]}>{account.name}</Text></Pressable>)}
+        </ScrollView> : null}
+        <View style={styles.actionRow}>
+          <Pressable style={styles.primaryButton} onPress={() => {
+            const amount = Number(recAmount.replace(/[,$]/g, ""));
+            if (!recPayee.trim() || !Number.isFinite(amount)) return Alert.alert("Missing info", "Enter a payee and an amount.");
+            if (recEnd.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(recEnd.trim())) return Alert.alert("Invalid end date", "Use the format YYYY-MM-DD, or leave it blank.");
+            void onSave(updateRecurringExpense(state, recurring.id, { payee: recPayee.trim(), amount, recurrence: recRepeat, endDate: recEnd.trim(), lineId: recLineId, accountId: recAccountId }));
+            setEditingRecurringId(null);
+          }}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => setEditingRecurringId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+          <Pressable style={styles.planStepperButton} onPress={() => Alert.alert(`Stop ${recurring.payee}?`, "No more will be added to Bank stream. Ones already waiting there stay.", [{ text: "Cancel" }, { text: "Stop it", style: "destructive", onPress: () => { void onSave(deleteRecurringExpense(state, recurring.id)); setEditingRecurringId(null); } }])}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+        </View>
+      </View> : <Pressable key={recurring.id} onPress={() => { setEditingRecurringId(recurring.id); setRecPayee(recurring.payee); setRecAmount(String(recurring.amount)); setRecRepeat(recurring.recurrence); setRecEnd(recurring.endDate || ""); setRecLineId(recurring.lineId); setRecAccountId(recurring.accountId || ""); }}>
+        <Row title={recurring.payee} detail={[RECURRING_REPEAT_LABELS[recurring.recurrence], `since ${recurring.anchorDate}`, recurring.endDate ? `until ${recurring.endDate}` : "", transactionAssignmentLabel(state, { lineId: recurring.lineId, date: "", payee: "", amount: 0 }), accountName(recurring.accountId)].filter(Boolean).join(" · ")} value={money(Number(recurring.amount), currency)} />
+      </Pressable>)}
+    </Card> : null}
 
     <Card>
       <View style={styles.iouPersonHead}>
@@ -1873,6 +1921,14 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const [transferDraftId, setTransferDraftId] = useState<string | null>(null);
   const [transferAccountId, setTransferAccountId] = useState("");
   const [aiBusyId, setAiBusyId] = useState<string | null>(null);
+
+  // A recurring bill that came due since the last visit becomes a draft to review (the shared save does this too; this catches
+  // time passing while nothing was being saved).
+  useEffect(() => {
+    const next = ensureRecurringExpensesPosted(state, localDateKey(), uniqueId);
+    if (next !== state) void onSave(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.recurringExpenses]);
 
   const apply = async (result: { ok: true; state: HouseholdState } | { ok: false; error: string }) => {
     if (!result.ok) { Alert.alert("Can't do that", result.error); return false; }

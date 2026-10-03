@@ -227,3 +227,58 @@ test("sortLedgerEntries sorts by date, amount, payee, category or account in eit
   assert.deepEqual(order("account", "asc"), [2, 1, 0]);
   assert.deepEqual(entries.map((e) => e.index), [0, 1, 2]);
 });
+
+import { recurringExpenseOccurrenceDates, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense } from "../src/budgetLogic.ts";
+
+test("recurringExpenseOccurrenceDates lists every due date from the first, stepping weekly/biweekly/monthly, honoring the end date", () => {
+  const weekly = { anchorDate: "2026-07-01", recurrence: "weekly" };
+  assert.deepEqual(recurringExpenseOccurrenceDates(weekly, "2026-07-16"), ["2026-07-01", "2026-07-08", "2026-07-15"]);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ ...weekly, recurrence: "biweekly" }, "2026-07-30"), ["2026-07-01", "2026-07-15", "2026-07-29"]);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ anchorDate: "2026-01-31", recurrence: "monthly" }, "2026-04-30"), ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"]);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ ...weekly, endDate: "2026-07-09" }, "2026-08-30"), ["2026-07-01", "2026-07-08"]);
+  assert.deepEqual(recurringExpenseOccurrenceDates(weekly, "2026-06-30"), []);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ ...weekly, endDate: "2026-06-01" }, "2026-08-30"), []);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ anchorDate: "2026-07-01", recurrence: "none" }, "2026-08-30"), ["2026-07-01"]);
+  assert.deepEqual(recurringExpenseOccurrenceDates({ anchorDate: "", recurrence: "weekly" }, "2026-08-30"), []);
+});
+
+test("ensureRecurringExpensesPosted surfaces each elapsed period once as a bank-stream draft, and never again", () => {
+  let n = 0;
+  const createId = (prefix) => `${prefix}-${++n}`;
+  const start = addRecurringExpense({ ...baseState(), recurringExpenses: [], transactionInboxDrafts: [{ id: "old", lineId: "", date: "2026-06-01" }] }, { payee: "Gym", amount: 30, lineId: "rent", accountId: "chk", recurrence: "monthly", anchorDate: "2026-05-15", endDate: "" }, createId);
+  assert.equal(start.recurringExpenses[0].id, "recurring-expense-1");
+  const posted = ensureRecurringExpensesPosted(start, "2026-07-20", createId);
+  assert.deepEqual(posted.recurringExpenses[0].postedDates, ["2026-05-15", "2026-06-15", "2026-07-15"]);
+  assert.deepEqual(posted.transactionInboxDrafts.map((d) => d.date), ["2026-07-15", "2026-06-15", "2026-05-15", "2026-06-01"], "newest first, above what was already there");
+  assert.deepEqual({ ...posted.transactionInboxDrafts[0] }, { id: "recurring-bank-stream-4", payee: "Gym", amount: 30, lineId: "rent", accountId: "chk", date: "2026-07-15", recurringId: "recurring-expense-1" });
+  assert.equal(ensureRecurringExpensesPosted(posted, "2026-07-20", createId), posted, "idempotent");
+  const later = ensureRecurringExpensesPosted(posted, "2026-08-16", createId);
+  assert.deepEqual(later.transactionInboxDrafts.map((d) => d.date).slice(0, 2), ["2026-08-15", "2026-07-15"]);
+  assert.equal(later.transactionInboxDrafts.length, 5);
+  const none = { ...baseState(), recurringExpenses: [] };
+  assert.equal(ensureRecurringExpensesPosted(none, "2026-07-20", createId), none);
+});
+
+test("an accepted or dismissed period is not surfaced again, because postedDates remembers it", () => {
+  const createId = (prefix) => `${prefix}-x`;
+  const posted = ensureRecurringExpensesPosted(addRecurringExpense({ ...baseState(), recurringExpenses: [], transactionInboxDrafts: [] }, { payee: "Rent", amount: 1, lineId: "rent", recurrence: "weekly", anchorDate: "2026-07-01" }, createId), "2026-07-01", createId);
+  const reviewed = { ...posted, transactionInboxDrafts: [] };
+  assert.equal(ensureRecurringExpensesPosted(reviewed, "2026-07-05", createId), reviewed);
+  assert.equal(ensureRecurringExpensesPosted(reviewed, "2026-07-08", createId).transactionInboxDrafts.length, 1);
+});
+
+test("updating a recurring bill's end date drops unreviewed drafts past it; deleting removes the rule only", () => {
+  const createId = (prefix) => `${prefix}-${Math.random()}`;
+  const base = ensureRecurringExpensesPosted(addRecurringExpense({ ...baseState(), recurringExpenses: [], transactionInboxDrafts: [] }, { payee: "Gym", amount: 30, lineId: "rent", recurrence: "weekly", anchorDate: "2026-07-01" }, createId), "2026-07-23", createId);
+  const id = base.recurringExpenses[0].id;
+  assert.equal(base.transactionInboxDrafts.length, 4);
+  const ended = updateRecurringExpense(base, id, { endDate: "2026-07-10" });
+  assert.deepEqual(ended.transactionInboxDrafts.map((d) => d.date).sort(), ["2026-07-01", "2026-07-08"]);
+  assert.equal(ended.recurringExpenses[0].endDate, "2026-07-10");
+  const retitled = updateRecurringExpense(base, id, { payee: "Gym membership", amount: 35 });
+  assert.equal(retitled.transactionInboxDrafts.length, 4);
+  assert.deepEqual([retitled.recurringExpenses[0].payee, retitled.recurringExpenses[0].amount], ["Gym membership", 35]);
+  const gone = deleteRecurringExpense(base, id);
+  assert.deepEqual(gone.recurringExpenses, []);
+  assert.equal(gone.transactionInboxDrafts.length, 4, "drafts already surfaced stay for review");
+});
