@@ -31,7 +31,7 @@ import {
 } from "./src/reportsLogic";
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
-import { advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
+import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
@@ -62,6 +62,11 @@ const tabs: Array<{ id: Tab; label: string; icon: keyof typeof Ionicons.glyphMap
 ];
 
 const journalMoods = ["Happy", "Calm", "Neutral", "Stressed", "Sad", "Grateful", "Excited"];
+
+function parseLocalDate(dateKey: string): Date {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
+}
 
 function localDateKey(now: Date = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -599,18 +604,24 @@ const reminderRecurrenceLabels: Record<ReminderRecurrence, string> = { once: "On
 function Calendar({ state, access, user, onSave }: { state: HouseholdState; access: HouseholdAccess | null; user: User; onSave: (next: HouseholdState) => Promise<void> }) {
   const members = access?.members.filter((member) => member.status === "active") || [];
   const [editing, setEditing] = useState<{ kind: "event" | "chore"; index: number } | null>(null);
-  const [addKind, setAddKind] = useState<"event" | "chore">("event");
+  const [addKind, setAddKind] = useState<"event" | "chore" | "birthday" | "anniversary">("event");
+  const [remindDays, setRemindDays] = useState(1);
   const [title, setTitle] = useState(""); const [date, setDate] = useState(`${state.budget.month}-01`); const [owner, setOwner] = useState(members[0]?.email || "");
   const [recurrence, setRecurrence] = useState<ReminderRecurrence>("once");
   const [time, setTime] = useState("09:00");
   const [choreRecurrence, setChoreRecurrence] = useState<ChoreRecurrence>("once");
-  const kind = editing?.kind || addKind;
+  const kind = editing?.kind || (addKind === "chore" ? "chore" : "event");
+  // Birthdays/anniversaries share the event form but repeat yearly on a fixed month-day, remind N days before, and are
+  // "wished" per year instead of marked done.
+  const editingEvent = editing?.kind === "event" ? state.calendar.events[editing.index] : undefined;
+  const annualType = editingEvent ? (ANNUAL_EVENT_TYPES.includes(editingEvent.type) ? editingEvent.type : "") : (addKind === "birthday" || addKind === "anniversary" ? addKind : "");
   const begin = (targetKind: "event" | "chore", index: number) => {
     const item = targetKind === "event" ? state.calendar.events[index] : state.calendar.chores[index];
     if (!item) return;
     setEditing({ kind: targetKind, index }); setTitle(item.title); setDate(targetKind === "event" ? (item as typeof state.calendar.events[number]).date : (item as typeof state.calendar.chores[number]).startDate || (item as typeof state.calendar.chores[number]).nextDue); setOwner(targetKind === "event" ? (item as typeof state.calendar.events[number]).owner || members[0]?.email || "" : (item as typeof state.calendar.chores[number]).assignee || members[0]?.email || "");
     setRecurrence(targetKind === "event" ? (item as typeof state.calendar.events[number]).recurrence || "once" : "once");
     setTime(targetKind === "event" ? ((item as typeof state.calendar.events[number]).dateTime || "").slice(11, 16) || "09:00" : "09:00");
+    setRemindDays(targetKind === "event" ? Number((item as typeof state.calendar.events[number]).reminderDays ?? 1) : 1);
     setChoreRecurrence(targetKind === "chore" ? (item as typeof state.calendar.chores[number]).recurrence || "once" : "once");
   };
   // "From photo": the picture is sent inline to the server's vision model (never stored) and comes back
@@ -698,13 +709,28 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     setImportDrafts(null);
     Alert.alert("Import complete", `Imported ${imported} calendar item${imported === 1 ? "" : "s"}.`);
   };
-  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setChoreRecurrence("once"); };
+  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setRemindDays(1); setChoreRecurrence("once"); };
   const saveItem = async () => {
     if (!title.trim() || !date) return;
     const member = members.find((item) => item.email === owner);
     const ownerName = member?.name || owner;
     const ownerAssignee = owner ? [{ key: owner, name: ownerName, email: owner }] : [];
     const next = structuredClone(state);
+    if (annualType) {
+      if (time.trim() && !isValidClockTime(time)) return Alert.alert("Invalid time", "Use 24-hour HH:MM, for example 09:00.");
+      const input = { type: annualType, title, date, time, reminderDays: remindDays };
+      if (editingEvent && editing) {
+        const updated = updateAnnualEvent(editingEvent, input);
+        if (!updated) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+        next.calendar.events = next.calendar.events.map((item, index) => index === editing.index ? { ...updated, owner, ownerName, assignees: editingEvent.owner === owner && editingEvent.assignees?.length ? editingEvent.assignees : ownerAssignee } : item);
+      } else {
+        const created = buildAnnualEvent(input, { email: owner || user.email, name: ownerName || user.name }, () => `event-${Date.now()}`);
+        if (!created) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
+        next.calendar.events.push(created);
+      }
+      await onSave(next); resetForm();
+      return;
+    }
     if (editing?.kind === "chore") {
       next.calendar.chores = next.calendar.chores.map((item, index) => index === editing.index ? {
         ...item, title: title.trim(), startDate: date, nextDue: date, assignee: owner, assigneeName: ownerName,
@@ -774,6 +800,11 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     next.calendar.events = next.calendar.events.map((item, itemIndex) => itemIndex === index ? target : item);
     await onSave(next);
   };
+  const toggleWished = async (index: number, year: number) => {
+    const event = state.calendar.events[index];
+    if (!event) return;
+    await onSave({ ...state, calendar: { ...state.calendar, events: state.calendar.events.map((item, itemIndex) => itemIndex === index ? toggleAnnualWished(item, year, user.email) : item) } });
+  };
   // Completion is recorded per occurrence DATE (web's shape) against the occurrence the chore is on right
   // now; the recurrence anchor (startDate) is never moved by completing something.
   const toggleChoreDone = async (index: number) => {
@@ -808,11 +839,18 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     {!editing && <View style={styles.choiceRow}>
       <Pressable style={[styles.choice, addKind === "event" && styles.choiceActive]} onPress={() => setAddKind("event")}><Text style={[styles.choiceText, addKind === "event" && styles.choiceTextActive]}>Reminder</Text></Pressable>
       <Pressable style={[styles.choice, addKind === "chore" && styles.choiceActive]} onPress={() => setAddKind("chore")}><Text style={[styles.choiceText, addKind === "chore" && styles.choiceTextActive]}>Chore</Text></Pressable>
+      <Pressable style={[styles.choice, addKind === "birthday" && styles.choiceActive]} onPress={() => setAddKind("birthday")}><Text style={[styles.choiceText, addKind === "birthday" && styles.choiceTextActive]}>Birthday</Text></Pressable>
+      <Pressable style={[styles.choice, addKind === "anniversary" && styles.choiceActive]} onPress={() => setAddKind("anniversary")}><Text style={[styles.choiceText, addKind === "anniversary" && styles.choiceTextActive]}>Anniversary</Text></Pressable>
     </View>}
     <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Title" /><TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
-    {kind === "event" && (editing === null || state.calendar.events[editing.index]?.type === "reminder") ? <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="Time (HH:MM, 24-hour) - when you'll be reminded" keyboardType="numbers-and-punctuation" maxLength={5} /> : null}
+    {annualType ? <Text style={styles.muted}>Repeats every year on this date - the year you enter doesn't matter (a birth year is fine).</Text> : null}
+    {kind === "event" ? <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="Time (HH:MM, 24-hour) - when you'll be reminded" keyboardType="numbers-and-punctuation" maxLength={5} /> : null}
     <Text style={styles.label}>Assign to</Text><ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
-    {kind === "event" && <>
+    {annualType ? <>
+      <Text style={styles.label}>Remind me</Text>
+      <View style={styles.choiceRow}>{REMIND_BEFORE_OPTIONS.map((option) => <Pressable key={option.days} style={[styles.choice, remindDays === option.days && styles.choiceActive]} onPress={() => setRemindDays(option.days)}><Text style={[styles.choiceText, remindDays === option.days && styles.choiceTextActive]}>{option.label}</Text></Pressable>)}</View>
+    </> : null}
+    {kind === "event" && !annualType && <>
       <Text style={styles.label}>Repeat</Text>
       <View style={styles.choiceRow}>{(["once", "weekly", "monthly", "yearly"] as ReminderRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, recurrence === item && styles.choiceActive]} onPress={() => setRecurrence(item)}><Text style={[styles.choiceText, recurrence === item && styles.choiceTextActive]}>{reminderRecurrenceLabels[item]}</Text></Pressable>)}</View>
     </>}
@@ -821,7 +859,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{(Object.keys(choreCadenceLabels) as ChoreRecurrence[]).map((item) => <Pressable key={item} style={[styles.choice, choreRecurrence === item && styles.choiceActive]} onPress={() => setChoreRecurrence(item)}><Text style={[styles.choiceText, choreRecurrence === item && styles.choiceTextActive]}>{choreCadenceLabels[item]}</Text></Pressable>)}</ScrollView>
     </>}
     <View style={styles.actionRow}>
-      <Pressable style={styles.primaryButton} onPress={() => void saveItem()}><Text style={styles.primaryButtonText}>{editing ? "Save changes" : kind === "chore" ? "Add chore" : "Add reminder"}</Text></Pressable>
+      <Pressable style={styles.primaryButton} onPress={() => void saveItem()}><Text style={styles.primaryButtonText}>{editing ? "Save changes" : kind === "chore" ? "Add chore" : annualType ? `Add ${ANNUAL_EVENT_LABELS[annualType]?.toLowerCase() || "event"}` : "Add reminder"}</Text></Pressable>
       {editing && <Pressable style={styles.secondarySmall} onPress={resetForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>}
     </View>
   </Card><Card><Text style={styles.cardTitle}>Events and reminders</Text>{state.calendar.events.map((item, index) => {
@@ -831,6 +869,18 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     const done = key ? completed.includes(key) : false;
     const recurrenceLabel = item.recurrence && item.recurrence !== "once" ? reminderRecurrenceLabels[item.recurrence] : null;
     const timeLabel = item.type === "reminder" && item.dateTime ? item.dateTime.slice(11, 16) : null;
+    if (ANNUAL_EVENT_TYPES.includes(item.type)) {
+      const pending = nextPendingAnnualOccurrence(item, user.email);
+      const wishedKeys = pending ? annualWishedKeys(item, pending.year) : [];
+      const total = Math.max(assignees.length, wishedKeys.length);
+      const remindLabel = Number(item.reminderDays ?? 1) < 0 ? "no reminder" : Number(item.reminderDays ?? 1) === 0 ? "reminds same day" : `reminds ${item.reminderDays ?? 1} day${Number(item.reminderDays ?? 1) === 1 ? "" : "s"} before`;
+      const overdue = pending ? pending.date < localDateKey() : false;
+      return <View key={item.id || `${item.date}-${item.title}`} style={styles.row}>
+        <Pressable style={styles.rowCopy} onPress={() => begin("event", index)}><Row title={annualEventDisplayTitle(item)} detail={[pending ? formatShortDate(parseLocalDate(pending.date)) : "", overdue ? "Not wished yet" : "", ANNUAL_EVENT_LABELS[item.type], remindLabel, item.ownerName || item.owner].filter(Boolean).join(" · ")} badge={item.type} /></Pressable>
+        {pending ? <Pressable style={styles.planStepperButton} onPress={() => void toggleWished(index, pending.year)}><Text style={styles.secondaryButtonText}>{wishedKeys.includes(user.email) ? "✓ Wished" : "Mark wished"}{total > 1 ? ` (${wishedKeys.length}/${total})` : ""}</Text></Pressable> : null}
+        <Pressable onPress={() => deleteEvent(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
+      </View>;
+    }
     return <View key={item.id || `${item.date}-${item.title}`} style={styles.row}>
       <Pressable style={styles.rowCopy} onPress={() => begin("event", index)}><Row title={item.title} detail={[item.date, timeLabel, item.ownerName || item.owner || "Unassigned", recurrenceLabel].filter(Boolean).join(" · ")} badge={item.type} /></Pressable>
       {item.type === "reminder" ? (key

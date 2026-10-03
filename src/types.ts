@@ -25,6 +25,8 @@ export type CalendarEvent = {
   recurrence?: ReminderRecurrence; completedBy?: string[];
   dateTime?: string; notifyAt?: string; reminderAt?: string; location?: string; annual?: boolean; assignees?: EventAssignee[];
   monthDay?: string; reminderDays?: number;
+  // Birthdays/anniversaries: { "YYYY": [keys of who has wished them this year] } (web's shape).
+  wishedBy?: Record<string, string[]>;
 };
 // One row parsed from an .ics or .csv file, in the flat shape web's importer uses for both formats.
 export type CalendarImportDraft = {

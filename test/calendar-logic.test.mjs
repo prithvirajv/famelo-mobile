@@ -188,3 +188,71 @@ test("localInstant builds device-local times from numeric parts and rejects anyt
   assert.equal(reminderTiming("2026-02-30", "09:00"), null, "a date that does not exist is not a reminder time");
   assert.equal(reminderTiming("2026-07-20", "9pm").dateTime, "2026-07-20T09:00");
 });
+
+import { annualEventDate, isAnnualEventYearComplete, annualWishedKeys, toggleAnnualWished, nextPendingAnnualOccurrence, annualEventDisplayTitle, buildAnnualEvent, updateAnnualEvent, REMIND_BEFORE_OPTIONS } from "../src/calendarLogic.ts";
+
+const bday = (overrides = {}) => ({ id: "b1", title: "Sam's birthday reminder", date: "1990-03-09", monthDay: "03-09", type: "birthday", annual: true, reminderDays: 3, assignees: [{ key: "a@x.com", name: "Alex", email: "a@x.com" }], wishedBy: {}, ...overrides });
+const me = { email: "a@x.com", name: "Alex" };
+
+test("annualEventDate uses the month-day in any year and clamps Feb 29 in a non-leap year", () => {
+  assert.equal(annualEventDate(bday(), 2026).getTime(), new Date(2026, 2, 9).getTime());
+  assert.equal(annualEventDate({ date: "2000-02-29" }, 2027).getTime(), new Date(2027, 1, 28).getTime());
+  assert.equal(annualEventDate({ date: "2000-02-29" }, 2028).getTime(), new Date(2028, 1, 29).getTime());
+  assert.equal(annualEventDate({ date: "1990-03-09", monthDay: "12-25" }, 2026).getTime(), new Date(2026, 11, 25).getTime());
+});
+
+test("wishing is per person per year: toggling adds then removes only your own mark, and a year is complete once every assignee marked it", () => {
+  const joint = bday({ assignees: [{ key: "a@x.com" }, { key: "b@x.com" }] });
+  const aWished = toggleAnnualWished(joint, 2026, "a@x.com");
+  assert.deepEqual(annualWishedKeys(aWished, 2026), ["a@x.com"]);
+  assert.equal(isAnnualEventYearComplete(aWished, 2026), false);
+  const both = toggleAnnualWished(aWished, 2026, "b@x.com");
+  assert.equal(isAnnualEventYearComplete(both, 2026), true);
+  assert.equal(isAnnualEventYearComplete(both, 2027), false);
+  assert.deepEqual(annualWishedKeys(toggleAnnualWished(both, 2026, "a@x.com"), 2026), ["b@x.com"]);
+  assert.deepEqual(joint.wishedBy, {}, "never mutates the input");
+  assert.equal(isAnnualEventYearComplete(bday({ assignees: [], wishedBy: { 2026: ["anyone"] } }), 2026), true);
+  assert.equal(isAnnualEventYearComplete(bday({ assignees: [] }), 2026), false);
+});
+
+test("nextPendingAnnualOccurrence shows an overdue unwished year instead of skipping ahead, then moves on once wished", () => {
+  const ref = new Date(2026, 5, 1);
+  assert.deepEqual(nextPendingAnnualOccurrence(bday(), "a@x.com", ref), { date: "2026-03-09", year: 2026 });
+  const wished = toggleAnnualWished(bday(), 2026, "a@x.com");
+  assert.deepEqual(nextPendingAnnualOccurrence(wished, "a@x.com", ref), { date: "2027-03-09", year: 2027 });
+  assert.deepEqual(nextPendingAnnualOccurrence(wished, "b@x.com", ref), { date: "2026-03-09", year: 2026 }, "someone else's mark doesn't clear mine");
+  assert.deepEqual(nextPendingAnnualOccurrence(wished, undefined, ref), { date: "2027-03-09", year: 2027 });
+});
+
+test("annualEventDisplayTitle strips a trailing 'reminder' and falls back to the type's label", () => {
+  assert.equal(annualEventDisplayTitle(bday()), "Sam's birthday");
+  assert.equal(annualEventDisplayTitle({ title: "", type: "anniversary" }), "Anniversary");
+  assert.equal(annualEventDisplayTitle({ title: "Mom and Dad", type: "anniversary" }), "Mom and Dad");
+});
+
+test("buildAnnualEvent writes web's shape: monthDay, assignee, empty wishes and a notifyAt on the next occurrence minus the reminder days", () => {
+  const now = new Date(2026, 6, 10, 12);
+  const event = buildAnnualEvent({ type: "birthday", title: " Sam ", date: "1990-03-09", time: "08:00", reminderDays: 3 }, me, () => "b9", now);
+  assert.deepEqual({ ...event }, {
+    id: "b9", title: "Sam", date: "1990-03-09", dateTime: "1990-03-09T08:00", monthDay: "03-09", reminderDays: 3, notifyAt: new Date(2027, 2, 6, 8, 0).toISOString(),
+    type: "birthday", annual: true, location: "", owner: "a@x.com", ownerName: "Alex", assignees: [{ key: "a@x.com", name: "Alex", email: "a@x.com" }], wishedBy: {}
+  });
+  assert.equal(buildAnnualEvent({ type: "birthday", title: "Sam", date: "1990-03-09", time: "bad", reminderDays: 1 }, me, () => "x", now).dateTime, "1990-03-09T09:00");
+  assert.equal(buildAnnualEvent({ type: "reminder", title: "x", date: "2026-03-09", time: "09:00", reminderDays: 1 }, me, () => "x", now), null);
+  assert.equal(buildAnnualEvent({ type: "birthday", title: " ", date: "2026-03-09", time: "09:00", reminderDays: 1 }, me, () => "x", now), null);
+  assert.equal(buildAnnualEvent({ type: "birthday", title: "x", date: "2026-02-30", time: "09:00", reminderDays: 1 }, me, () => "x", now), null);
+  assert.deepEqual(REMIND_BEFORE_OPTIONS.map((o) => o.days), [0, 1, 3, 7, 14, -1]);
+});
+
+test("updateAnnualEvent changes title/date/reminder and re-derives monthDay and notifyAt, keeping wishes and assignees", () => {
+  const now = new Date(2026, 6, 10, 12);
+  const original = bday({ wishedBy: { 2026: ["a@x.com"] }, notifyAt: "stale" });
+  const updated = updateAnnualEvent(original, { type: "birthday", title: "Samuel", date: "1991-12-25", time: "10:30", reminderDays: 7 }, now);
+  assert.equal(updated.title, "Samuel");
+  assert.equal(updated.monthDay, "12-25");
+  assert.equal(updated.reminderDays, 7);
+  assert.equal(updated.notifyAt, new Date(2026, 11, 18, 10, 30).toISOString());
+  assert.deepEqual(updated.wishedBy, { 2026: ["a@x.com"] });
+  assert.deepEqual(updated.assignees, original.assignees);
+  assert.equal(updateAnnualEvent(original, { type: "birthday", title: "", date: "1991-12-25", time: "10:30", reminderDays: 7 }, now), null);
+});

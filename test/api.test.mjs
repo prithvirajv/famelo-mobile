@@ -382,3 +382,13 @@ test("Budget can switch months (with rollover and history), copy an earlier mont
   assert.match(app, /ensureRecurringBudgetBills\(withIncome, localDateKey\(\)\.slice\(0, 7\)\)/, "web re-derives recurring bills on every render, so the shared save does too");
   assert.doesNotMatch(body, /managed on the web app/);
 });
+
+test("Calendar can add and edit birthdays/anniversaries (yearly, remind N days before) and track who has wished them each year", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Calendar");
+  for (const name of ["buildAnnualEvent", "updateAnnualEvent", "toggleAnnualWished", "nextPendingAnnualOccurrence", "annualEventDisplayTitle"]) assert.match(body, new RegExp(name + "\\("));
+  assert.match(body, /REMIND_BEFORE_OPTIONS/);
+  assert.match(body, /Mark wished/);
+  assert.match(body, /Birthday/);
+  assert.match(body, /Anniversary/);
+});

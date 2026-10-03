@@ -549,3 +549,87 @@ export function calendarDraftToItem(draft: CalendarImportDraft, assignees: Array
     owner: first?.key || "", ownerName: first?.name || "", assignees, completedBy: []
   } };
 }
+
+
+// ---- Birthdays and anniversaries --------------------------------------------------------------------------------------
+// A yearly event keyed on its month-day (the year entered is often a birth year decades ago, and is ignored). It notifies
+// `reminderDays` before the NEXT upcoming occurrence (the server rolls the stored instant forward each year), and "wished" is
+// tracked per year per person: { "2026": [keys] }, fully wished once every assignee has marked their own.
+
+export const ANNUAL_EVENT_LABELS: Record<string, string> = { birthday: "Birthday", anniversary: "Anniversary" };
+
+// Days before the occurrence to notify; -1 means "don't remind" (the server skips an event with a negative value).
+export const REMIND_BEFORE_OPTIONS: Array<{ days: number; label: string }> = [
+  { days: 0, label: "Same day" }, { days: 1, label: "1 day" }, { days: 3, label: "3 days" }, { days: 7, label: "7 days" }, { days: 14, label: "14 days" }, { days: -1, label: "Don't remind" }
+];
+
+// The calendar date this yearly event falls on in a given year, from its stable "MM-DD" (a Feb 29 clamps to Feb 28).
+export function annualEventDate(event: Pick<CalendarEvent, "monthDay" | "date">, year: number): Date {
+  const [month = 1, requestedDay = 1] = String(event.monthDay || event.date?.slice(5) || "01-01").split("-").map(Number);
+  const lastDay = new Date(year, month, 0).getDate();
+  return new Date(year, month - 1, Math.min(requestedDay, lastDay));
+}
+
+export function isAnnualEventYearComplete(event: Pick<CalendarEvent, "wishedBy" | "assignees">, year: number): boolean {
+  const assigneeKeys = (event.assignees || []).map((assignee) => assignee.key);
+  const completed = (event.wishedBy || {})[String(year)] || [];
+  if (!assigneeKeys.length) return completed.length > 0;
+  return assigneeKeys.every((key) => completed.includes(key));
+}
+
+export function annualWishedKeys(event: Pick<CalendarEvent, "wishedBy">, year: number): string[] {
+  return (event.wishedBy || {})[String(year)] || [];
+}
+
+// Each person toggles only their OWN mark (never someone else's); an assignee means "whose family member this is", not
+// "who may wish them", so any signed-in member can wish. Returns a new event.
+export function toggleAnnualWished(event: CalendarEvent, year: number, key: string): CalendarEvent {
+  const wished = { ...(event.wishedBy || {}) };
+  const current = wished[String(year)] || [];
+  wished[String(year)] = current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
+  return { ...event, wishedBy: wished };
+}
+
+// The earliest year this viewer has not wished yet: if this year's date already passed and they never marked it, that
+// overdue year is shown rather than silently skipping ahead to next year. Without a viewer it uses whole-household completion.
+export function nextPendingAnnualOccurrence(event: CalendarEvent, viewerKey: string | undefined, reference: Date = new Date()): { date: string; year: number } | null {
+  let year = reference.getFullYear();
+  for (let i = 0; i < 200; i += 1) {
+    const pending = viewerKey ? !annualWishedKeys(event, year).includes(viewerKey) : !isAnnualEventYearComplete(event, year);
+    if (pending) return { date: dateKey(annualEventDate(event, year)), year };
+    year += 1;
+  }
+  return null;
+}
+
+// "Sam's birthday reminder" reads as "Sam's birthday".
+export function annualEventDisplayTitle(event: Pick<CalendarEvent, "title" | "type">): string {
+  const fallback = ANNUAL_EVENT_LABELS[event.type] || "Event";
+  return String(event.title || fallback).replace(/\s+reminder$/i, "").trim();
+}
+
+export type AnnualEventInput = { type: string; title: string; date: string; time: string; reminderDays: number };
+
+function annualFields(input: AnnualEventInput, now: Date): Pick<CalendarEvent, "date" | "dateTime" | "monthDay" | "reminderDays" | "notifyAt"> | null {
+  const date = input.date.trim();
+  const time = TIME_PATTERN.test(input.time.trim()) ? input.time.trim() : "09:00";
+  if (!localInstant(date, time)) return null;
+  const reminderDays = Number.isFinite(input.reminderDays) ? input.reminderDays : 1;
+  const monthDay = date.slice(5);
+  return { date, dateTime: `${date}T${time}`, monthDay, reminderDays, notifyAt: annualEventNotifyAt(monthDay, reminderDays, time, now) };
+}
+
+// A birthday/anniversary as web writes it, assigned to the person adding it. Null until there is a title and a real date.
+export function buildAnnualEvent(input: AnnualEventInput, user: { email: string; name: string }, createId: () => string, now: Date = new Date()): CalendarEvent | null {
+  const title = input.title.trim();
+  const fields = annualFields(input, now);
+  if (!title || !ANNUAL_EVENT_TYPES.includes(input.type) || !fields) return null;
+  return { id: createId(), title, ...fields, type: input.type, annual: true, location: "", owner: user.email, ownerName: user.name, assignees: [{ key: user.email, name: user.name, email: user.email }], wishedBy: {} };
+}
+
+// Edits an existing yearly event's title/date/time/reminder, keeping its assignees, wishes and anything else untouched.
+export function updateAnnualEvent(event: CalendarEvent, input: AnnualEventInput, now: Date = new Date()): CalendarEvent | null {
+  const title = input.title.trim();
+  const fields = annualFields(input, now);
+  return title && fields ? { ...event, title, ...fields } : null;
+}
