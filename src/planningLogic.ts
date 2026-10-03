@@ -1,4 +1,4 @@
-import type { NoteItem, HouseholdState, PlannedMeal, Recipe } from "./types";
+import type { BudgetCategory, BudgetHistoryEntry, BudgetLine, NoteItem, HouseholdState, PlannedMeal, Recipe, RecurringBudgetBill } from "./types";
 
 export function applyChecklistToggle(checklist: NoteItem[], itemId: string, done: boolean): NoteItem[] {
   const next = checklist.map((item) => (item.id === itemId ? { ...item, done } : { ...item }));
@@ -146,6 +146,14 @@ export function nextRecurringBudgetDueDate(bill: { frequency?: string; dueDate?:
   const interval = recurringBudgetFrequencyMonths[frequency];
   let cursor = /^\d{4}-\d{2}-\d{2}$/.test(bill.dueDate) ? bill.dueDate : `${selectedMonth}-01`;
   while (dateKeyToMonthKey(cursor).localeCompare(selectedMonth) < 0) cursor = addMonthsToDateKey(cursor, interval);
+  // A stored due date can also sit more than one interval AHEAD of the selected month (e.g. someone picked the wrong year).
+  // Pull it back to the nearest occurrence on or after the selected month, so "months to save" reflects the bill actually
+  // coming up next rather than some far-future repeat (web does the same).
+  let earlier = addMonthsToDateKey(cursor, -interval);
+  while (earlier && dateKeyToMonthKey(earlier).localeCompare(selectedMonth) >= 0) {
+    cursor = earlier;
+    earlier = addMonthsToDateKey(cursor, -interval);
+  }
   return cursor;
 }
 
@@ -165,4 +173,151 @@ export function recurringBudgetSetAside(bill: { amount?: number; frequency?: str
     monthsRemaining,
     monthlyAmount: Number((amountDue / monthsRemaining).toFixed(2))
   };
+}
+
+
+// ---- Budget months, rollover and recurring bills ----------------------------------------------------------------------
+// Ported from web (app.js: switchBudgetMonth, copyBudgetFromMonth, rememberCurrentBudgetSnapshot, recurring budget bills).
+// The category/subcategory STRUCTURE is shared by every month - state.budget.categories is the one canonical list - and only
+// each line's `planned` amount differs per month, so switching months or copying a budget only ever rewrites `planned`
+// (keyed by the line's stable id), never the list of lines. Each month left behind is frozen into budgetHistory.
+
+export function formatMonthLabel(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+export function shiftMonthKey(monthKey: string, delta: number): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  const shifted = new Date(year ?? 1970, (month ?? 1) - 1 + delta, 1);
+  return `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, "0")}`;
+}
+
+export function cloneBudgetCategories(categories: BudgetCategory[]): BudgetCategory[] {
+  return categories.map((category) => ({ ...category, lines: category.lines.map((line) => ({ ...line, ...(line.recurringBill ? { recurringBill: { ...line.recurringBill } } : {}) })) }));
+}
+
+// Freezes the month being viewed into budgetHistory (replacing that month's earlier snapshot).
+export function rememberBudgetSnapshot(state: HouseholdState): HouseholdState {
+  const snapshot: BudgetHistoryEntry = { month: state.budget.month, income: state.budget.income, categories: cloneBudgetCategories(state.budget.categories) };
+  const history = state.budgetHistory || [];
+  const exists = history.some((entry) => entry.month === snapshot.month);
+  return { ...state, budgetHistory: exists ? history.map((entry) => entry.month === snapshot.month ? snapshot : entry) : [...history, snapshot] };
+}
+
+// Earlier months that have a saved budget, newest first - what "copy from a previous month" can offer.
+export function availablePreviousBudgets(state: HouseholdState): BudgetHistoryEntry[] {
+  return (state.budgetHistory || [])
+    .filter((entry) => entry.month < state.budget.month && Array.isArray(entry.categories) && entry.categories.length > 0)
+    .sort((a, b) => b.month.localeCompare(a.month));
+}
+
+function plannedByLineId(snapshot: BudgetHistoryEntry | undefined): Map<string, number> {
+  const planned = new Map<string, number>();
+  (snapshot?.categories || []).forEach((category) => category.lines.forEach((line) => planned.set(line.id, Number(line.planned || 0))));
+  return planned;
+}
+
+const roundCents = (value: number) => Math.round(value * 100) / 100;
+
+// Moves the whole budget to another month: the month being left is frozen first. The new month's planned amounts come from its
+// own saved snapshot if it has one, otherwise carry forward from the nearest earlier month (a line missing there starts at 0).
+// Rollover only applies the FIRST time a new month is opened (no snapshot yet and the carry-forward source is the month just
+// left): a line with rolloverEnabled adds last month's unspent money (planned - spent, never negative) to its planned amount and
+// remembers it in rolloverAmount. Revisiting a month must not add the same leftover in again, so it never re-applies.
+// `spentInMonth` is injected because spend totals live in another logic file.
+export function switchBudgetMonth(state: HouseholdState, newMonth: string, spentInMonth: (lineId: string, monthKey: string) => number): HouseholdState {
+  if (!newMonth || newMonth === state.budget.month) return state;
+  const previousMonth = state.budget.month;
+  const remembered = rememberBudgetSnapshot(state);
+  const existing = (remembered.budgetHistory || []).find((entry) => entry.month === newMonth);
+  const switched: HouseholdState = { ...remembered, budget: { ...remembered.budget, month: newMonth, monthPreferenceSet: true } };
+  const source = existing || availablePreviousBudgets(switched)[0];
+  const carried = plannedByLineId(source);
+  const isFreshMonth = !existing && source?.month === previousMonth;
+  const categories = remembered.budget.categories.map((category) => ({
+    ...category,
+    lines: category.lines.map((line) => {
+      const carriedPlanned = carried.get(line.id) ?? 0;
+      if (!isFreshMonth || !line.rolloverEnabled) return { ...line, planned: carriedPlanned, rolloverAmount: 0 };
+      const previousPlanned = Number((source?.categories || []).flatMap((item) => item.lines).find((item) => item.id === line.id)?.planned || 0);
+      const leftover = Math.max(0, roundCents(previousPlanned - spentInMonth(line.id, previousMonth)));
+      return { ...line, planned: carriedPlanned + leftover, rolloverAmount: leftover };
+    })
+  }));
+  return { ...switched, budget: { ...switched.budget, categories, income: existing ? Number(existing.income || 0) : 0 } };
+}
+
+// Replaces the viewed month's planned amounts with another saved month's (lines missing from it keep their current amount).
+export function copyBudgetFromMonth(state: HouseholdState, month: string): HouseholdState {
+  const source = (state.budgetHistory || []).find((entry) => entry.month === month);
+  if (!source) return state;
+  const planned = plannedByLineId(source);
+  const categories = state.budget.categories.map((category) => ({ ...category, lines: category.lines.map((line) => ({ ...line, planned: planned.has(line.id) ? (planned.get(line.id) as number) : Number(line.planned || 0) })) }));
+  return {
+    ...state, budget: { ...state.budget, categories, income: Number(source.income || state.budget.income || 0) },
+    household: { ...state.household, activity: [`Copied budget from ${formatMonthLabel(source.month)} into ${formatMonthLabel(state.budget.month)}`, ...(state.household.activity || [])] }
+  };
+}
+
+export function toggleRollover(state: HouseholdState, lineId: string): HouseholdState {
+  return mapLine(state, lineId, (line) => ({ ...line, rolloverEnabled: !line.rolloverEnabled }));
+}
+
+function mapLine(state: HouseholdState, lineId: string, update: (line: BudgetLine) => BudgetLine): HouseholdState {
+  return { ...state, budget: { ...state.budget, categories: state.budget.categories.map((category) => ({ ...category, lines: category.lines.map((line) => line.id === lineId ? update(line) : line) })) } };
+}
+
+const validDateKey = (value: unknown) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+
+// A recurring bill (HOA, insurance, property tax) sets money aside every month toward its next due date: planned becomes the
+// amount due divided by the months remaining until then, and dueDay is shown only in the month the bill actually falls due.
+export function applyRecurringBill(line: BudgetLine, monthKey: string): BudgetLine {
+  if (!line.recurringBill?.enabled) return line;
+  const summary = recurringBudgetSetAside(line.recurringBill, monthKey);
+  const dueDate = summary.nextDueDate || line.recurringBill.dueDate || `${monthKey}-01`;
+  return {
+    ...line,
+    recurringBill: { ...line.recurringBill, amount: summary.amountDue, frequency: summary.frequency as RecurringBudgetBill["frequency"], dueDate },
+    planned: summary.monthlyAmount,
+    dueDay: summary.nextDueDate?.startsWith(`${monthKey}-`) ? Number(summary.nextDueDate.slice(-2)) : null
+  };
+}
+
+// Repairs and re-derives every recurring bill (web does this on every render). Only the real current month and later are
+// recomputed: a month that has already happened is closed history, and re-deriving its planned amount from today's due date
+// would retroactively invent a savings target for a month that had passed (or one before the bill even existed).
+export function ensureRecurringBudgetBills(state: HouseholdState, currentMonthKey: string): HouseholdState {
+  const isPastMonth = state.budget.month < currentMonthKey;
+  let changed = false;
+  const categories = state.budget.categories.map((category) => ({
+    ...category,
+    lines: category.lines.map((line) => {
+      if (!line.recurringBill?.enabled) return line;
+      let bill = line.recurringBill;
+      if (!validDateKey(bill.dueDate)) bill = { ...bill, dueDate: line.dueDay ? `${state.budget.month}-${String(line.dueDay).padStart(2, "0")}` : `${state.budget.month}-01` };
+      if (!["monthly", "quarterly", "yearly"].includes(bill.frequency)) bill = { ...bill, frequency: "yearly" };
+      if (!Number.isFinite(Number(bill.amount))) bill = { ...bill, amount: Number(line.planned || 0) };
+      const repaired = bill === line.recurringBill ? line : { ...line, recurringBill: bill };
+      const next = isPastMonth ? repaired : applyRecurringBill(repaired, state.budget.month);
+      if (JSON.stringify(next) !== JSON.stringify(line)) changed = true;
+      return next;
+    })
+  }));
+  return changed ? { ...state, budget: { ...state.budget, categories } } : state;
+}
+
+// Turns a line into a recurring bill: yearly by default, due on its due day this month (or the 1st), amount = what is planned.
+export function enableRecurringBill(state: HouseholdState, lineId: string): HouseholdState {
+  return mapLine(state, lineId, (line) => applyRecurringBill({
+    ...line, recurringBill: { enabled: true, amount: Number(line.planned || 0), frequency: "yearly", dueDate: line.dueDay ? `${state.budget.month}-${String(line.dueDay).padStart(2, "0")}` : `${state.budget.month}-01` }
+  }, state.budget.month));
+}
+
+export function disableRecurringBill(state: HouseholdState, lineId: string): HouseholdState {
+  return mapLine(state, lineId, (line) => { const { recurringBill: _removed, ...rest } = line; return rest; });
+}
+
+export function updateRecurringBill(state: HouseholdState, lineId: string, patch: Partial<Pick<RecurringBudgetBill, "amount" | "frequency" | "dueDate">>): HouseholdState {
+  return mapLine(state, lineId, (line) => line.recurringBill ? applyRecurringBill({ ...line, recurringBill: { ...line.recurringBill, ...patch } }, state.budget.month) : line);
 }

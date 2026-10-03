@@ -14,7 +14,7 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-
 import { api, ApiError } from "./src/api";
 import { colors } from "./src/theme";
 import { registerPushToken } from "./src/push";
-import { applyChecklistToggle, formatShortDate, groceryEstimateAmount, recurringBudgetSetAside, mealWeeksForMonth, currentMealWeekNumber, weekDayDatesForWeek } from "./src/planningLogic";
+import { applyChecklistToggle, formatShortDate, formatMonthLabel, shiftMonthKey, switchBudgetMonth, copyBudgetFromMonth, availablePreviousBudgets, toggleRollover, ensureRecurringBudgetBills, enableRecurringBill, disableRecurringBill, updateRecurringBill, groceryEstimateAmount, recurringBudgetSetAside, mealWeeksForMonth, currentMealWeekNumber, weekDayDatesForWeek } from "./src/planningLogic";
 import {
   groupPlanTasksByBucket, defaultPlanAnchorDate,
   dailyTaskOccursOnDate, isDailyTaskDoneOnDate, toggleDailyTaskDoneOnDate,
@@ -141,7 +141,7 @@ function AppContent() {
     // Web recomputes the month's budget income from paychecks on every render, so keep it in sync here too.
     const withIncome = nextState.paychecks ? { ...nextState, budget: { ...nextState.budget, income: budgetIncomeFromPaychecks(nextState) } } : nextState;
     // Savings goals with auto-contribute on keep accumulating as purchases/paychecks are recorded (web does this every render).
-    const next = withGoalAutoContributions(repairChoreCompletion(withIncome), localDateKey());
+    const next = withGoalAutoContributions(repairChoreCompletion(ensureRecurringBudgetBills(withIncome, localDateKey().slice(0, 7))), localDateKey());
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
@@ -316,6 +316,18 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
     setEditingLineId(null);
   };
 
+  // Month switching: the month being left is frozen into the budget history, planned amounts carry forward (or come back from
+  // that month's own saved plan), and a line with "carry unspent forward" adds last month's leftover the first time a new month opens.
+  const spentInMonth = (lineId: string, monthKey: string) => spentByLineInMonth(state.transactions, lineId, monthKey);
+  const goToMonth = (monthKey: string) => { void onSave(switchBudgetMonth(state, monthKey, spentInMonth)); setEditingLineId(null); };
+  const [showCopyPicker, setShowCopyPicker] = useState(false);
+  const previousBudgets = availablePreviousBudgets(state);
+  const confirmCopy = (month: string) => {
+    Alert.alert(`Copy ${formatMonthLabel(month)}'s budget?`, `This replaces ${formatMonthLabel(state.budget.month)}'s planned amounts with ${formatMonthLabel(month)}'s. It can't be undone.`, [{ text: "Cancel" }, {
+      text: "Replace", style: "destructive", onPress: () => { void onSave(copyBudgetFromMonth(state, month)); setShowCopyPicker(false); }
+    }]);
+  };
+
   const submitAddCategory = async () => {
     const next = addCategory(state, newCategoryName);
     if (!next) return Alert.alert("Can't add category", "Enter a name that isn't already used by another category.");
@@ -412,7 +424,16 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
   const visibleTransactions = showAllTx ? orderedTransactions : orderedTransactions.slice(0, 15);
   const accountName = (id?: string) => (state.accounts || []).find((account) => account.id === id)?.name;
 
-  return <Page><Title eyebrow="BUDGET">{state.budget.month}</Title>
+  return <Page><Title eyebrow="BUDGET">{formatMonthLabel(state.budget.month)}</Title>
+    <View style={styles.dayNavRow}>
+      <Pressable style={styles.planStepperButton} onPress={() => goToMonth(shiftMonthKey(state.budget.month, -1))} accessibilityLabel="Previous month"><Ionicons name="chevron-back" size={18} color={colors.text} /></Pressable>
+      <Pressable style={styles.dayNavLabel} onPress={() => goToMonth(localDateKey().slice(0, 7))}><Text style={styles.rowTitle}>{state.budget.month === localDateKey().slice(0, 7) ? "This month" : "Jump to this month"}</Text></Pressable>
+      <Pressable style={styles.planStepperButton} onPress={() => goToMonth(shiftMonthKey(state.budget.month, 1))} accessibilityLabel="Next month"><Ionicons name="chevron-forward" size={18} color={colors.text} /></Pressable>
+    </View>
+    {previousBudgets.length ? <View>
+      <Pressable style={styles.secondarySmall} onPress={() => setShowCopyPicker((prev) => !prev)}><Text style={styles.secondaryButtonText}>Copy planned amounts from an earlier month</Text></Pressable>
+      {showCopyPicker ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{previousBudgets.map((entry) => <Pressable key={entry.month} style={styles.choice} onPress={() => confirmCopy(entry.month)}><Text style={styles.choiceText}>{formatMonthLabel(entry.month)}</Text></Pressable>)}</ScrollView> : null}
+    </View> : null}
     <Card>
       <Text style={styles.cardTitle}>Monthly income</Text>
       <Text style={styles.heroValue}>{money(state.budget.income, currency)}</Text>
@@ -491,9 +512,10 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
       {category.lines.map((line) => {
         const spent = spentByLineInMonth(state.transactions, line.id, state.budget.month);
         const recurring = line.recurringBill?.enabled ? recurringBudgetSetAside(line.recurringBill, state.budget.month) : null;
-        const detail = recurring
+        const baseDetail = recurring
           ? `${recurring.frequency} · due ${recurring.nextDueDate} · set aside ${money(recurring.monthlyAmount, currency)}/mo`
           : line.dueDay ? `Due day ${line.dueDay}` : "No due date";
+        const detail = Number(line.rolloverAmount || 0) > 0 ? `${baseDetail} · +${money(Number(line.rolloverAmount), currency)} rolled over` : baseDetail;
         if (editingLineId === line.id) {
           return <View key={line.id} style={styles.planTaskBlock}>
             <TextInput style={styles.input} value={lineName} onChangeText={setLineName} placeholder="Subcategory name" />
@@ -501,7 +523,18 @@ function Budget({ state, onSave, onOpenPaychecks }: { state: HouseholdState; onS
               <TextInput style={[styles.input, { flex: 1 }]} value={linePlanned} onChangeText={setLinePlanned} placeholder="Planned amount" keyboardType="decimal-pad" editable={!recurring} />
               <TextInput style={[styles.input, { flex: 1 }]} value={lineDueDay} onChangeText={setLineDueDay} placeholder="Due day (1-31)" keyboardType="number-pad" editable={!recurring} />
             </View>
-            {recurring ? <Text style={styles.muted}>Recurring bill — the amount and due date are managed on the web app.</Text> : null}
+            <Pressable style={[styles.choice, line.rolloverEnabled && styles.choiceActive]} onPress={() => void onSave(toggleRollover(state, line.id))} accessibilityLabel="Carry unspent balance into next month">
+              <Text style={[styles.choiceText, line.rolloverEnabled && styles.choiceTextActive]}>{line.rolloverEnabled ? "✓ Carries unspent money into next month" : "Carry unspent money into next month"}</Text>
+            </Pressable>
+            {line.recurringBill?.enabled && recurring ? <View style={styles.planTaskBlock}>
+              <Text style={styles.label}>Recurring bill - amount due</Text>
+              <TextInput key={`${line.id}-bill-${line.recurringBill.amount}`} style={styles.input} defaultValue={String(line.recurringBill.amount)} keyboardType="decimal-pad" placeholder="Amount due" onEndEditing={(event) => { const value = Number(event.nativeEvent.text.replace(/[,$]/g, "")); if (Number.isFinite(value) && value >= 0 && value !== line.recurringBill?.amount) void onSave(updateRecurringBill(state, line.id, { amount: value })); }} />
+              <View style={styles.choiceRow}>{(["monthly", "quarterly", "yearly"] as const).map((frequency) => <Pressable key={frequency} style={[styles.choice, line.recurringBill?.frequency === frequency && styles.choiceActive]} onPress={() => void onSave(updateRecurringBill(state, line.id, { frequency }))}><Text style={[styles.choiceText, line.recurringBill?.frequency === frequency && styles.choiceTextActive]}>{frequency.charAt(0).toUpperCase() + frequency.slice(1)}</Text></Pressable>)}</View>
+              <Text style={styles.label}>Next due date</Text>
+              <TextInput key={`${line.id}-due-${line.recurringBill.dueDate}`} style={styles.input} defaultValue={line.recurringBill.dueDate} placeholder="YYYY-MM-DD" onEndEditing={(event) => { const value = event.nativeEvent.text.trim(); if (value === line.recurringBill?.dueDate) return; if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) Alert.alert("Invalid date", "Use the format YYYY-MM-DD."); else void onSave(updateRecurringBill(state, line.id, { dueDate: value })); }} />
+              <Text style={styles.muted}>{money(recurring.monthlyAmount, currency)}/mo - {recurring.frequency} bill due {recurring.nextDueDate}, {recurring.monthsRemaining} month{recurring.monthsRemaining === 1 ? "" : "s"} to save</Text>
+              <Pressable style={styles.secondarySmall} onPress={() => void onSave(disableRecurringBill(state, line.id))}><Text style={styles.secondaryButtonText}>Remove recurring</Text></Pressable>
+            </View> : <Pressable style={styles.secondarySmall} onPress={() => void onSave(enableRecurringBill(state, line.id))}><Text style={styles.secondaryButtonText}>↻ Make this a recurring bill (set money aside monthly)</Text></Pressable>}
             <View style={styles.actionRow}>
               <Pressable style={styles.primaryButton} onPress={() => void saveLineEdit()}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
               <Pressable style={styles.secondarySmall} onPress={() => setEditingLineId(null)}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>

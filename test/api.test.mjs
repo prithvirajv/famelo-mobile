@@ -205,7 +205,7 @@ test("Savings goals support auto-contribute (round-up / % of paycheck), applied 
   assert.match(body, /withGoalAutoContributions\(/);
   assert.match(body, /ensurePaycheckOccurrencesGenerated/, "percent goals need paycheck occurrences materialized before they can be counted");
   assertOnlyWholeStateSaves(body, "Wealth");
-  assert.match(app, /withGoalAutoContributions\(repairChoreCompletion\(withIncome\), localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
+  assert.match(app, /withGoalAutoContributions\(repairChoreCompletion\(ensureRecurringBudgetBills\(withIncome, localDateKey\(\)\.slice\(0, 7\)\)\), localDateKey\(\)\)/, "the shared save must keep goals current as purchases/paychecks are recorded");
 });
 
 test("Notes can attach photos via the Documents pipeline (linked by noteId) and remove them", () => {
@@ -240,7 +240,7 @@ test("Reminders created or rescheduled on mobile carry a notifyAt (the server sk
   assert.match(body, /reminderTiming\(date, time\)/);
   assert.match(body, /advanceRecurringReminder\(target\)/);
   assert.match(body, /completionKeyFor\(/, "completion keys must match web's assignee keys or the two apps disagree on done");
-  assert.match(app, /repairChoreCompletion\(withIncome\)/, "the shared save repairs the old flat-array chore completion shape");
+  assert.match(app, /repairChoreCompletion\(ensureRecurringBudgetBills\(withIncome/, "the shared save repairs the old flat-array chore completion shape");
 });
 
 test("expo-file-system is imported from its /legacy entry - the package root's uploadAsync/writeAsStringAsync throw at runtime in SDK 54+", () => {
@@ -372,4 +372,13 @@ test("Budget's ledger can be sorted and bulk-categorized (split rows are skipped
   assert.match(body, /sortLedgerEntries\(/);
   assert.match(body, /applyLineToTransactions\(state, selectedTx, bulkLineId\)/);
   assert.match(body, /skippedSplit/);
+});
+
+test("Budget can switch months (with rollover and history), copy an earlier month, and manage recurring bills; recurring bills stay derived on every save", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const body = extractFunctionSource(app, "Budget");
+  for (const name of ["switchBudgetMonth", "copyBudgetFromMonth", "availablePreviousBudgets", "toggleRollover", "enableRecurringBill", "disableRecurringBill", "updateRecurringBill"]) assert.match(body, new RegExp(name + "\\("));
+  assert.match(body, /spentByLineInMonth\(state\.transactions, lineId, monthKey\)/, "rollover needs the previous month's real spend");
+  assert.match(app, /ensureRecurringBudgetBills\(withIncome, localDateKey\(\)\.slice\(0, 7\)\)/, "web re-derives recurring bills on every render, so the shared save does too");
+  assert.doesNotMatch(body, /managed on the web app/);
 });

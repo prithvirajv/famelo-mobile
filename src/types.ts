@@ -124,7 +124,7 @@ export type InboxDraft = {
 };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string; activity?: string[] };
-  budget: { month: string; income: number; categories: BudgetCategory[]; taxonomyUnified?: boolean; dismissedReminders?: Record<string, string[]> };
+  budget: { month: string; income: number; categories: BudgetCategory[]; taxonomyUnified?: boolean; monthPreferenceSet?: boolean; dismissedReminders?: Record<string, string[]> };
   // One frozen snapshot per past month, taken when switching months, since budget.categories became a
   // single taxonomy shared across every month (only line.planned still varies per month) - see
   // "categories/subcategories became a shared taxonomy" in the web app's git history.
