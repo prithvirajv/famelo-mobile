@@ -9,14 +9,20 @@
     "icon": "./assets/icon.png",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "net.familyloop.mobile"
+      "bundleIdentifier": "net.familyloop.mobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "net.familyloop.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#17233f"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,7 +37,11 @@
       ]
     ],
     "extra": {
-      "apiUrl": "https://familyloop.net"
-    }
+      "apiUrl": "https://familyloop.net",
+      "eas": {
+        "projectId": "8a71f100-473f-460d-98ae-388d17498b60"
+      }
+    },
+    "owner": "prithviv"
   }
 }

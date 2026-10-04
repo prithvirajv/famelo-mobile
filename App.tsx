@@ -11,6 +11,7 @@ import * as DocumentPicker from "expo-document-picker";
 // but every one of those throws at runtime ("imported from expo-file-system is deprecated").
 import * as FileSystem from "expo-file-system/legacy";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { api, ApiError } from "./src/api";
 import { globalSearchResults, shouldShowOnboarding, dismissOnboarding, ONBOARDING_STEPS } from "./src/searchLogic";
 import type { SearchResult } from "./src/searchLogic";
@@ -54,7 +55,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -2757,6 +2758,13 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const [transferAccountId, setTransferAccountId] = useState("");
   const [aiBusyId, setAiBusyId] = useState<string | null>(null);
   const [friendSplitId, setFriendSplitId] = useState<string | null>(null);
+  // AI categorization on import (on by default, remembered on this device). The pass runs after awaits, so it reads the latest
+  // state through a ref instead of the render it started in - otherwise it could overwrite edits made in the meantime.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [aiImport, setAiImport] = useState(true);
+  useEffect(() => { void AsyncStorage.getItem("familyloop-ai-import").then((value) => { if (value === "off") setAiImport(false); }).catch(() => undefined); }, []);
+  const changeAiImport = (enabled: boolean) => { setAiImport(enabled); void AsyncStorage.setItem("familyloop-ai-import", enabled ? "on" : "off").catch(() => undefined); };
 
   // A recurring bill that came due since the last visit becomes a draft to review (the shared save does this too; this catches
   // time passing while nothing was being saved).
@@ -2770,6 +2778,32 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     if (!result.ok) { Alert.alert("Can't do that", result.error); return false; }
     await onSave(result.state);
     return true;
+  };
+
+  // After an import: AI fills the category/account history could not (one call per chunk of rows), then rows that are safe go
+  // straight into the ledger; the rest stay here for review. Failures leave every row for review and say why.
+  const runAiImportPass = async (draftIds: string[], fileName: string, importedCount: number) => {
+    let filled = 0; let aiNote = "";
+    try {
+      const needAi = draftsNeedingAi(stateRef.current, draftIds);
+      const budgetLines = allBudgetLines(stateRef.current);
+      if (needAi.length && budgetLines.length) {
+        setFeedback(`Imported ${importedCount} from ${fileName}. AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
+        const lineOptions = budgetLines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }));
+        const accountOptions = (stateRef.current.accounts || []).filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: account.type ? `${account.name} (${account.type})` : account.name }));
+        for (let start = 0; start < needAi.length; start += AI_IMPORT_CHUNK_SIZE) {
+          const chunk = needAi.slice(start, start + AI_IMPORT_CHUNK_SIZE);
+          const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions);
+          const applied = applyAiSuggestions(stateRef.current, results);
+          if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
+        }
+      }
+    } catch (cause) {
+      aiNote = ` AI categorization wasn't available (${cause instanceof Error ? cause.message : "unknown error"}) - rows were left for review.`;
+    }
+    const posted = autoAcceptSafeDrafts(stateRef.current, draftIds);
+    if (posted.added) await onSave(posted.state);
+    setFeedback(importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote));
   };
 
   const importFile = async () => {
@@ -2803,6 +2837,11 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       }
       await onSave(importedState);
       setFeedback(rows.length > 2000 ? `${result.message} Only the first 2000 rows were imported.` : result.message);
+      if (aiImport) {
+        const existingIds = new Set((state.transactionInboxDrafts || []).map((draft) => draft.id));
+        const newIds = result.drafts.filter((draft) => draft.id && !existingIds.has(draft.id)).map((draft) => draft.id as string);
+        await runAiImportPass(newIds, asset.name, Math.min(rows.length, 2000));
+      }
     } catch (cause) {
       setFeedback(cause instanceof Error ? cause.message : `Could not read ${asset.name}.`);
     } finally {
@@ -2869,6 +2908,8 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     if (draft.isDeposit) result.push({ label: "Deposit", tone: "plain" });
     if (draft.isPayment) result.push({ label: "Card payment - probably a transfer", tone: "info" });
     if (draft.isPending) result.push({ label: "Pending - correct the date once it posts", tone: "warn" });
+    if (draft.lineSource === "ai-high") result.push({ label: "AI suggested category", tone: "info" });
+    if (draft.lineSource === "ai-low") result.push({ label: "AI guess - check category", tone: "warn" });
     if (draft.historyMatch) result.push({ label: "Category from history", tone: "info" });
     if (draft.categorizationRuleLineId) result.push({ label: "🔒 Rule", tone: "info" });
     if (draft.categorizationConfidence) result.push({ label: `${draft.categorizationConfidence.confidence}% match (${draft.categorizationConfidence.sampleSize} past)`, tone: draft.categorizationConfidence.confidence >= 80 ? "info" : "warn" });
@@ -2884,6 +2925,10 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     <Text style={styles.muted}>Import a bank or credit-card statement (CSV or PDF), review each row, then accept it into your ledger.</Text>
     <Card>
       <Pressable style={styles.primaryButton} disabled={importing} onPress={() => void importFile()}>{importing ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Import a statement</Text>}</Pressable>
+      <Pressable style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked: aiImport }} onPress={() => changeAiImport(!aiImport)}>
+        <Ionicons name={aiImport ? "checkbox" : "square-outline"} size={22} color={aiImport ? colors.green : colors.muted} />
+        <Text style={[styles.rowDetail, { flex: 1 }]}>Use AI to categorize imports and add confident rows to the ledger</Text>
+      </Pressable>
       {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
     </Card>
     {Object.keys(counts).length && accounts.length ? <Card>

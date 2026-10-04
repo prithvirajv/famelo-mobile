@@ -130,6 +130,8 @@ export type Decision = {
 export type InboxDraft = {
   id?: string; payee?: string; amount?: number; date?: string; lineId: string; accountId?: string; orderNumber?: string; tags?: string[];
   isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; historyMatch?: boolean; accountHistoryMatch?: boolean; recurringId?: string;
+  // Where the category came from; only trustworthy sources are ever auto-added to the ledger after an import.
+  lineSource?: "refund" | "rule" | "history" | "ai-high" | "ai-low" | "manual" | "";
 };
 export type HouseholdState = {
   household: { name: string; country: string; currency: string; activity?: string[]; members?: Array<{ name: string; email: string; role: string }>; sharedScopes?: string[]; inviteCode?: string };

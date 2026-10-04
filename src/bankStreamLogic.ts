@@ -372,6 +372,7 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
     created.unshift({
       id: input.createId(input.idPrefix), payee: row.payee, amount: row.amount,
       lineId: refund?.lineId || ruleLineId || historyLineId || "", accountId: matchedAccount?.id || historyAccountId || "",
+      lineSource: refund?.lineId ? "refund" : ruleLineId ? "rule" : historyLineId ? "history" : "",
       date: row.date, orderNumber: row.orderNumber || "", isDeposit: Boolean(row.isDeposit), isPayment: Boolean(row.isPayment), isPending: Boolean(row.isPending),
       historyMatch: Boolean(!refund && !ruleLineId && historyLineId), accountHistoryMatch: Boolean(!matchedAccount && historyAccountId)
     });
@@ -471,7 +472,7 @@ export function updateDraft(state: HouseholdState, draftId: string, patch: Draft
   }
   const next: InboxDraft = {
     ...draft, ...patch,
-    ...(patch.lineId !== undefined ? { historyMatch: false } : {}),
+    ...(patch.lineId !== undefined ? { historyMatch: false, lineSource: patch.lineId ? "manual" as const : "" as const } : {}),
     ...(patch.accountId !== undefined ? { accountHistoryMatch: false } : {})
   };
   return { ok: true, state: { ...state, transactionInboxDrafts: (state.transactionInboxDrafts || []).map((item) => item.id === draftId ? next : item) } };
@@ -542,7 +543,7 @@ export function clearHistorySuggestions(state: HouseholdState): { state: Househo
   const drafts = (state.transactionInboxDrafts || []).map((draft) => {
     if (!draft.historyMatch) return draft;
     cleared += 1;
-    return { ...draft, lineId: "", historyMatch: false };
+    return { ...draft, lineId: "", historyMatch: false, lineSource: "" as const };
   });
   return { state: cleared ? { ...state, transactionInboxDrafts: drafts } : state, cleared };
 }
@@ -632,4 +633,80 @@ export function stateSizeBytes(state: unknown): number {
 
 export function exceedsStateLimit(state: unknown): boolean {
   return stateSizeBytes(state) > HOUSEHOLD_STATE_SOFT_LIMIT_BYTES;
+}
+
+
+// ---- AI categorization on import ----------------------------------------------------------------------------------
+// Mirrors web: one batched AI call per chunk fills the category/account that history could not, then rows that are safe go
+// straight into the ledger and everything else stays for review. The server only suggests (and validates its ids); these
+// functions decide what is trustworthy.
+export type AiSuggestion = { id: string; lineId: string | null; accountId: string | null; confidence: "high" | "low" };
+export const AI_IMPORT_CHUNK_SIZE = 50;
+
+// Drafts the AI should look at: no category, or no account while the household has an open account to choose from.
+export function draftsNeedingAi(state: HouseholdState, draftIds: string[]): InboxDraft[] {
+  const hasOpenAccount = (state.accounts || []).some((account) => !account.closedAt);
+  const wanted = new Set(draftIds);
+  return (state.transactionInboxDrafts || []).filter((draft) => draft.id && wanted.has(draft.id) && (!draft.lineId || (!draft.accountId && hasOpenAccount)));
+}
+
+// Fills only what is empty; never overwrites a category or account that history, a rule or the user already set.
+export function applyAiSuggestions(state: HouseholdState, results: AiSuggestion[]): { state: HouseholdState; filled: number } {
+  const byId = new Map(results.map((result) => [result.id, result]));
+  let filled = 0;
+  const drafts = (state.transactionInboxDrafts || []).map((draft) => {
+    const result = draft.id ? byId.get(draft.id) : undefined;
+    if (!result) return draft;
+    let next = draft;
+    if (!draft.lineId && result.lineId) next = { ...next, lineId: result.lineId, lineSource: result.confidence === "high" ? "ai-high" as const : "ai-low" as const };
+    if (!draft.accountId && result.accountId) next = { ...next, accountId: result.accountId, accountHistoryMatch: false };
+    if (next !== draft) filled += 1;
+    return next;
+  });
+  return { state: filled ? { ...state, transactionInboxDrafts: drafts } : state, filled };
+}
+
+export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; transferMatch: unknown; accountClosedForDate: boolean };
+
+// Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision).
+export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext): { accept: boolean; reason: string } {
+  if (!draft.lineId) return { accept: false, reason: "no category" };
+  if (context.accountsExist && !draft.accountId) return { accept: false, reason: "no account" };
+  if (context.possibleDuplicate) return { accept: false, reason: "possible duplicate" };
+  if (context.refundMatch) return { accept: false, reason: "refund" };
+  if (context.transferMatch) return { accept: false, reason: "possible transfer" };
+  if (draft.isPayment || draft.isDeposit) return { accept: false, reason: "payment or deposit" };
+  if (draft.isPending) return { accept: false, reason: "still pending" };
+  if (context.accountClosedForDate) return { accept: false, reason: "account closed" };
+  if (!["rule", "history", "ai-high"].includes(draft.lineSource || "")) return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
+  return { accept: true, reason: "" };
+}
+
+// Posts every safe draft among draftIds into the ledger (each decided against the ledger as it stands after the previous one).
+export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[]): { state: HouseholdState; added: number; reasons: Record<string, number> } {
+  let current = state;
+  let added = 0;
+  const reasons: Record<string, number> = {};
+  for (const id of draftIds) {
+    const draft = (current.transactionInboxDrafts || []).find((item) => item.id === id);
+    if (!draft) continue;
+    const others: Array<InboxDraft | Transaction> = [...current.transactions, ...(current.transactionInboxDrafts || []).filter((other) => other.id !== id)];
+    const account = (current.accounts || []).find((item) => item.id === draft.accountId);
+    const decision = autoAcceptDecision(draft, {
+      accountsExist: (current.accounts || []).some((item) => !item.closedAt),
+      possibleDuplicate: isDuplicateTransaction(draft, others),
+      refundMatch: refundMatch(draft, others),
+      transferMatch: findTransferCandidate(draft, others),
+      accountClosedForDate: !accountAllowsDate(account, draft.date || "")
+    });
+    if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
+    const accepted = acceptDraft(current, id);
+    if (accepted.ok) { current = accepted.state; added += 1; } else reasons["could not post"] = (reasons["could not post"] || 0) + 1;
+  }
+  return { state: current, added, reasons };
+}
+
+export function importSummary(fileName: string, importedCount: number, filled: number, added: number, remaining: number, reasons: Record<string, number>, aiNote = ""): string {
+  const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([reason, count]) => `${count} ${reason}`).join(", ");
+  return `Imported ${importedCount} from ${fileName}.${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
 }

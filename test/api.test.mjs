@@ -584,3 +584,14 @@ test("Help is reachable from More and the onboarding walkthrough can open Sharin
   assert.match(app, /onOpenHelp=\{\(\) => setSubScreen\("help"\)\}/);
   assert.match(app, /target === "wealth" \|\| target === "sharing"/);
 });
+
+test("Bank stream import runs the AI pass against the latest state and only ever suggests through the batch endpoint", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const apiSource = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(apiSource, /suggestTransactionBatch:[\s\S]*?\/api\/transactions\/suggest-batch/);
+  const bank = extractFunctionSource(app, "BankStream");
+  assert.match(bank, /runAiImportPass\(newIds, asset\.name/);
+  assert.match(bank, /autoAcceptSafeDrafts\(stateRef\.current, draftIds\)/);
+  assert.match(bank, /applyAiSuggestions\(stateRef\.current, results\)/);
+  assert.match(bank, /if \(aiImport\)/, "the user can turn the AI pass off");
+});
