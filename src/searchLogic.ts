@@ -46,10 +46,10 @@ export function dismissOnboarding(state: HouseholdState): HouseholdState {
   return { ...state, onboarding: { dismissed: true } };
 }
 
-export type OnboardingStep = { title: string; body: string; target: "wealth" | "budget" | "home"; cta: string };
-// Web's second step ("Invite your household") points at a Sharing screen mobile does not have, so it is left out here.
+export type OnboardingStep = { title: string; body: string; target: "wealth" | "budget" | "sharing" | "home"; cta: string };
 export const ONBOARDING_STEPS: OnboardingStep[] = [
   { title: "Add an account", body: "Add a bank or credit-card account so balances stay in one place instead of being tracked by hand.", target: "wealth", cta: "Add an account" },
+  { title: "Invite your household", body: "Bring in the rest of the household - everyone sees the same budget, calendar and shared expenses.", target: "sharing", cta: "Invite someone" },
   { title: "Set a starting budget", body: "Add a first category or two - you can always add more later. Income comes from your paychecks.", target: "budget", cta: "Start planning" },
-  { title: "You're set", body: "That's the basics - explore the rest of FamilyLoop whenever you're ready. Invite your household from the web app.", target: "home", cta: "Go to Home" }
+  { title: "You're set", body: "That's the basics - explore the rest of FamilyLoop whenever you're ready. ", target: "home", cta: "Go to Home" }
 ];

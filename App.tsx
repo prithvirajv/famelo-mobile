@@ -34,13 +34,14 @@ import {
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, Recipe, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import type { HomeActionItem } from "./src/calendarLogic";
-import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
+import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, directionsUrl, matchesOwnerFilter, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
   accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth, validatePaycheckPatch, updatePaycheck, setOccurrenceDate, assignBillToPaycheck, removeAssignedLine, paycheckAssignedAmount, paycheckMonthlyIncome, paycheckActiveInMonth } from "./src/paychecksLogic";
+import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
@@ -105,7 +106,7 @@ function AppContent() {
   const [access, setAccess] = useState<HouseholdAccess | null>(null);
   const [privateData, setPrivateData] = useState<PrivateData | null>(null);
   const [tab, setTab] = useState<Tab>("home");
-  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | "recipes" | "profile" | "sharing" | null>(null);
+  const [subScreen, setSubScreen] = useState<"sharedExpenses" | "reports" | "wealth" | "bills" | "paychecks" | "decisions" | "bankStream" | "recipes" | "profile" | "sharing" | "help" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingHidden, setOnboardingHidden] = useState(false);
@@ -194,6 +195,7 @@ function AppContent() {
     : subScreen === "bills" ? <Bills state={state} onBack={() => setSubScreen(null)} onOpenBudget={() => { setSubScreen(null); setTab("budget"); }} />
     : subScreen === "paychecks" ? <Paychecks state={state} onSave={save} onBack={() => setSubScreen(null)} />
     : subScreen === "bankStream" ? <BankStream state={state} onSave={save} onBack={() => setSubScreen(null)} />
+    : subScreen === "help" ? <HelpScreen onBack={() => setSubScreen(null)} />
     : subScreen === "profile" ? <ProfileScreen user={user} onUserChange={setUser} onBack={() => setSubScreen(null)} />
     : subScreen === "sharing" ? <SharingScreen state={state} access={access} onSave={save} onRefreshAccess={async () => { try { setAccess(await api.householdAccess()); } catch { /* keep the last list */ } }} onBack={() => setSubScreen(null)} />
     : subScreen === "recipes" ? <Recipes state={state} onSave={save} onBack={() => setSubScreen(null)} />
@@ -210,7 +212,7 @@ function AppContent() {
         await api.selectHousehold(id); setLoading(true); await loadWorkspace();
       }} onSignOut={async () => { await api.signOut(); setUser(null); setState(null); }}
       onOpenSharedExpenses={() => setSubScreen("sharedExpenses")} onOpenReports={() => setSubScreen("reports")}
-      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} onOpenRecipes={() => setSubScreen("recipes")} onOpenProfile={() => setSubScreen("profile")} onOpenSharing={() => setSubScreen("sharing")} />;
+      onOpenWealth={() => setSubScreen("wealth")} onOpenBills={() => setSubScreen("bills")} onOpenPaychecks={() => setSubScreen("paychecks")} onOpenDecisions={() => setSubScreen("decisions")} onOpenBankStream={() => setSubScreen("bankStream")} onOpenRecipes={() => setSubScreen("recipes")} onOpenProfile={() => setSubScreen("profile")} onOpenSharing={() => setSubScreen("sharing")} onOpenHelp={() => setSubScreen("help")} />;
 
   return <SafeAreaView style={styles.app} edges={["top", "left", "right"]}>
     <StatusBar style="dark" />
@@ -236,7 +238,7 @@ function AppContent() {
         // Close the walkthrough so the screen is usable; it returns next launch until the household has some data or it is skipped.
         setOnboardingHidden(true);
         if (target === "home") { void save(dismissOnboarding(state)); setSubScreen(null); setTab("home"); }
-        else if (target === "wealth") setSubScreen("wealth");
+        else if (target === "wealth" || target === "sharing") setSubScreen(target);
         else { setSubScreen(null); setTab(target); }
       }} />
     <View style={[styles.tabBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
@@ -470,6 +472,27 @@ function SharingScreen({ state, access, onSave, onRefreshAccess, onBack }: { sta
   </Page>;
 }
 
+// A short in-app guide (condensed from web's Help page); tap a topic to expand it.
+function HelpScreen({ onBack }: { onBack: () => void }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return <Page>
+    <SubScreenHeader title="Help" eyebrow="GUIDES" onBack={onBack} />
+    {HELP_GUIDES.map((guide) => {
+      const open = openId === guide.id;
+      return <Card key={guide.id}>
+        <Pressable style={styles.iouPersonHead} accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenId(open ? null : guide.id)}>
+          <Text style={styles.cardTitle}>{guide.title}</Text>
+          <Ionicons name={open ? "chevron-up" : "chevron-down"} size={20} color={colors.muted} />
+        </Pressable>
+        {open ? <View>
+          {guide.steps.map((step, index) => <Text key={index} style={styles.noteBody}>{index + 1}. {step}</Text>)}
+          {guide.tips.map((tip, index) => <Text key={`tip-${index}`} style={styles.muted}>Tip: {tip}</Text>)}
+        </View> : null}
+      </Card>;
+    })}
+  </Page>;
+}
+
 // Global search across transactions, notes, documents and decisions (web's search dialog). Documents are not part of the
 // household state, so they are fetched once the first time the overlay opens.
 function GlobalSearchModal({ visible, state, onClose, onPick }: { visible: boolean; state: HouseholdState; onClose: () => void; onPick: (target: SearchResult["target"]) => void }) {
@@ -505,7 +528,7 @@ function GlobalSearchModal({ visible, state, onClose, onPick }: { visible: boole
 }
 
 // First-run walkthrough for a brand-new household; dismissing (or finishing) is stored in state.onboarding so it never returns.
-function OnboardingModal({ visible, step, onDismiss, onBack, onSkipStep, onOpen }: { visible: boolean; step: number; onDismiss: () => void; onBack: () => void; onSkipStep: () => void; onOpen: (target: "wealth" | "budget" | "home") => void }) {
+function OnboardingModal({ visible, step, onDismiss, onBack, onSkipStep, onOpen }: { visible: boolean; step: number; onDismiss: () => void; onBack: () => void; onSkipStep: () => void; onOpen: (target: "wealth" | "budget" | "sharing" | "home") => void }) {
   const current = ONBOARDING_STEPS[Math.min(step, ONBOARDING_STEPS.length - 1)];
   if (!current) return null;
   return <Modal visible={visible} transparent animationType="fade" onRequestClose={onDismiss}>
@@ -1080,6 +1103,8 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
   const [title, setTitle] = useState(""); const [date, setDate] = useState(`${state.budget.month}-01`); const [owner, setOwner] = useState(members[0]?.email || "");
   const [recurrence, setRecurrence] = useState<ReminderRecurrence>("once");
   const [time, setTime] = useState("09:00");
+  const [location, setLocation] = useState("");
+  const [filterOwner, setFilterOwner] = useState("");
   const [choreRecurrence, setChoreRecurrence] = useState<ChoreRecurrence>("once");
   const kind = editing?.kind || (addKind === "chore" ? "chore" : "event");
   // Birthdays/anniversaries share the event form but repeat yearly on a fixed month-day, remind N days before, and are
@@ -1094,6 +1119,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     setTime(targetKind === "event" ? ((item as typeof state.calendar.events[number]).dateTime || "").slice(11, 16) || "09:00" : "09:00");
     setRemindDays(targetKind === "event" ? Number((item as typeof state.calendar.events[number]).reminderDays ?? 1) : 1);
     setChoreRecurrence(targetKind === "chore" ? (item as typeof state.calendar.chores[number]).recurrence || "once" : "once");
+    setLocation((item as { location?: string }).location || "");
   };
   // "From photo": the picture is sent inline to the server's vision model (never stored) and comes back
   // as a DRAFT the user reviews and edits before anything is added - same as web's dialog.
@@ -1181,7 +1207,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     setImportDrafts(null);
     Alert.alert("Import complete", `Imported ${imported} calendar item${imported === 1 ? "" : "s"}.`);
   };
-  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setRemindDays(1); setChoreRecurrence("once"); };
+  const resetForm = () => { setEditing(null); setTitle(""); setDate(`${state.budget.month}-01`); setRecurrence("once"); setTime("09:00"); setRemindDays(1); setChoreRecurrence("once"); setLocation(""); };
   const saveItem = async () => {
     if (!title.trim() || !date) return;
     const member = members.find((item) => item.email === owner);
@@ -1208,7 +1234,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
         ...item, title: title.trim(), startDate: date, nextDue: date, assignee: owner, assigneeName: ownerName,
         // keep a multi-assignee list set on web unless the single owner picked here actually changed
         assignees: item.assignee === owner && item.assignees?.length ? item.assignees : ownerAssignee,
-        recurrence: choreRecurrence, cadence: choreCadenceLabels[choreRecurrence]
+        recurrence: choreRecurrence, cadence: choreCadenceLabels[choreRecurrence], location: location.trim()
       } : item);
     } else if (editing?.kind === "event") {
       const existing = state.calendar.events[editing.index];
@@ -1227,15 +1253,15 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       next.calendar.events = next.calendar.events.map((item, index) => index === editing.index ? {
         ...item, title: title.trim(), date, owner, ownerName,
         assignees: item.owner === owner && item.assignees?.length ? item.assignees : ownerAssignee,
-        ...(item.type === "reminder" ? { recurrence, ...timing } : {})
+        ...(item.type === "reminder" ? { recurrence, location: location.trim(), ...timing } : {})
       } : item);
     } else if (kind === "chore") {
-      next.calendar.chores.push({ id: `chore-${Date.now()}`, title: title.trim(), assignee: owner, assigneeName: ownerName, assignees: ownerAssignee, cadence: choreCadenceLabels[choreRecurrence], nextDue: date, startDate: date, recurrence: choreRecurrence, completedBy: {} });
+      next.calendar.chores.push({ id: `chore-${Date.now()}`, title: title.trim(), assignee: owner, assigneeName: ownerName, assignees: ownerAssignee, cadence: choreCadenceLabels[choreRecurrence], nextDue: date, startDate: date, recurrence: choreRecurrence, location: location.trim(), completedBy: {} });
     } else {
       if (time.trim() && !isValidClockTime(time)) return Alert.alert("Invalid time", "Use 24-hour HH:MM, for example 14:30.");
       const timing = reminderTiming(date, time);
       if (!timing) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
-      next.calendar.events.push({ id: `event-${Date.now()}`, title: title.trim(), date, ...timing, type: "reminder", annual: false, owner, ownerName, assignees: ownerAssignee, recurrence, completedBy: [] });
+      next.calendar.events.push({ id: `event-${Date.now()}`, title: title.trim(), date, ...timing, type: "reminder", annual: false, owner, ownerName, assignees: ownerAssignee, recurrence, location: location.trim(), completedBy: [] });
     }
     await onSave(next); resetForm();
   };
@@ -1317,6 +1343,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Title" /><TextInput style={styles.input} value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" />
     {annualType ? <Text style={styles.muted}>Repeats every year on this date - the year you enter doesn't matter (a birth year is fine).</Text> : null}
     {kind === "event" ? <TextInput style={styles.input} value={time} onChangeText={setTime} placeholder="Time (HH:MM, 24-hour) - when you'll be reminded" keyboardType="numbers-and-punctuation" maxLength={5} /> : null}
+    {!annualType ? <TextInput style={styles.input} value={location} onChangeText={setLocation} placeholder="Location (optional) - adds a Directions link" /> : null}
     <Text style={styles.label}>Assign to</Text><ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{members.map((member) => <Pressable key={member.email} style={[styles.choice, owner === member.email && styles.choiceActive]} onPress={() => setOwner(member.email)}><Text style={[styles.choiceText, owner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}</ScrollView>
     {annualType ? <>
       <Text style={styles.label}>Remind me</Text>
@@ -1334,7 +1361,12 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       <Pressable style={styles.primaryButton} onPress={() => void saveItem()}><Text style={styles.primaryButtonText}>{editing ? "Save changes" : kind === "chore" ? "Add chore" : annualType ? `Add ${ANNUAL_EVENT_LABELS[annualType]?.toLowerCase() || "event"}` : "Add reminder"}</Text></Pressable>
       {editing && <Pressable style={styles.secondarySmall} onPress={resetForm}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>}
     </View>
-  </Card><Card><Text style={styles.cardTitle}>Events and reminders</Text>{state.calendar.events.map((item, index) => {
+  </Card><Card><Text style={styles.cardTitle}>Events and reminders</Text>
+    {members.length > 1 ? <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
+      {[{ email: "", name: "All people" }, ...members].map((member) => <Pressable key={member.email || "all"} style={[styles.choice, filterOwner === member.email && styles.choiceActive]} onPress={() => setFilterOwner(filterOwner === member.email ? "" : member.email)}><Text style={[styles.choiceText, filterOwner === member.email && styles.choiceTextActive]}>{member.name}</Text></Pressable>)}
+    </ScrollView> : null}
+    {state.calendar.events.map((item, index) => {
+    if (!matchesOwnerFilter(item, filterOwner)) return null;
     const assignees = effectiveAssignees(item);
     const key = completionKeyFor(assignees, user.email);
     const completed = item.completedBy || [];
@@ -1355,12 +1387,14 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     }
     return <View key={item.id || `${item.date}-${item.title}`} style={styles.row}>
       <Pressable style={styles.rowCopy} onPress={() => begin("event", index)}><Row title={item.title} detail={[item.date, timeLabel, item.ownerName || item.owner || "Unassigned", recurrenceLabel].filter(Boolean).join(" · ")} badge={item.type} /></Pressable>
+      {item.location ? <Pressable accessibilityLabel={`Directions to ${item.location}`} hitSlop={8} onPress={() => void Linking.openURL(directionsUrl(item.location as string))}><Ionicons name="navigate-outline" size={20} color={colors.blue} /></Pressable> : null}
       {item.type === "reminder" ? (key
         ? <Pressable style={styles.planStepperButton} onPress={() => void toggleReminderDone(index)}><Text style={styles.secondaryButtonText}>{done ? "✓ Done" : "Mark done"}</Text></Pressable>
         : <Text style={styles.rowDetail}>{completed.length}/{assignees.length} done</Text>) : null}
       <Pressable onPress={() => deleteEvent(index)}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
     </View>;
   })}</Card><Card><Text style={styles.cardTitle}>Chore rotation</Text>{state.calendar.chores.map((item, index) => {
+    if (!matchesOwnerFilter(item, filterOwner)) return null;
     const occurrence = currentChoreOccurrenceDate(item);
     const assignees = effectiveAssignees(item);
     const key = completionKeyFor(assignees, user.email);
@@ -1368,6 +1402,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
     const mine = key && occurrence ? choreCompletedKeys(item, occurrence).includes(key) : false;
     return <View key={item.id || item.title} style={styles.row}>
       <Pressable style={styles.rowCopy} onPress={() => begin("chore", index)}><Row title={item.title} detail={`${item.assigneeName || item.assignee} · ${item.cadence}`} badge={occurrence || item.nextDue} /></Pressable>
+      {item.location ? <Pressable accessibilityLabel={`Directions to ${item.location}`} hitSlop={8} onPress={() => void Linking.openURL(directionsUrl(item.location as string))}><Ionicons name="navigate-outline" size={20} color={colors.blue} /></Pressable> : null}
       {occurrence ? (key
         ? <Pressable style={styles.planStepperButton} onPress={() => void toggleChoreDone(index)}><Text style={styles.secondaryButtonText}>{mine ? "✓ Done" : "Mark done"}</Text></Pressable>
         : <Text style={styles.rowDetail}>{choreCompletedKeys(item, occurrence).length}/{assignees.length} done</Text>) : null}
@@ -4273,10 +4308,10 @@ function Paychecks({ state, onSave, onBack }: { state: HouseholdState; onSave: (
   </Page>;
 }
 
-function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream, onOpenRecipes, onOpenProfile, onOpenSharing }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void; onOpenRecipes: () => void; onOpenProfile: () => void; onOpenSharing: () => void }) {
+function More({ state, user, households, onSelect, onSignOut, onOpenSharedExpenses, onOpenReports, onOpenWealth, onOpenBills, onOpenPaychecks, onOpenDecisions, onOpenBankStream, onOpenRecipes, onOpenProfile, onOpenSharing, onOpenHelp }: { state: HouseholdState; user: User; households: Household[]; onSelect: (id: string) => Promise<void>; onSignOut: () => Promise<void>; onOpenSharedExpenses: () => void; onOpenReports: () => void; onOpenWealth: () => void; onOpenBills: () => void; onOpenPaychecks: () => void; onOpenDecisions: () => void; onOpenBankStream: () => void; onOpenRecipes: () => void; onOpenProfile: () => void; onOpenSharing: () => void; onOpenHelp: () => void }) {
   const assets = state.goals?.netWorth?.assets.reduce((sum, item) => sum + mobileAssetValue(item), 0) || 0;
   const liabilities = state.goals?.netWorth?.liabilities.reduce((sum, item) => sum + Number(item.value || 0), 0) || 0;
-  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text><Pressable style={styles.householdRow} onPress={onOpenProfile}><View><Text style={styles.rowTitle}>Profile</Text><Text style={styles.rowDetail}>Name, email verification, password</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenSharing}><View><Text style={styles.rowTitle}>Sharing</Text><Text style={styles.rowDetail}>Members, invites, who can edit, shared areas</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenRecipes}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Recipes</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes · add, edit, search</Text></Pressable><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
+  return <Page><Title eyebrow="ACCOUNT">More</Title><Card><Text style={styles.cardTitle}>{user.name}</Text><Text style={styles.muted}>{user.email}</Text><Pressable style={styles.householdRow} onPress={onOpenProfile}><View><Text style={styles.rowTitle}>Profile</Text><Text style={styles.rowDetail}>Name, email verification, password</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenSharing}><View><Text style={styles.rowTitle}>Sharing</Text><Text style={styles.rowDetail}>Members, invites, who can edit, shared areas</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenWealth}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Household wealth</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.heroValue}>{money(assets - liabilities, state.household.currency)}</Text><Text style={styles.muted}>Assets {money(assets, state.household.currency)} · Liabilities {money(liabilities, state.household.currency)}</Text><Text style={styles.muted}>{(state.accounts || []).length} accounts · {state.goals?.debts?.length || 0} debt accounts with EMI plans</Text></Pressable><Card><Text style={styles.cardTitle}>Households</Text>{households.map((item) => <Pressable key={item.id} style={styles.householdRow} onPress={() => void onSelect(item.id)}><View><Text style={styles.rowTitle}>{item.name}</Text><Text style={styles.rowDetail}>{item.country} · {item.currency} · {item.role}</Text></View>{item.selected ? <Ionicons name="checkmark-circle" size={24} color={colors.green} /> : <Ionicons name="chevron-forward" size={20} color={colors.muted} />}</Pressable>)}</Card><Card><Text style={styles.cardTitle}>Money</Text><Pressable style={styles.householdRow} onPress={onOpenPaychecks}><View><Text style={styles.rowTitle}>Paycheck/Income</Text><Text style={styles.rowDetail}>Recurring income and pay dates</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBankStream}><View><Text style={styles.rowTitle}>Bank stream</Text><Text style={styles.rowDetail}>{(state.transactionInboxDrafts || []).filter((item) => !(state.transactionInboxDone || []).includes(item.id || "")).length} waiting · import statements, review, accept</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenBills}><View><Text style={styles.rowTitle}>Bills</Text><Text style={styles.rowDetail}>Upcoming and overdue, by category</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={styles.householdRow} onPress={onOpenSharedExpenses}><View><Text style={styles.rowTitle}>Shared Expenses</Text><Text style={styles.rowDetail}>Split bills, track IOUs, manage friends</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenReports}><View><Text style={styles.rowTitle}>Reports</Text><Text style={styles.rowDetail}>Category, budget vs actual, tags</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Card><Text style={styles.cardTitle}>Family</Text><Pressable style={[styles.householdRow, { borderBottomWidth: 0 }]} onPress={onOpenDecisions}><View><Text style={styles.rowTitle}>Decisions</Text><Text style={styles.rowDetail}>{(state.decisions || []).filter((item) => item.status !== "decided").length} open · weigh pros and cons together</Text></View><Ionicons name="chevron-forward" size={20} color={colors.muted} /></Pressable></Card><Pressable style={styles.card} onPress={onOpenRecipes}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Recipes</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>{state.meals.plannedWeek.length} planned meals · {state.meals.recipes.length} saved recipes · add, edit, search</Text></Pressable><Pressable style={styles.card} onPress={onOpenHelp}><View style={styles.iouPersonHead}><Text style={styles.cardTitle}>Help</Text><Ionicons name="chevron-forward" size={20} color={colors.muted} /></View><Text style={styles.muted}>Short guides for every part of the app</Text></Pressable><Pressable style={styles.dangerButton} onPress={() => Alert.alert("Sign out?", "You will need to sign in again.", [{ text: "Cancel" }, { text: "Sign out", style: "destructive", onPress: () => void onSignOut() }])}><Text style={styles.dangerText}>Sign out</Text></Pressable></Page>;
 }
 
 function Row({ title, detail, value, badge }: { title: string; detail: string; value?: string; badge?: string }) { return <View style={styles.row}><View style={styles.rowCopy}><Text style={styles.rowTitle}>{title}</Text><Text style={styles.rowDetail}>{detail}</Text></View>{value ? <Text style={styles.rowValue}>{value}</Text> : null}{badge ? <Text style={styles.badge}>{badge}</Text> : null}</View>; }

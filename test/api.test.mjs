@@ -568,3 +568,19 @@ test("Documents can be renamed and copied from the phone through the documents A
   assert.match(screen, /api\.updateDocument\(documentId, \{ name \}\)/);
   assert.match(screen, /api\.copyDocument\(documentId\)/);
 });
+
+test("Calendar items can carry a location with a Directions link, and the list can be filtered by person", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const calendar = extractFunctionSource(app, "Calendar");
+  assert.match(calendar, /location: location\.trim\(\)/);
+  assert.match(calendar, /Linking\.openURL\(directionsUrl\(/);
+  assert.match(calendar, /matchesOwnerFilter\(item, filterOwner\)/);
+  assert.match(calendar, /keyboardShouldPersistTaps="handled"/);
+});
+
+test("Help is reachable from More and the onboarding walkthrough can open Sharing", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /subScreen === "help" \? <HelpScreen/);
+  assert.match(app, /onOpenHelp=\{\(\) => setSubScreen\("help"\)\}/);
+  assert.match(app, /target === "wealth" \|\| target === "sharing"/);
+});

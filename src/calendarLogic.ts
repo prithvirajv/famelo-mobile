@@ -756,3 +756,14 @@ export function homeWeekStrip(calendar: { events: CalendarEvent[]; chores: Chore
   }
   return days;
 }
+
+// A plain Google Maps directions link (no API key); works as a normal https link on both iOS and Android.
+export function directionsUrl(location: string): string {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(location.trim())}`;
+}
+
+// The calendar's "filter by person" chips: an empty filter shows everything, otherwise only items that person is assigned to.
+export function matchesOwnerFilter(item: { assignees?: Array<{ key: string }>; owner?: string; assignee?: string }, ownerKey: string): boolean {
+  if (!ownerKey) return true;
+  return effectiveAssignees(item).some((assignee) => assignee.key === ownerKey);
+}

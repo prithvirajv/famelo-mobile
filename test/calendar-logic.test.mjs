@@ -256,3 +256,18 @@ test("updateAnnualEvent changes title/date/reminder and re-derives monthDay and 
   assert.deepEqual(updated.assignees, original.assignees);
   assert.equal(updateAnnualEvent(original, { type: "birthday", title: "", date: "1991-12-25", time: "10:30", reminderDays: 7 }, now), null);
 });
+
+import { directionsUrl, matchesOwnerFilter } from "../src/calendarLogic.ts";
+
+test("directionsUrl encodes a free-text place for Google Maps", () => {
+  assert.equal(directionsUrl(" Dr. Lee, 12 Main St & 3rd "), "https://www.google.com/maps/dir/?api=1&destination=Dr.%20Lee%2C%2012%20Main%20St%20%26%203rd");
+});
+
+test("owner filter shows everything when empty and otherwise only the person's items, including legacy single-owner ones", () => {
+  const joint = { assignees: [{ key: "a@x.co" }, { key: "b@x.co" }] };
+  assert.equal(matchesOwnerFilter(joint, ""), true);
+  assert.equal(matchesOwnerFilter(joint, "b@x.co"), true);
+  assert.equal(matchesOwnerFilter(joint, "c@x.co"), false);
+  assert.equal(matchesOwnerFilter({ owner: "c@x.co" }, "c@x.co"), true, "falls back to the legacy owner field");
+  assert.equal(matchesOwnerFilter({ assignee: "d@x.co" }, "c@x.co"), false);
+});
