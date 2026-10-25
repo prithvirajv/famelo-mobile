@@ -137,3 +137,24 @@ test("the new-accounts notice reads naturally, and only accounts with no decisio
   assert.deepEqual(["A", "B", "C"].map((id) => isNewRemoteAccount(mappings, id)), [false, false, true]);
   assert.equal(isNewRemoteAccount(undefined, "A"), true);
 });
+
+import { matchDebtToBankBalance } from "../src/linkedAccountsLogic.ts";
+
+test("a loan's bank balance sets the amount owed on the debt and its liability, marks ledger EMIs applied, and leaves history alone", () => {
+  const signatureOf = (t) => `${t.date}|${t.amount}`;
+  const debts = [{ id: "tesla", name: "Tesla Loan", balance: 26524.02, rate: 4.74, minimum: 702.23, lineId: "emi-line", appliedPaymentSignatures: ["2026-08-01|702.23"], payments: [{ id: "p" }] }, { id: "other", name: "Other", balance: 100, rate: 0, minimum: 0 }];
+  const liabilities = [{ id: "tesla", name: "Tesla Loan", value: 26524.02 }, { id: "other", name: "Other", value: 100 }];
+  const transactions = [{ lineId: "emi-line", date: "2026-08-01", amount: 702.23 }, { lineId: "emi-line", date: "2026-09-01", amount: 702.23 }, { lineId: "elsewhere", date: "2026-09-02", amount: 5 }];
+  const result = matchDebtToBankBalance({ debts, liabilities, transactions }, { debtId: "tesla", balance: -28098.52 }, signatureOf);
+  assert.equal(result.changed, true);
+  assert.deepEqual([result.debts[0].balance, result.liabilities[0].value], [28098.52, 28098.52]);
+  assert.deepEqual([...result.debts[0].appliedPaymentSignatures].sort(), ["2026-08-01|702.23", "2026-09-01|702.23"]);
+  assert.deepEqual(result.debts[0].payments, [{ id: "p" }]);
+  assert.deepEqual([result.debts[1], result.liabilities[1]], [debts[1], liabilities[1]]);
+  assert.equal(debts[0].balance, 26524.02, "input not mutated");
+  assert.equal(matchDebtToBankBalance({ debts, liabilities, transactions }, { debtId: "tesla", balance: 28098.52 }, signatureOf).debts[0].balance, 28098.52);
+  assert.equal(matchDebtToBankBalance({ debts, liabilities, transactions }, { debtId: "tesla", balance: -26524.02 }, signatureOf).changed, false);
+  for (const bad of [{ debtId: "missing", balance: -1 }, { debtId: "tesla", balance: Number.NaN }]) assert.equal(matchDebtToBankBalance({ debts, liabilities, transactions }, bad, signatureOf).changed, false);
+  const loanMapped = selectNewLinkedTransactions([{ externalId: "sf:L:1", remoteAccountId: "L", amount: 5 }], { L: { debtId: "tesla" } }, []);
+  assert.deepEqual([loanMapped.fresh.length, loanMapped.unmapped], [0, 0], "a loan account's own transactions are skipped silently");
+});

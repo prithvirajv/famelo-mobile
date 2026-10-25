@@ -46,7 +46,7 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, simplefinSummary, newAccountsNotice, isNewRemoteAccount } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3640,8 +3640,17 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
           working = { ...working, goals: { ...working.goals, netWorth: { liabilities: [], ...working.goals?.netWorth, assets: matched.assets } } };
           groupsMatched += 1;
         });
+        // Accounts mapped to a loan/debt: the amount still owed follows the bank (payments already in the ledger are not subtracted again).
+        let debtsMatched = 0;
+        payload.accounts.forEach((remote) => {
+          const debtId = link.mappings[remote.remoteId]?.debtId;
+          if (!debtId || remote.balance === null) return;
+          const matched = matchDebtToBankBalance({ debts: working.goals?.debts || [], liabilities: working.goals?.netWorth?.liabilities || [], transactions: working.transactions }, { debtId, balance: remote.balance }, (transaction) => `${transaction.date}|${transaction.amount}`);
+          working = { ...working, goals: { ...working.goals, debts: matched.debts, netWorth: { assets: [], ...working.goals?.netWorth, liabilities: matched.liabilities } } };
+          debtsMatched += 1;
+        });
         if (exceedsStateLimit(working)) throw new Error("Importing these would push your household data past the 1 MB the server can save. Review or clear some Bank stream rows first.");
-        summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched);
+        summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched, debtsMatched);
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
         await onSave(working);
         if (newDraftIds.length) summary += ` ${await runAiImport(() => stateRef.current, onSave, newDraftIds, link.label, newDraftIds.length, () => undefined)}`;
@@ -3673,7 +3682,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     try {
       const { accounts } = await api.linkedRemoteAccounts(link.id);
       const choices: Record<string, string> = {};
-      accounts.forEach((remote) => { const existing = link.mappings[remote.remoteId]; choices[remote.remoteId] = existing ? (existing.accountId || (existing.groupId ? (link.provider === "simplefin" ? `group:${existing.groupId}` : existing.groupId) : "skip")) : "skip"; });
+      accounts.forEach((remote) => { const existing = link.mappings[remote.remoteId]; choices[remote.remoteId] = existing ? (existing.accountId || (existing.debtId ? `debt:${existing.debtId}` : (existing.groupId ? (link.provider === "simplefin" ? `group:${existing.groupId}` : existing.groupId) : "skip"))) : "skip"; });
       setMapping({ linkId: link.id, remote: accounts, choices });
       setFeedback("");
     } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not load the accounts"); }
@@ -3725,6 +3734,9 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
       if (link.provider === "snaptrade") {
         const group = choice === "new" ? null : groupStockHoldings((working.goals?.netWorth?.assets || [])).find((item) => item.groupId === choice);
         mappings[remote.remoteId] = group ? { groupId: group.groupId, groupName: group.groupName } : { groupName: remote.name };
+      } else if (choice.startsWith("debt:")) {
+        const debt = (working.goals?.debts || []).find((item) => item.id === choice.slice(5));
+        if (debt?.id) mappings[remote.remoteId] = { debtId: debt.id };
       } else if (choice.startsWith("group:")) {
         const group = groupStockHoldings(working.goals?.netWorth?.assets || []).find((item) => item.groupId === choice.slice(6));
         if (group) mappings[remote.remoteId] = { groupId: group.groupId, groupName: group.groupName };
@@ -3757,12 +3769,15 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     }
     return [{ label: "Don't import", onPress: () => set("skip") }, { label: "New Wealth account", onPress: () => set("new") }, ...(state.accounts || []).filter((account) => !account.closedAt).map((account) => ({ label: account.name, onPress: () => set(account.id) })),
       // A bank feed can also drive a holdings group (401(k), IRA, ESPP): its total is matched to the bank's balance, holdings keep their detail.
-      ...groupStockHoldings(state.goals?.netWorth?.assets || []).map((group) => ({ label: `${group.groupName} (investment, match balance)`, onPress: () => set(`group:${group.groupId}`) }))];
+      ...groupStockHoldings(state.goals?.netWorth?.assets || []).map((group) => ({ label: `${group.groupName} (investment, match balance)`, onPress: () => set(`group:${group.groupId}`) })),
+      // A loan the bank reports can drive a debt: its remaining balance follows what the bank says is owed.
+      ...(state.goals?.debts || []).filter((debt) => debt.id).map((debt) => ({ label: `${debt.name} (loan, match amount owed)`, onPress: () => set(`debt:${debt.id}`) }))];
   };
   const choiceLabel = (remote: RemoteAccount): string => {
     const choice = mapping?.choices[remote.remoteId] || "skip";
     if (choice === "skip") return activeLink?.provider === "snaptrade" ? "Don't track" : "Don't import";
     if (choice === "new") return activeLink?.provider === "snaptrade" ? "New holdings group" : "New Wealth account";
+    if (choice.startsWith("debt:")) return `${(state.goals?.debts || []).find((debt) => debt.id === choice.slice(5))?.name || "Loan"} (match owed)`;
     if (choice.startsWith("group:")) return `${groupStockHoldings(state.goals?.netWorth?.assets || []).find((group) => group.groupId === choice.slice(6))?.groupName || "Investment account"} (match balance)`;
     return (state.accounts || []).find((account) => account.id === choice)?.name || groupStockHoldings(state.goals?.netWorth?.assets || []).find((group) => group.groupId === choice)?.groupName || "Chosen";
   };

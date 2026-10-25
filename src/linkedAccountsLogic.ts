@@ -1,11 +1,11 @@
 // Linked accounts (SimpleFIN Bridge bank/card feeds, SnapTrade brokerage positions): the client-side half. The server only fetches and
 // normalizes; these pure functions turn a sync payload into Bank stream rows, balance adjustments and holdings, mirroring web's helpers
 // in lib/shared-logic.js. Types only are imported - see the logic-file import rule - so the current balance is passed in as a callback.
-import type { Account, HouseholdState, InboxDraft, WealthAsset } from "./types";
+import type { Account, Debt, HouseholdState, InboxDraft, WealthAsset, WealthLiability } from "./types";
 
 export const LINKED_IMPORTED_ID_LIMIT = 3000;
 
-export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; skipped?: boolean };
+export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
 export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }> };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string };
@@ -45,8 +45,8 @@ export function selectNewLinkedTransactions(transactions: LinkedTransaction[], m
   for (const transaction of transactions || []) {
     const accountId = mappings?.[transaction.remoteAccountId]?.accountId;
     if (!accountId) {
-      // An account mapped to a holdings group has no transactions to import by design; only an account left unmapped counts as skipped.
-      if (!mappings?.[transaction.remoteAccountId]?.groupId) unmapped += 1;
+      // An account mapped to a holdings group or a debt has no transactions to import by design; only an account left unmapped counts as skipped.
+      if (!mappings?.[transaction.remoteAccountId]?.groupId && !mappings?.[transaction.remoteAccountId]?.debtId) unmapped += 1;
       continue;
     }
     if (known.has(transaction.externalId)) { alreadyImported += 1; continue; }
@@ -120,6 +120,24 @@ export function applyBalanceToHoldingsGroup(assets: WealthAsset[], input: { link
   return { assets: [...without, adjustment], adjustment: gap };
 }
 
+// Brings a debt's remaining balance (and its net-worth liability) in line with a loan balance reported by the bank. SimpleFIN reports what you
+// owe as a negative number, but the sign is not guaranteed across institutions, so the amount owed is the absolute value. Payments already in
+// the ledger on the debt's linked subcategory are marked applied: the bank's balance already reflects them, and the Ledger auto-EMI pass would
+// otherwise subtract them from the new balance a second time.
+export function matchDebtToBankBalance(input: { debts: Debt[]; liabilities: WealthLiability[]; transactions: Array<{ lineId: string; date: string; amount: number }> }, target: { debtId: string; balance: number }, signatureOf: (transaction: { date: string; amount: number }) => string): { debts: Debt[]; liabilities: WealthLiability[]; changed: boolean } {
+  const debt = input.debts.find((item) => item.id === target.debtId);
+  const owed = Math.round(Math.abs(Number(target.balance)) * 100) / 100;
+  if (!debt || !Number.isFinite(owed)) return { debts: input.debts, liabilities: input.liabilities, changed: false };
+  const signatures = new Set(debt.appliedPaymentSignatures || []);
+  if (debt.lineId) input.transactions.filter((transaction) => transaction.lineId === debt.lineId).forEach((transaction) => signatures.add(signatureOf(transaction)));
+  const nextDebt: Debt = { ...debt, balance: owed, ...(debt.lineId ? { appliedPaymentSignatures: [...signatures] } : {}) };
+  return {
+    debts: input.debts.map((item) => (item.id === target.debtId ? nextDebt : item)),
+    liabilities: input.liabilities.map((item) => (item.id === target.debtId ? { ...item, value: owed } : item)),
+    changed: owed !== Number(debt.balance || 0)
+  };
+}
+
 // Merges brokerage positions into net-worth assets. Holdings this link created carry linkedTo = "<linkId>:<remoteAccountId>" so a later sync
 // updates them in place and removes the ones that were sold; a hand-entered holding with the same symbol in the target group is adopted.
 export function mergeBrokeragePositions(assets: WealthAsset[], input: { linkId: string; positions: LinkedPosition[]; cash: Record<string, number>; accounts: RemoteAccount[]; mappings: Record<string, LinkedMapping> }, createId: (seed: string) => string): { assets: WealthAsset[]; added: number; updated: number; removed: number } {
@@ -160,8 +178,8 @@ export function mergeBrokeragePositions(assets: WealthAsset[], input: { linkId: 
   return { assets: next, added, updated, removed };
 }
 
-export function simplefinSummary(label: string, imported: number, balancesUpdated: number, pendingSkipped: number, unmapped: number, errors: string[], groupsMatched = 0): string {
-  let text = `${label}: ${imported} new transaction${imported === 1 ? "" : "s"} sent to Bank stream${balancesUpdated ? `, ${balancesUpdated} balance${balancesUpdated === 1 ? "" : "s"} updated` : ""}${groupsMatched ? `, ${groupsMatched} investment account${groupsMatched === 1 ? "" : "s"} matched to the bank balance` : ""}${pendingSkipped ? `; ${pendingSkipped} pending skipped until they post` : ""}${unmapped ? `; ${unmapped} from accounts you chose not to import` : ""}.`;
+export function simplefinSummary(label: string, imported: number, balancesUpdated: number, pendingSkipped: number, unmapped: number, errors: string[], groupsMatched = 0, debtsMatched = 0): string {
+  let text = `${label}: ${imported} new transaction${imported === 1 ? "" : "s"} sent to Bank stream${balancesUpdated ? `, ${balancesUpdated} balance${balancesUpdated === 1 ? "" : "s"} updated` : ""}${groupsMatched ? `, ${groupsMatched} investment account${groupsMatched === 1 ? "" : "s"} matched to the bank balance` : ""}${debtsMatched ? `, ${debtsMatched} loan${debtsMatched === 1 ? "" : "s"} matched to the amount owed` : ""}${pendingSkipped ? `; ${pendingSkipped} pending skipped until they post` : ""}${unmapped ? `; ${unmapped} from accounts you chose not to import` : ""}.`;
   if (errors.length) text += ` The bank reported: ${errors.join("; ")}`;
   return text;
 }
