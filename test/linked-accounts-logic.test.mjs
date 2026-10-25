@@ -98,3 +98,30 @@ test("status text and auto-sync staleness read sensibly", () => {
   assert.equal(linkNeedsAutoSync({ ...link, status: "needs_reconnect" }, now), false);
   assert.equal(simplefinSummary("Bank", 2, 1, 1, 0, ["careful"]), "Bank: 2 new transactions sent to Bank stream, 1 balance updated; 1 pending skipped until they post. The bank reported: careful");
 });
+
+import { applyBalanceToHoldingsGroup } from "../src/linkedAccountsLogic.ts";
+
+test("an investment account's bank balance tops its holdings group up with one adjustment holding, never negative, and its transactions are not counted as skipped", () => {
+  let n = 0;
+  const createId = (seed) => `${seed}-${++n}`;
+  const holdings = [
+    { id: "a", name: "QQQM", assetClass: "stock", symbol: "QQQM", shares: 10, price: 100, groupId: "g1", groupName: "Roth IRA", value: 1000 },
+    { id: "b", name: "SPMO", assetClass: "stock", symbol: "SPMO", shares: 5, price: 100, groupId: "g1", groupName: "Roth IRA", value: 500 },
+    { id: "z", name: "House", assetClass: "other", value: 300000 }
+  ];
+  const input = { linkId: "L", remoteId: "R", groupId: "g1", groupName: "Roth IRA", balance: 1800 };
+  const first = applyBalanceToHoldingsGroup(holdings, input, createId);
+  assert.equal(first.adjustment, 300);
+  const adjust = first.assets.find((a) => a.linkedTo === "L:R:adjust");
+  assert.deepEqual([adjust.name, adjust.groupId, adjust.value, adjust.shares, adjust.price, adjust.symbol], ["Roth IRA balance adjustment", "g1", 300, 1, 300, ""]);
+  assert.equal(holdings.length, 3, "input not mutated");
+  const second = applyBalanceToHoldingsGroup(first.assets, { ...input, balance: 1700 }, createId);
+  assert.equal(second.assets.filter((a) => a.linkedTo === "L:R:adjust").length, 1);
+  assert.equal(second.assets.find((a) => a.linkedTo === "L:R:adjust").value, 200);
+  assert.equal(second.assets.find((a) => a.linkedTo === "L:R:adjust").id, adjust.id);
+  const ahead = applyBalanceToHoldingsGroup(first.assets, { ...input, balance: 1400 }, createId);
+  assert.deepEqual([ahead.adjustment, ahead.assets.some((a) => a.linkedTo === "L:R:adjust")], [0, false]);
+  assert.equal(applyBalanceToHoldingsGroup(holdings, { ...input, balance: Number.NaN }, createId).adjustment, 0);
+  const result = selectNewLinkedTransactions([{ externalId: "sf:R:1", remoteAccountId: "R", amount: 5 }, { externalId: "sf:Q:1", remoteAccountId: "Q", amount: 5 }], { R: { groupId: "g1" } }, []);
+  assert.deepEqual([result.fresh.length, result.unmapped], [0, 1], "only the genuinely unmapped account counts as skipped");
+});

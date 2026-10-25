@@ -46,7 +46,7 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, simplefinSummary } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, simplefinSummary } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3631,8 +3631,17 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         working = { ...working, linkedImportedIds: rememberLinkedImportedIds(working.linkedImportedIds, posted.map((row) => row.externalId)) };
         const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0);
         working = reconciled.state;
+        // Accounts mapped to a holdings group: match the group's total to the bank balance (holdings keep their own detail).
+        let groupsMatched = 0;
+        payload.accounts.forEach((remote) => {
+          const groupMapping = link.mappings[remote.remoteId];
+          if (!groupMapping?.groupId || remote.balance === null) return;
+          const matched = applyBalanceToHoldingsGroup(working.goals?.netWorth?.assets || [], { linkId: link.id, remoteId: remote.remoteId, groupId: groupMapping.groupId, groupName: groupMapping.groupName || remote.name, balance: remote.balance }, uniqueId);
+          working = { ...working, goals: { ...working.goals, netWorth: { liabilities: [], ...working.goals?.netWorth, assets: matched.assets } } };
+          groupsMatched += 1;
+        });
         if (exceedsStateLimit(working)) throw new Error("Importing these would push your household data past the 1 MB the server can save. Review or clear some Bank stream rows first.");
-        summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || []);
+        summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched);
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
         await onSave(working);
         if (newDraftIds.length) summary += ` ${await runAiImport(() => stateRef.current, onSave, newDraftIds, link.label, newDraftIds.length, () => undefined)}`;
@@ -3664,7 +3673,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     try {
       const { accounts } = await api.linkedRemoteAccounts(link.id);
       const choices: Record<string, string> = {};
-      accounts.forEach((remote) => { const existing = link.mappings[remote.remoteId]; choices[remote.remoteId] = existing ? (existing.accountId || existing.groupId || "skip") : "skip"; });
+      accounts.forEach((remote) => { const existing = link.mappings[remote.remoteId]; choices[remote.remoteId] = existing ? (existing.accountId || (existing.groupId ? (link.provider === "simplefin" ? `group:${existing.groupId}` : existing.groupId) : "skip")) : "skip"; });
       setMapping({ linkId: link.id, remote: accounts, choices });
       setFeedback("");
     } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not load the accounts"); }
@@ -3715,6 +3724,9 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
       if (link.provider === "snaptrade") {
         const group = choice === "new" ? null : groupStockHoldings((working.goals?.netWorth?.assets || [])).find((item) => item.groupId === choice);
         mappings[remote.remoteId] = group ? { groupId: group.groupId, groupName: group.groupName } : { groupName: remote.name };
+      } else if (choice.startsWith("group:")) {
+        const group = groupStockHoldings(working.goals?.netWorth?.assets || []).find((item) => item.groupId === choice.slice(6));
+        if (group) mappings[remote.remoteId] = { groupId: group.groupId, groupName: group.groupName };
       } else if (choice === "new") {
         const isCard = remote.balance !== null && remote.balance < 0;
         const name = remote.orgName ? `${remote.orgName} ${remote.name}` : remote.name;
@@ -3742,13 +3754,16 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     if (activeLink?.provider === "snaptrade") {
       return [{ label: "Don't track", onPress: () => set("skip") }, { label: "New holdings group", onPress: () => set("new") }, ...groupStockHoldings((state.goals?.netWorth?.assets || [])).map((group) => ({ label: group.groupName, onPress: () => set(group.groupId) }))];
     }
-    return [{ label: "Don't import", onPress: () => set("skip") }, { label: "New Wealth account", onPress: () => set("new") }, ...(state.accounts || []).filter((account) => !account.closedAt).map((account) => ({ label: account.name, onPress: () => set(account.id) }))];
+    return [{ label: "Don't import", onPress: () => set("skip") }, { label: "New Wealth account", onPress: () => set("new") }, ...(state.accounts || []).filter((account) => !account.closedAt).map((account) => ({ label: account.name, onPress: () => set(account.id) })),
+      // A bank feed can also drive a holdings group (401(k), IRA, ESPP): its total is matched to the bank's balance, holdings keep their detail.
+      ...groupStockHoldings(state.goals?.netWorth?.assets || []).map((group) => ({ label: `${group.groupName} (investment, match balance)`, onPress: () => set(`group:${group.groupId}`) }))];
   };
   const choiceLabel = (remote: RemoteAccount): string => {
     const choice = mapping?.choices[remote.remoteId] || "skip";
     if (choice === "skip") return activeLink?.provider === "snaptrade" ? "Don't track" : "Don't import";
     if (choice === "new") return activeLink?.provider === "snaptrade" ? "New holdings group" : "New Wealth account";
-    return (state.accounts || []).find((account) => account.id === choice)?.name || groupStockHoldings((state.goals?.netWorth?.assets || [])).find((group) => group.groupId === choice)?.groupName || "Chosen";
+    if (choice.startsWith("group:")) return `${groupStockHoldings(state.goals?.netWorth?.assets || []).find((group) => group.groupId === choice.slice(6))?.groupName || "Investment account"} (match balance)`;
+    return (state.accounts || []).find((account) => account.id === choice)?.name || groupStockHoldings(state.goals?.netWorth?.assets || []).find((group) => group.groupId === choice)?.groupName || "Chosen";
   };
 
   return <Card>

@@ -32,7 +32,11 @@ export function selectNewLinkedTransactions(transactions: LinkedTransaction[], m
   let alreadyImported = 0;
   for (const transaction of transactions || []) {
     const accountId = mappings?.[transaction.remoteAccountId]?.accountId;
-    if (!accountId) { unmapped += 1; continue; }
+    if (!accountId) {
+      // An account mapped to a holdings group has no transactions to import by design; only an account left unmapped counts as skipped.
+      if (!mappings?.[transaction.remoteAccountId]?.groupId) unmapped += 1;
+      continue;
+    }
     if (known.has(transaction.externalId)) { alreadyImported += 1; continue; }
     known.add(transaction.externalId);
     fresh.push({ ...transaction, accountId });
@@ -85,6 +89,25 @@ export function assetValueOf(asset: WealthAsset): number {
   return Math.max(0, Number(asset.value || 0));
 }
 
+// Makes a holdings group's total equal a bank-reported balance (a SimpleFIN investment/retirement account, which reports only a total)
+// WITHOUT discarding per-holding detail: the listed holdings keep their own shares and prices, and one "balance adjustment" holding in the
+// group carries whatever they don't explain. If the listed holdings already meet or exceed the balance, no adjustment is kept (assets
+// can't go negative).
+export function applyBalanceToHoldingsGroup(assets: WealthAsset[], input: { linkId: string; remoteId: string; groupId: string; groupName: string; balance: number }, createId: (seed: string) => string): { assets: WealthAsset[]; adjustment: number } {
+  const linkedTo = `${input.linkId}:${input.remoteId}:adjust`;
+  const inGroup = assets.filter((asset) => asset.groupId === input.groupId && asset.linkedTo !== linkedTo);
+  const explained = inGroup.reduce((sum, asset) => sum + assetValueOf(asset), 0);
+  const gap = Math.round((Number(input.balance) - explained) * 100) / 100;
+  const without = assets.filter((asset) => asset.linkedTo !== linkedTo);
+  if (!Number.isFinite(gap) || gap <= 0.004) return { assets: without, adjustment: 0 };
+  const existing = assets.find((asset) => asset.linkedTo === linkedTo);
+  const adjustment: WealthAsset = {
+    ...(existing || { id: createId(`${input.groupName}-balance`), name: "", value: 0 }), name: `${input.groupName} balance adjustment`, assetClass: "stock", symbol: "", shares: 1, price: gap, costBasis: 0,
+    holdingType: "fund", groupId: input.groupId, groupName: inGroup[0]?.groupName || input.groupName, linkedTo, value: gap
+  };
+  return { assets: [...without, adjustment], adjustment: gap };
+}
+
 // Merges brokerage positions into net-worth assets. Holdings this link created carry linkedTo = "<linkId>:<remoteAccountId>" so a later sync
 // updates them in place and removes the ones that were sold; a hand-entered holding with the same symbol in the target group is adopted.
 export function mergeBrokeragePositions(assets: WealthAsset[], input: { linkId: string; positions: LinkedPosition[]; cash: Record<string, number>; accounts: RemoteAccount[]; mappings: Record<string, LinkedMapping> }, createId: (seed: string) => string): { assets: WealthAsset[]; added: number; updated: number; removed: number } {
@@ -125,8 +148,8 @@ export function mergeBrokeragePositions(assets: WealthAsset[], input: { linkId: 
   return { assets: next, added, updated, removed };
 }
 
-export function simplefinSummary(label: string, imported: number, balancesUpdated: number, pendingSkipped: number, unmapped: number, errors: string[]): string {
-  let text = `${label}: ${imported} new transaction${imported === 1 ? "" : "s"} sent to Bank stream${balancesUpdated ? `, ${balancesUpdated} balance${balancesUpdated === 1 ? "" : "s"} updated` : ""}${pendingSkipped ? `; ${pendingSkipped} pending skipped until they post` : ""}${unmapped ? `; ${unmapped} from accounts you chose not to import` : ""}.`;
+export function simplefinSummary(label: string, imported: number, balancesUpdated: number, pendingSkipped: number, unmapped: number, errors: string[], groupsMatched = 0): string {
+  let text = `${label}: ${imported} new transaction${imported === 1 ? "" : "s"} sent to Bank stream${balancesUpdated ? `, ${balancesUpdated} balance${balancesUpdated === 1 ? "" : "s"} updated` : ""}${groupsMatched ? `, ${groupsMatched} investment account${groupsMatched === 1 ? "" : "s"} matched to the bank balance` : ""}${pendingSkipped ? `; ${pendingSkipped} pending skipped until they post` : ""}${unmapped ? `; ${unmapped} from accounts you chose not to import` : ""}.`;
   if (errors.length) text += ` The bank reported: ${errors.join("; ")}`;
   return text;
 }
