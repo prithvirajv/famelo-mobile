@@ -111,6 +111,8 @@ export const api = {
   linkedRemoteAccounts: (id: string) => request<{ accounts: RemoteAccount[] }>(`/api/linked-accounts/${id}/remote-accounts`),
   setLinkedMappings: (id: string, mappings: Record<string, LinkedMapping>) => request<{ link: LinkedLink }>(`/api/linked-accounts/${id}/mappings`, { method: "PUT", body: JSON.stringify({ mappings }) }),
   syncLinkedAccount: (id: string) => request<SyncPayload>(`/api/linked-accounts/${id}/sync`, { method: "POST", body: "{}" }),
+  // Tells the server a sync's result is saved, so it can drop what it had staged (it keeps it until then, so a failed save loses nothing).
+  ackLinkedSync: (id: string, stagedAt: string) => request<{ ok: boolean }>(`/api/linked-accounts/${id}/ack`, { method: "POST", body: JSON.stringify({ stagedAt }) }),
   removeLinkedAccount: (id: string) => request<{ ok: boolean }>(`/api/linked-accounts/${id}`, { method: "DELETE" }),
   copyDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/copy`, { method: "POST" }),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })

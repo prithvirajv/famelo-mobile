@@ -158,3 +158,17 @@ test("a loan's bank balance sets the amount owed on the debt and its liability, 
   const loanMapped = selectNewLinkedTransactions([{ externalId: "sf:L:1", remoteAccountId: "L", amount: 5 }], { L: { debtId: "tesla" } }, []);
   assert.deepEqual([loanMapped.fresh.length, loanMapped.unmapped], [0, 0], "a loan account's own transactions are skipped silently");
 });
+
+import { waitingBanner } from "../src/linkedAccountsLogic.ts";
+
+test("nightly staged data triggers an auto-sync regardless of recency, and the app banner counts what is waiting", () => {
+  const now = Date.parse("2026-10-04T12:00:00Z");
+  const link = { id: "1", provider: "simplefin", label: "Bank", status: "active", lastSyncAt: "2026-10-04T11:00:00Z", lastError: "", mappings: { A: { accountId: "x" } } };
+  assert.equal(linkNeedsAutoSync(link, now), false);
+  assert.equal(linkNeedsAutoSync({ ...link, hasStaged: true, stagedCount: 3 }, now), true, "synced an hour ago, but the nightly job left data waiting");
+  assert.equal(linkNeedsAutoSync({ ...link, status: "needs_reconnect", hasStaged: true }, now), false);
+  assert.equal(waitingBanner([]), "");
+  assert.equal(waitingBanner([{ status: "active", hasStaged: false, stagedCount: 4 }]), "");
+  assert.equal(waitingBanner([{ status: "active", hasStaged: true, stagedCount: 1 }]), "1 bank transaction fetched overnight - tap to review");
+  assert.equal(waitingBanner([{ status: "active", hasStaged: true, stagedCount: 2 }, { status: "active", hasStaged: true, stagedCount: 3 }, { status: "needs_reconnect", hasStaged: true, stagedCount: 9 }]), "5 bank transactions fetched overnight - tap to review");
+});

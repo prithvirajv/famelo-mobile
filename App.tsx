@@ -46,7 +46,7 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -113,6 +113,7 @@ function AppContent() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingHidden, setOnboardingHidden] = useState(false);
+  const [waitingNotice, setWaitingNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -137,6 +138,17 @@ function AppContent() {
   }, []);
 
   useEffect(() => { void loadWorkspace(); }, [loadWorkspace]);
+
+  // Bank data the nightly job fetched but no screen has applied yet: a banner that opens Wealth, where the linked-accounts card applies it.
+  const refreshWaitingNotice = useCallback(async () => {
+    try { setWaitingNotice(waitingBanner((await api.linkedAccounts()).links)); } catch { setWaitingNotice(""); }
+  }, []);
+  useEffect(() => {
+    if (!user) return;
+    void refreshWaitingNotice();
+    const subscription = AppState.addEventListener("change", (nextState) => { if (nextState === "active") void refreshWaitingNotice(); });
+    return () => subscription.remove();
+  }, [user?.id, refreshWaitingNotice]);
 
   useEffect(() => {
     if (!user) return;
@@ -227,6 +239,7 @@ function AppContent() {
       </View>
     </View>
     {error ? <Pressable style={styles.error} onPress={() => setError("")}><Text style={styles.errorText}>{error}</Text></Pressable> : null}
+    {waitingNotice && subScreen !== "wealth" ? <Pressable style={styles.notice} onPress={() => { setSubScreen("wealth"); setWaitingNotice(""); }}><Text style={styles.noticeText}>{waitingNotice}</Text></Pressable> : null}
     <View style={styles.page}>{page}</View>
     <GlobalSearchModal visible={searchOpen} state={state} onClose={() => setSearchOpen(false)} onPick={(target) => {
       setSearchOpen(false);
@@ -3700,6 +3713,8 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         const latest = stateRef.current;
         await onSave({ ...latest, goals: { ...latest.goals, netWorth: { liabilities: [], ...latest.goals?.netWorth, assets: merged.assets } }, household: { ...latest.household, activity: [summary, ...(latest.household.activity || [])] } });
       }
+      // The server keeps fetched data staged until the result is saved (onSave above awaited the save); acknowledge only now.
+      if (payload.stagedAt) await api.ackLinkedSync(link.id, payload.stagedAt);
       if (!quiet || /new transaction|added|updated|removed/.test(summary)) setFeedback(summary);
     } catch (cause) {
       setFeedback(`${link.label}: ${cause instanceof Error ? cause.message : "Sync failed"}`);
@@ -4656,6 +4671,7 @@ const styles = StyleSheet.create({
   searchBar: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface }, searchInput: { flex: 1, fontSize: 16, color: colors.text, paddingVertical: 8 }, searchClose: { color: colors.green, fontWeight: "700" },
   searchResult: { backgroundColor: colors.surface, borderRadius: 10, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 3 }, searchResultTitle: { fontWeight: "700", color: colors.text, fontSize: 15 },
   onboardingBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 }, onboardingActions: { flexDirection: "row", gap: 8 }, onboardingAction: { flex: 1 }, onboardingCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, gap: 12 },
+  notice: { backgroundColor: "#e8f6ef", padding: 10 }, noticeText: { color: colors.green, textAlign: "center", fontWeight: "700" },
   error: { backgroundColor: "#fff0f0", padding: 10 }, errorText: { color: colors.coral, textAlign: "center", fontWeight: "700" }, page: { flex: 1 }, content: { padding: 18, paddingBottom: 32, gap: 14 },
   titleBlock: { marginBottom: 2 }, eyebrow: { color: colors.muted, fontWeight: "800", fontSize: 12 }, title: { marginTop: 3, color: colors.text, fontWeight: "800", fontSize: 30 },
   card: { backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.border, padding: 16 }, cardTitle: { color: colors.text, fontWeight: "800", fontSize: 18 }, muted: { color: colors.muted, marginTop: 5 }, heroValue: { color: colors.green, fontSize: 32, fontWeight: "800", marginTop: 8 },

@@ -6,12 +6,12 @@ import type { Account, Debt, HouseholdState, InboxDraft, WealthAsset, WealthLiab
 export const LINKED_IMPORTED_ID_LIMIT = 3000;
 
 export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
-export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }> };
+export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string };
 export type LinkedTransaction = { externalId: string; remoteAccountId: string; date: string; payee: string; amount: number; pending: boolean };
 export type LinkedPosition = { remoteAccountId: string; symbol: string; name: string; units: number; price: number; costBasis: number; currency: string; holdingType: "stock" | "fund" };
-export type SyncPayload = { provider: "simplefin" | "snaptrade"; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[] };
+export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[] };
 
 // The one-line notice for accounts a link has reported that the user has not decided about yet ('' when there are none).
 export function newAccountsNotice(link: Pick<LinkedLink, "newAccounts">): string {
@@ -31,9 +31,10 @@ export function linkedStatusText(link: LinkedLink, formatTime: (iso: string) => 
   return link.lastError ? `${when} - ${link.lastError}` : when;
 }
 
-// Whether opening the screen should quietly refresh this link: it has accounts chosen and has not synced for six hours.
+// Whether opening the screen should quietly refresh this link: it has accounts chosen and either the nightly job has data waiting or it
+// has not synced for six hours.
 export function linkNeedsAutoSync(link: LinkedLink, now: number = Date.now()): boolean {
-  return link.status === "active" && Object.keys(link.mappings || {}).length > 0 && (!link.lastSyncAt || now - new Date(link.lastSyncAt).getTime() > 6 * 3600 * 1000);
+  return link.status === "active" && Object.keys(link.mappings || {}).length > 0 && (Boolean(link.hasStaged) || !link.lastSyncAt || now - new Date(link.lastSyncAt).getTime() > 6 * 3600 * 1000);
 }
 
 // Splits a sync's transactions into ones to import (mapped to a local account, never imported before) and counts of what was skipped.
@@ -182,4 +183,11 @@ export function simplefinSummary(label: string, imported: number, balancesUpdate
   let text = `${label}: ${imported} new transaction${imported === 1 ? "" : "s"} sent to Bank stream${balancesUpdated ? `, ${balancesUpdated} balance${balancesUpdated === 1 ? "" : "s"} updated` : ""}${groupsMatched ? `, ${groupsMatched} investment account${groupsMatched === 1 ? "" : "s"} matched to the bank balance` : ""}${debtsMatched ? `, ${debtsMatched} loan${debtsMatched === 1 ? "" : "s"} matched to the amount owed` : ""}${pendingSkipped ? `; ${pendingSkipped} pending skipped until they post` : ""}${unmapped ? `; ${unmapped} from accounts you chose not to import` : ""}.`;
   if (errors.length) text += ` The bank reported: ${errors.join("; ")}`;
   return text;
+}
+
+// The app-level banner: how many bank transactions the nightly job has fetched that no screen has applied yet ('' when none).
+export function waitingBanner(links: Array<Pick<LinkedLink, "stagedCount" | "hasStaged" | "status">>): string {
+  const waiting = links.filter((link) => link.status === "active" && link.hasStaged).reduce((sum, link) => sum + Number(link.stagedCount || 0), 0);
+  if (!waiting) return "";
+  return `${waiting} bank transaction${waiting === 1 ? "" : "s"} fetched overnight - tap to review`;
 }

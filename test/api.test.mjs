@@ -621,3 +621,10 @@ test("Bank stream's cleanup card previews, confirms with a 2-button Alert, offer
   assert.match(bank, /\{ text: "Cancel" \},\s*\{ text: "Remove permanently", style: "destructive"/);
   assert.match(bank, /await onSave\(\{ \.\.\.latest, transactions: result\.state\.transactions/);
 });
+
+test("the app acknowledges a linked sync only after saving it, and shows a banner for data fetched overnight", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const card = extractFunctionSource(app, "LinkedAccountsCard");
+  assert.ok(card.indexOf("api.ackLinkedSync") > card.indexOf("await onSave(working)"), "acknowledge comes after the save");
+  assert.match(extractFunctionSource(app, "AppContent"), /waitingBanner\(\(await api\.linkedAccounts\(\)\)\.links\)/);
+});
