@@ -125,3 +125,15 @@ test("an investment account's bank balance tops its holdings group up with one a
   const result = selectNewLinkedTransactions([{ externalId: "sf:R:1", remoteAccountId: "R", amount: 5 }, { externalId: "sf:Q:1", remoteAccountId: "Q", amount: 5 }], { R: { groupId: "g1" } }, []);
   assert.deepEqual([result.fresh.length, result.unmapped], [0, 1], "only the genuinely unmapped account counts as skipped");
 });
+
+import { newAccountsNotice, isNewRemoteAccount } from "../src/linkedAccountsLogic.ts";
+
+test("the new-accounts notice reads naturally, and only accounts with no decision at all count as new (a skip is a decision)", () => {
+  assert.equal(newAccountsNotice({}), "");
+  assert.equal(newAccountsNotice({ newAccounts: [] }), "");
+  assert.equal(newAccountsNotice({ newAccounts: [{ remoteId: "A", name: "Savings", orgName: "Bank" }] }), "1 new account found (Savings) - choose where it goes.");
+  assert.equal(newAccountsNotice({ newAccounts: [{ remoteId: "A", name: "Savings", orgName: "" }, { remoteId: "B", name: "Roth", orgName: "" }] }), "2 new accounts found (Savings, Roth) - choose where they go.");
+  const mappings = { A: { accountId: "x" }, B: { skipped: true } };
+  assert.deepEqual(["A", "B", "C"].map((id) => isNewRemoteAccount(mappings, id)), [false, false, true]);
+  assert.equal(isNewRemoteAccount(undefined, "A"), true);
+});

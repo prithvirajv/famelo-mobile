@@ -46,7 +46,7 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, simplefinSummary } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, simplefinSummary, newAccountsNotice, isNewRemoteAccount } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3720,7 +3720,8 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     const mappings: Record<string, LinkedMapping> = {};
     mapping.remote.forEach((remote) => {
       const choice = mapping.choices[remote.remoteId] || "skip";
-      if (choice === "skip") return;
+      // A deliberate "don't import" is remembered, so only accounts added later are reported as new.
+      if (choice === "skip") { mappings[remote.remoteId] = { skipped: true }; return; }
       if (link.provider === "snaptrade") {
         const group = choice === "new" ? null : groupStockHoldings((working.goals?.netWorth?.assets || [])).find((item) => item.groupId === choice);
         mappings[remote.remoteId] = group ? { groupId: group.groupId, groupName: group.groupName } : { groupName: remote.name };
@@ -3773,9 +3774,10 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     {overview.links.map((link) => <View key={link.id} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
       <Text style={styles.rowTitle}>{link.label}</Text>
       <Text style={styles.rowDetail}>{link.provider === "snaptrade" ? "Brokerage (SnapTrade)" : "Bank (SimpleFIN)"} · {linkedStatusText(link, (iso) => new Date(iso).toLocaleString())}</Text>
+      {newAccountsNotice(link) ? <Text style={[styles.rowDetail, { color: colors.gold, fontWeight: "700" }]}>{newAccountsNotice(link)}</Text> : null}
       <View style={styles.actionRow}>
         <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => void sync(link)}><Text style={styles.secondaryButtonText}>{busyId === link.id ? "Working..." : "Sync now"}</Text></Pressable>
-        <Pressable style={styles.secondarySmall} onPress={() => void openMapping(link)}><Text style={styles.secondaryButtonText}>Choose accounts</Text></Pressable>
+        <Pressable style={newAccountsNotice(link) ? styles.primarySmall : styles.secondarySmall} onPress={() => void openMapping(link)}><Text style={newAccountsNotice(link) ? styles.primaryButtonText : styles.secondaryButtonText}>Choose accounts</Text></Pressable>
         {link.provider === "snaptrade" ? <Pressable style={styles.secondarySmall} onPress={() => void addBrokerage(link)}><Text style={styles.secondaryButtonText}>Add brokerage</Text></Pressable> : null}
         <Pressable accessibilityLabel={`Unlink ${link.label}`} hitSlop={8} onPress={() => confirmRemove(link)}><Ionicons name="close" size={20} color={colors.coral} /></Pressable>
       </View>
@@ -3783,7 +3785,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     {mapping && activeLink ? <View style={styles.subtaskList}>
       <Text style={styles.label}>Where should each account go?</Text>
       {mapping.remote.length ? mapping.remote.map((remote) => <View key={remote.remoteId}>
-        <Text style={styles.rowTitle}>{remote.name}</Text>
+        <Text style={styles.rowTitle}>{remote.name}{isNewRemoteAccount(activeLink.mappings, remote.remoteId) ? "  (new)" : ""}</Text>
         <Text style={styles.rowDetail}>{remote.orgName}{remote.balance !== null ? ` · ${money(remote.balance, state.household.currency)}` : ""}</Text>
         <Pressable style={styles.secondarySmall} onPress={() => setPicking(picking === remote.remoteId ? null : remote.remoteId)}><Text style={styles.secondaryButtonText}>{choiceLabel(remote)}</Text></Pressable>
         {picking === remote.remoteId ? <OptionList title="Send this account to" options={optionsFor(remote)} onClose={() => setPicking(null)} /> : null}
@@ -4611,7 +4613,7 @@ const styles = StyleSheet.create({
   journalPhotoRow: { marginTop: 10 }, journalPhoto: { width: 72, height: 72, borderRadius: 8, marginRight: 8 },
   multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
-  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
+  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, primarySmall: { flex: 1, minHeight: 44, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", borderRadius: 7, backgroundColor: colors.green }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
   documentsBreadcrumbRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", paddingVertical: 6 }, documentsBreadcrumbItem: { flexDirection: "row", alignItems: "center" }, documentsBreadcrumbText: { color: colors.muted, fontWeight: "700" }, documentsBreadcrumbActive: { color: colors.text },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },

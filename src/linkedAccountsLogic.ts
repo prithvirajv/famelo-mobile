@@ -5,13 +5,25 @@ import type { Account, HouseholdState, InboxDraft, WealthAsset } from "./types";
 
 export const LINKED_IMPORTED_ID_LIMIT = 3000;
 
-export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string };
-export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping> };
+export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; skipped?: boolean };
+export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }> };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string };
 export type LinkedTransaction = { externalId: string; remoteAccountId: string; date: string; payee: string; amount: number; pending: boolean };
 export type LinkedPosition = { remoteAccountId: string; symbol: string; name: string; units: number; price: number; costBasis: number; currency: string; holdingType: "stock" | "fund" };
 export type SyncPayload = { provider: "simplefin" | "snaptrade"; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[] };
+
+// The one-line notice for accounts a link has reported that the user has not decided about yet ('' when there are none).
+export function newAccountsNotice(link: Pick<LinkedLink, "newAccounts">): string {
+  const accounts = link.newAccounts || [];
+  if (!accounts.length) return "";
+  return `${accounts.length} new account${accounts.length === 1 ? "" : "s"} found (${accounts.map((account) => account.name).join(", ")}) - choose where ${accounts.length === 1 ? "it goes" : "they go"}.`;
+}
+
+// A remote account the user has made no decision about (no mapping entry at all; a deliberate skip is stored as { skipped: true }).
+export function isNewRemoteAccount(mappings: Record<string, LinkedMapping>, remoteId: string): boolean {
+  return !Object.prototype.hasOwnProperty.call(mappings || {}, remoteId);
+}
 
 export function linkedStatusText(link: LinkedLink, formatTime: (iso: string) => string): string {
   if (link.status === "needs_reconnect") return "Needs reconnecting - remove it and link again";
