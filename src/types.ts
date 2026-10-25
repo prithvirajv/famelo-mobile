@@ -11,6 +11,8 @@ export type TransactionSplit = { lineId: string; amount: number };
 export type Transaction = {
   date: string; payee: string; lineId: string; amount: number; memo?: string; tags?: string[];
   accountId?: string; orderNumber?: string; splits?: TransactionSplit[]; categoryName?: string; subcategoryName?: string;
+  // Id of the linked-account feed row this came from ("sf:<account>:<transaction>"), used to never import it twice.
+  externalId?: string;
 };
 export type ReminderRecurrence = "once" | "weekly" | "monthly" | "yearly";
 // recurrence/completedBy only apply to type: "reminder" events (matches web's app.js) - a
@@ -61,6 +63,8 @@ export type WealthAsset = {
   id?: string; name: string; value: number; assetClass?: "other" | "cash" | "property" | "retirement" | "stock";
   symbol?: string; shares?: number; price?: number; costBasis?: number;
   groupId?: string; groupName?: string; holdingType?: "stock" | "fund";
+  // Set on holdings/cash created by a SnapTrade link: "<linkId>:<remoteAccountId>" (+ ":cash"), so a sync updates them in place.
+  linkedTo?: string;
 };
 // priceLastUpdated: when each holdings group's live prices were last refreshed, keyed by group id (ISO time).
 export type NetWorth = { assets: WealthAsset[]; liabilities: WealthLiability[]; priceLastUpdated?: Record<string, string> };
@@ -128,7 +132,7 @@ export type Decision = {
 // in, regardless of account type). The flag fields record what the importer detected; match results (duplicate,
 // refund, transfer) are recomputed live and never trusted from storage - web does the same.
 export type InboxDraft = {
-  id?: string; payee?: string; amount?: number; date?: string; lineId: string; accountId?: string; orderNumber?: string; tags?: string[];
+  id?: string; payee?: string; amount?: number; date?: string; lineId: string; accountId?: string; orderNumber?: string; tags?: string[]; externalId?: string;
   isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; historyMatch?: boolean; accountHistoryMatch?: boolean; recurringId?: string;
   // Where the category came from; only trustworthy sources are ever auto-added to the ledger after an import.
   lineSource?: "refund" | "rule" | "history" | "ai-high" | "ai-low" | "manual" | "";
@@ -143,6 +147,8 @@ export type HouseholdState = {
   transactions: Transaction[];
   paychecks: Paycheck[];
   onboarding?: { dismissed: boolean };
+  // externalIds of linked-account rows already turned into drafts (capped), so a re-sync never imports one twice.
+  linkedImportedIds?: string[];
   paycheckOccurrences?: PaycheckOccurrence[];
   recurringExpenses: RecurringExpense[];
   calendar: { events: CalendarEvent[]; chores: Chore[] };

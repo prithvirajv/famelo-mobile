@@ -591,7 +591,23 @@ test("Bank stream import runs the AI pass against the latest state and only ever
   assert.match(apiSource, /suggestTransactionBatch:[\s\S]*?\/api\/transactions\/suggest-batch/);
   const bank = extractFunctionSource(app, "BankStream");
   assert.match(bank, /runAiImportPass\(newIds, asset\.name/);
-  assert.match(bank, /autoAcceptSafeDrafts\(stateRef\.current, draftIds\)/);
-  assert.match(bank, /applyAiSuggestions\(stateRef\.current, results\)/);
+  assert.match(bank, /runAiImport\(\(\) => stateRef\.current/);
   assert.match(bank, /if \(aiImport\)/, "the user can turn the AI pass off");
+  const pass = app.slice(app.indexOf("async function runAiImport("), app.indexOf("function BankStream("));
+  assert.match(pass, /autoAcceptSafeDrafts\(getState\(\), draftIds\)/);
+  assert.match(pass, /applyAiSuggestions\(getState\(\), results\)/);
+});
+
+
+test("Linked accounts: Wealth hosts the card, which syncs through the normal save and never stores or shows credentials", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const apiSource = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  for (const endpoint of ["/api/linked-accounts/simplefin", "/api/linked-accounts/snaptrade", "/mappings", "/sync", "/remote-accounts"]) assert.ok(apiSource.includes(endpoint), endpoint);
+  assert.match(extractFunctionSource(app, "Wealth"), /<LinkedAccountsCard state=\{state\} onSave=\{onSave\} \/>/);
+  const card = extractFunctionSource(app, "LinkedAccountsCard");
+  assert.match(card, /forcedAccountId: accountId/);
+  assert.match(card, /exceedsStateLimit\(working\)/, "a big first sync cannot push the household over the 1 MB save limit");
+  assert.match(card, /runAiImport\(\(\) => stateRef\.current/);
+  assert.match(card, /<OptionList title="Send this account to"/, "account choice is an inline list, not an Alert (Android allows only 3 buttons)");
+  assert.doesNotMatch(card, /accessUrl|userSecret|consumerKey/);
 });

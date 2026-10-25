@@ -1,4 +1,5 @@
 import type { AiSuggestion, ParsedBankRow } from "./bankStreamLogic";
+import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount, SyncPayload } from "./linkedAccountsLogic";
 import type { NoteUserShare, ReminderPhotoDraft, SharedNote, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://familyloop.net").replace(/\/$/, "");
@@ -102,6 +103,15 @@ export const api = {
     request<{ invitation?: { name: string; email: string; role: string; inviteCode?: string; householdName?: string }; invitations?: Array<{ name: string; email: string; role: string; inviteCode?: string; householdName?: string }>; email: { queued?: boolean; preview?: boolean } }>("/api/households/invitations", { method: "POST", body: JSON.stringify(body) }),
   setMemberAccessLevel: (email: string, accessLevel: "edit" | "view") => request<{ ok?: boolean }>("/api/households/access", { method: "PATCH", body: JSON.stringify({ email, accessLevel }) }),
   revokeMemberAccess: (email: string) => request<{ ok?: boolean; email: { queued?: boolean; preview?: boolean } }>("/api/households/access", { method: "DELETE", body: JSON.stringify({ email }) }),
+  // Linked accounts (SimpleFIN Bridge / SnapTrade): the server fetches and normalizes, the app applies the result to household state.
+  linkedAccounts: () => request<LinkedOverview>("/api/linked-accounts"),
+  linkSimplefin: (setupToken: string, label: string) => request<{ link: LinkedLink }>("/api/linked-accounts/simplefin", { method: "POST", body: JSON.stringify({ setupToken, label }) }),
+  linkSnaptrade: (label: string, redirectUrl: string) => request<{ link: LinkedLink; portalUrl: string }>("/api/linked-accounts/snaptrade", { method: "POST", body: JSON.stringify({ label, redirectUrl }) }),
+  linkedPortal: (id: string, redirectUrl: string) => request<{ portalUrl: string }>(`/api/linked-accounts/${id}/portal`, { method: "POST", body: JSON.stringify({ redirectUrl }) }),
+  linkedRemoteAccounts: (id: string) => request<{ accounts: RemoteAccount[] }>(`/api/linked-accounts/${id}/remote-accounts`),
+  setLinkedMappings: (id: string, mappings: Record<string, LinkedMapping>) => request<{ link: LinkedLink }>(`/api/linked-accounts/${id}/mappings`, { method: "PUT", body: JSON.stringify({ mappings }) }),
+  syncLinkedAccount: (id: string) => request<SyncPayload>(`/api/linked-accounts/${id}/sync`, { method: "POST", body: "{}" }),
+  removeLinkedAccount: (id: string) => request<{ ok: boolean }>(`/api/linked-accounts/${id}`, { method: "DELETE" }),
   copyDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/copy`, { method: "POST" }),
   openDocument: (documentId: string) => request<Document>(`/api/documents/${documentId}/open`, { method: "POST" })
 };

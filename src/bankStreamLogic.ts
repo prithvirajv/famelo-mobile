@@ -59,7 +59,7 @@ export function parseDelimitedText(text: string): string[][] {
 }
 
 // ---- CSV import ---------------------------------------------------------------------------------------------------
-export type ParsedBankRow = { date: string; payee: string; amount: number; isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; orderNumber?: string };
+export type ParsedBankRow = { date: string; payee: string; amount: number; isDeposit?: boolean; isPayment?: boolean; isPending?: boolean; orderNumber?: string; externalId?: string };
 
 function parseCsvAmount(value: unknown): number {
   const cleaned = String(value ?? "").replace(/[,$]/g, "").trim();
@@ -350,6 +350,8 @@ export function storedDraftAmount(displayValue: number, account: Account | undef
 export type BuildDraftsInput = {
   rows: ParsedBankRow[]; fileName: string; accountHint?: string; idPrefix: string; transactions: Transaction[]; existingDrafts: InboxDraft[];
   accounts: Account[]; rules?: Record<string, string>; createId: (prefix: string) => string;
+  // A linked-account feed already knows which Wealth account its rows belong to; skips the filename/content-hint guess.
+  forcedAccountId?: string;
 };
 export type BuildDraftsResult = { drafts: InboxDraft[]; matchedAccount: Account | null; duplicateCount: number; message: string };
 
@@ -358,7 +360,7 @@ export type BuildDraftsResult = { drafts: InboxDraft[]; matchedAccount: Account 
 // the most recent history for that exact payee, fill the line (and, with no file-level account, history fills the
 // account). New drafts go on top, in reverse file order (web unshifts each row).
 export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResult {
-  const matchedAccount = matchAccountByHints([input.accountHint, input.fileName], input.accounts);
+  const matchedAccount = input.forcedAccountId ? input.accounts.find((account) => account.id === input.forcedAccountId) || null : matchAccountByHints([input.accountHint, input.fileName], input.accounts);
   const alreadyKnown: Matchable[] = [...input.transactions, ...input.existingDrafts];
   const duplicateCount = input.rows.filter((row) => isDuplicateTransaction(row, alreadyKnown)).length;
   const refundPool: Matchable[] = [...alreadyKnown, ...input.rows];
@@ -373,7 +375,7 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
       id: input.createId(input.idPrefix), payee: row.payee, amount: row.amount,
       lineId: refund?.lineId || ruleLineId || historyLineId || "", accountId: matchedAccount?.id || historyAccountId || "",
       lineSource: refund?.lineId ? "refund" : ruleLineId ? "rule" : historyLineId ? "history" : "",
-      date: row.date, orderNumber: row.orderNumber || "", isDeposit: Boolean(row.isDeposit), isPayment: Boolean(row.isPayment), isPending: Boolean(row.isPending),
+      date: row.date, orderNumber: row.orderNumber || "", externalId: row.externalId || "", isDeposit: Boolean(row.isDeposit), isPayment: Boolean(row.isPayment), isPending: Boolean(row.isPending),
       historyMatch: Boolean(!refund && !ruleLineId && historyLineId), accountHistoryMatch: Boolean(!matchedAccount && historyAccountId)
     });
   });
@@ -434,7 +436,8 @@ export function acceptDraft(state: HouseholdState, draftId: string): ActionResul
   const lineId = draft.lineId || "";
   const transaction: Transaction = {
     date: draft.date || "", payee: draft.payee || "", amount: Number(draft.amount), lineId, memo: draft.recurringId ? "Recurring bill" : "Accepted bank stream item",
-    accountId: draft.accountId || "", orderNumber: draft.orderNumber || "", tags: draft.tags || [], ...lineSnapshot(state, lineId)
+    accountId: draft.accountId || "", orderNumber: draft.orderNumber || "", tags: draft.tags || [], ...lineSnapshot(state, lineId),
+    ...(draft.externalId ? { externalId: draft.externalId } : {})
   };
   const label = lineId ? `${transaction.categoryName} - ${transaction.subcategoryName}` : "no category";
   return { ok: true, state: {

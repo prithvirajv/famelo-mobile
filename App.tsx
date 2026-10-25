@@ -46,6 +46,8 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, simplefinSummary } from "./src/linkedAccountsLogic";
+import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
@@ -2737,6 +2739,33 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
   </Page>;
 }
 
+// After an import (a file, or a linked-account sync): AI fills the category/account history could not (one call per chunk of rows), then
+// rows that are safe go straight into the ledger and the rest stay in Bank stream for review. Failures leave every row for review and
+// say why. Reads the latest state through getState because it runs across awaits; returns the summary message.
+async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void): Promise<string> {
+  let filled = 0; let aiNote = "";
+  try {
+    const needAi = draftsNeedingAi(getState(), draftIds);
+    const budgetLines = allBudgetLines(getState());
+    if (needAi.length && budgetLines.length) {
+      setStatus(`Imported ${importedCount} from ${fileName}. AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
+      const lineOptions = budgetLines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }));
+      const accountOptions = (getState().accounts || []).filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: account.type ? `${account.name} (${account.type})` : account.name }));
+      for (let start = 0; start < needAi.length; start += AI_IMPORT_CHUNK_SIZE) {
+        const chunk = needAi.slice(start, start + AI_IMPORT_CHUNK_SIZE);
+        const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions);
+        const applied = applyAiSuggestions(getState(), results);
+        if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
+      }
+    }
+  } catch (cause) {
+    aiNote = ` AI categorization wasn't available (${cause instanceof Error ? cause.message : "unknown error"}) - rows were left for review.`;
+  }
+  const posted = autoAcceptSafeDrafts(getState(), draftIds);
+  if (posted.added) await onSave(posted.state);
+  return importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote);
+}
+
 // The inbox of unreviewed bank/credit-card rows: import a statement (CSV or PDF), review each row (category, account,
 // duplicate/refund/transfer hints), then accept it into the ledger, move it to Transfers, or dismiss it. Every change goes
 // through the pure functions in src/bankStreamLogic.ts and is saved as a whole-state save. Not here yet (web-only): the
@@ -2780,30 +2809,9 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     return true;
   };
 
-  // After an import: AI fills the category/account history could not (one call per chunk of rows), then rows that are safe go
-  // straight into the ledger; the rest stay here for review. Failures leave every row for review and say why.
   const runAiImportPass = async (draftIds: string[], fileName: string, importedCount: number) => {
-    let filled = 0; let aiNote = "";
-    try {
-      const needAi = draftsNeedingAi(stateRef.current, draftIds);
-      const budgetLines = allBudgetLines(stateRef.current);
-      if (needAi.length && budgetLines.length) {
-        setFeedback(`Imported ${importedCount} from ${fileName}. AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
-        const lineOptions = budgetLines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }));
-        const accountOptions = (stateRef.current.accounts || []).filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: account.type ? `${account.name} (${account.type})` : account.name }));
-        for (let start = 0; start < needAi.length; start += AI_IMPORT_CHUNK_SIZE) {
-          const chunk = needAi.slice(start, start + AI_IMPORT_CHUNK_SIZE);
-          const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions);
-          const applied = applyAiSuggestions(stateRef.current, results);
-          if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
-        }
-      }
-    } catch (cause) {
-      aiNote = ` AI categorization wasn't available (${cause instanceof Error ? cause.message : "unknown error"}) - rows were left for review.`;
-    }
-    const posted = autoAcceptSafeDrafts(stateRef.current, draftIds);
-    if (posted.added) await onSave(posted.state);
-    setFeedback(importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote));
+    const message = await runAiImport(() => stateRef.current, onSave, draftIds, fileName, importedCount, setFeedback);
+    setFeedback(message);
   };
 
   const importFile = async () => {
@@ -3576,6 +3584,211 @@ function HoldingsEditor({ state, groupId, currency, quoteFeedback, refreshingIds
 // Stock/fund holdings: grouped by account with gain/loss, editable (HoldingsEditor) with live price refresh on
 // demand. Out of scope (see the mobile catch-up plan): web's 5-minute background price polling (a phone
 // shouldn't poll silently), multi-currency display, and debt-to-budget-line auto-EMI linking.
+// Linked accounts (SimpleFIN Bridge bank/card feeds, SnapTrade brokerage positions) on the Wealth screen. The server only fetches; a sync
+// is applied here - new transactions become Bank stream drafts (then AI categorization and the safe auto-add), mapped balances are brought
+// in line with the bank, and brokerage positions merge into holdings - and saved with the normal whole-state save. Read-only.
+function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void> }) {
+  const [overview, setOverview] = useState<LinkedOverview | null>(null);
+  const [feedback, setFeedback] = useState("");
+  const [busyId, setBusyId] = useState("");
+  const [token, setToken] = useState(""); const [label, setLabel] = useState("");
+  const [mapping, setMapping] = useState<{ linkId: string; remote: RemoteAccount[]; choices: Record<string, string> } | null>(null);
+  const [picking, setPicking] = useState<string | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const autoSynced = useRef(false);
+
+  const reload = useCallback(async () => {
+    try { const next = await api.linkedAccounts(); setOverview(next); return next; }
+    catch { const next: LinkedOverview = { configured: false, providers: {}, links: [] }; setOverview(next); return next; }
+  }, []);
+  useEffect(() => { void reload(); }, [reload]);
+
+  const sync = async (link: LinkedLink, quiet = false) => {
+    if (busyId) return;
+    setBusyId(link.id);
+    if (!quiet) setFeedback(`Syncing ${link.label}...`);
+    try {
+      const payload = await api.syncLinkedAccount(link.id);
+      let summary: string;
+      if (payload.provider === "simplefin") {
+        const current = stateRef.current;
+        const { fresh, unmapped } = selectNewLinkedTransactions(payload.transactions || [], link.mappings, knownLinkedIds(current));
+        const posted = fresh.filter((transaction) => !transaction.pending);
+        let working = current;
+        const newDraftIds: string[] = [];
+        const byAccount = new Map<string, typeof posted>();
+        posted.forEach((transaction) => byAccount.set(transaction.accountId, [...(byAccount.get(transaction.accountId) || []), transaction]));
+        byAccount.forEach((rows, accountId) => {
+          const built = buildBankStreamDrafts({
+            rows: rows.map((row) => ({ date: row.date, payee: row.payee, amount: row.amount, externalId: row.externalId })), fileName: link.label, idPrefix: "linked-import",
+            transactions: working.transactions, existingDrafts: working.transactionInboxDrafts || [], accounts: working.accounts || [], rules: working.transactionCategorizationRules, createId: uniqueId, forcedAccountId: accountId
+          });
+          const existing = new Set((working.transactionInboxDrafts || []).map((draft) => draft.id));
+          built.drafts.forEach((draft) => { if (draft.id && !existing.has(draft.id)) newDraftIds.push(draft.id); });
+          working = { ...working, transactionInboxDrafts: built.drafts };
+        });
+        working = { ...working, linkedImportedIds: rememberLinkedImportedIds(working.linkedImportedIds, posted.map((row) => row.externalId)) };
+        const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0);
+        working = reconciled.state;
+        if (exceedsStateLimit(working)) throw new Error("Importing these would push your household data past the 1 MB the server can save. Review or clear some Bank stream rows first.");
+        summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || []);
+        working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
+        await onSave(working);
+        if (newDraftIds.length) summary += ` ${await runAiImport(() => stateRef.current, onSave, newDraftIds, link.label, newDraftIds.length, () => undefined)}`;
+      } else {
+        const merged = mergeBrokeragePositions((stateRef.current.goals?.netWorth?.assets || []), { linkId: link.id, positions: payload.positions || [], cash: payload.cash || {}, accounts: payload.accounts, mappings: link.mappings }, uniqueId);
+        summary = `${link.label}: ${merged.added} holding${merged.added === 1 ? "" : "s"} added, ${merged.updated} updated, ${merged.removed} removed.`;
+        const latest = stateRef.current;
+        await onSave({ ...latest, goals: { ...latest.goals, netWorth: { liabilities: [], ...latest.goals?.netWorth, assets: merged.assets } }, household: { ...latest.household, activity: [summary, ...(latest.household.activity || [])] } });
+      }
+      if (!quiet || /new transaction|added|updated|removed/.test(summary)) setFeedback(summary);
+    } catch (cause) {
+      setFeedback(`${link.label}: ${cause instanceof Error ? cause.message : "Sync failed"}`);
+    } finally {
+      setBusyId("");
+      await reload();
+    }
+  };
+
+  // Quietly refresh stale links the first time the card has loaded (once per visit).
+  useEffect(() => {
+    if (autoSynced.current || !overview?.configured) return;
+    autoSynced.current = true;
+    const stale = overview.links.filter((link) => linkNeedsAutoSync(link));
+    void stale.reduce((chain, link) => chain.then(() => sync(link, true)), Promise.resolve());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overview]);
+
+  const openMapping = async (link: LinkedLink) => {
+    try {
+      const { accounts } = await api.linkedRemoteAccounts(link.id);
+      const choices: Record<string, string> = {};
+      accounts.forEach((remote) => { const existing = link.mappings[remote.remoteId]; choices[remote.remoteId] = existing ? (existing.accountId || existing.groupId || "skip") : "skip"; });
+      setMapping({ linkId: link.id, remote: accounts, choices });
+      setFeedback("");
+    } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not load the accounts"); }
+    await reload();
+  };
+
+  const linkBank = async () => {
+    if (!token.trim()) return Alert.alert("Missing info", "Paste the setup token from SimpleFIN Bridge.");
+    setBusyId("new");
+    try {
+      const { link } = await api.linkSimplefin(token.trim(), label.trim());
+      setToken(""); setLabel("");
+      const next = await reload();
+      await openMapping(next.links.find((item) => item.id === link.id) || link);
+    } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not link that token"); }
+    finally { setBusyId(""); }
+  };
+
+  const connectBrokerage = async () => {
+    try {
+      const { portalUrl } = await api.linkSnaptrade("Brokerage", "familyloop://wealth");
+      setFeedback("Finish connecting in the browser, then come back and tap Choose accounts on the new link.");
+      await reload();
+      await Linking.openURL(portalUrl);
+    } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not start the connection"); }
+  };
+
+  const addBrokerage = async (link: LinkedLink) => {
+    try { const { portalUrl } = await api.linkedPortal(link.id, "familyloop://wealth"); await Linking.openURL(portalUrl); }
+    catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not open the connection"); }
+  };
+
+  const confirmRemove = (link: LinkedLink) => Alert.alert(`Unlink "${link.label}"?`, "Transactions and holdings already imported stay; nothing new will arrive.", [{ text: "Cancel" }, { text: "Unlink", style: "destructive", onPress: () => void (async () => {
+    try { await api.removeLinkedAccount(link.id); if (mapping?.linkId === link.id) setMapping(null); setFeedback("Unlinked."); }
+    catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not unlink"); }
+    await reload();
+  })() }]);
+
+  const saveMapping = async () => {
+    if (!mapping) return;
+    const link = overview?.links.find((item) => item.id === mapping.linkId);
+    if (!link) return;
+    let working = stateRef.current;
+    const mappings: Record<string, LinkedMapping> = {};
+    mapping.remote.forEach((remote) => {
+      const choice = mapping.choices[remote.remoteId] || "skip";
+      if (choice === "skip") return;
+      if (link.provider === "snaptrade") {
+        const group = choice === "new" ? null : groupStockHoldings((working.goals?.netWorth?.assets || [])).find((item) => item.groupId === choice);
+        mappings[remote.remoteId] = group ? { groupId: group.groupId, groupName: group.groupName } : { groupName: remote.name };
+      } else if (choice === "new") {
+        const isCard = remote.balance !== null && remote.balance < 0;
+        const name = remote.orgName ? `${remote.orgName} ${remote.name}` : remote.name;
+        const account: Account = { id: uniqueId(name), name, type: isCard ? "credit_card" : "checking", openingBalance: 0, netWorthAssetId: "", netWorthLiabilityId: "", createdAt: localDateKey() };
+        working = { ...working, accounts: [...(working.accounts || []), account] };
+        mappings[remote.remoteId] = { accountId: account.id };
+      } else {
+        mappings[remote.remoteId] = { accountId: choice };
+      }
+    });
+    try {
+      if (working !== stateRef.current) await onSave(working);
+      const { link: updated } = await api.setLinkedMappings(link.id, mappings);
+      setMapping(null);
+      await reload();
+      await sync({ ...link, ...updated, mappings: updated.mappings });
+    } catch (cause) { setFeedback(cause instanceof Error ? cause.message : "Could not save"); }
+  };
+
+  if (!overview) return <Card><Text style={styles.cardTitle}>Linked accounts</Text><ActivityIndicator color={colors.green} /></Card>;
+  if (!overview.configured) return null;
+  const activeLink = mapping ? overview.links.find((item) => item.id === mapping.linkId) : null;
+  const optionsFor = (remote: RemoteAccount): PickerOption[] => {
+    const set = (value: string) => setMapping((prev) => prev ? { ...prev, choices: { ...prev.choices, [remote.remoteId]: value } } : prev);
+    if (activeLink?.provider === "snaptrade") {
+      return [{ label: "Don't track", onPress: () => set("skip") }, { label: "New holdings group", onPress: () => set("new") }, ...groupStockHoldings((state.goals?.netWorth?.assets || [])).map((group) => ({ label: group.groupName, onPress: () => set(group.groupId) }))];
+    }
+    return [{ label: "Don't import", onPress: () => set("skip") }, { label: "New Wealth account", onPress: () => set("new") }, ...(state.accounts || []).filter((account) => !account.closedAt).map((account) => ({ label: account.name, onPress: () => set(account.id) }))];
+  };
+  const choiceLabel = (remote: RemoteAccount): string => {
+    const choice = mapping?.choices[remote.remoteId] || "skip";
+    if (choice === "skip") return activeLink?.provider === "snaptrade" ? "Don't track" : "Don't import";
+    if (choice === "new") return activeLink?.provider === "snaptrade" ? "New holdings group" : "New Wealth account";
+    return (state.accounts || []).find((account) => account.id === choice)?.name || groupStockHoldings((state.goals?.netWorth?.assets || [])).find((group) => group.groupId === choice)?.groupName || "Chosen";
+  };
+
+  return <Card>
+    <Text style={styles.cardTitle}>Linked accounts</Text>
+    <Text style={styles.muted}>Pull balances and new transactions from a bank or card (SimpleFIN Bridge) and holdings from a brokerage (SnapTrade). Read-only - FamilyLoop can never move money or place trades.</Text>
+    {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
+    {overview.links.map((link) => <View key={link.id} style={[styles.row, { flexDirection: "column", alignItems: "stretch" }]}>
+      <Text style={styles.rowTitle}>{link.label}</Text>
+      <Text style={styles.rowDetail}>{link.provider === "snaptrade" ? "Brokerage (SnapTrade)" : "Bank (SimpleFIN)"} · {linkedStatusText(link, (iso) => new Date(iso).toLocaleString())}</Text>
+      <View style={styles.actionRow}>
+        <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => void sync(link)}><Text style={styles.secondaryButtonText}>{busyId === link.id ? "Working..." : "Sync now"}</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => void openMapping(link)}><Text style={styles.secondaryButtonText}>Choose accounts</Text></Pressable>
+        {link.provider === "snaptrade" ? <Pressable style={styles.secondarySmall} onPress={() => void addBrokerage(link)}><Text style={styles.secondaryButtonText}>Add brokerage</Text></Pressable> : null}
+        <Pressable accessibilityLabel={`Unlink ${link.label}`} hitSlop={8} onPress={() => confirmRemove(link)}><Ionicons name="close" size={20} color={colors.coral} /></Pressable>
+      </View>
+    </View>)}
+    {mapping && activeLink ? <View style={styles.subtaskList}>
+      <Text style={styles.label}>Where should each account go?</Text>
+      {mapping.remote.length ? mapping.remote.map((remote) => <View key={remote.remoteId}>
+        <Text style={styles.rowTitle}>{remote.name}</Text>
+        <Text style={styles.rowDetail}>{remote.orgName}{remote.balance !== null ? ` · ${money(remote.balance, state.household.currency)}` : ""}</Text>
+        <Pressable style={styles.secondarySmall} onPress={() => setPicking(picking === remote.remoteId ? null : remote.remoteId)}><Text style={styles.secondaryButtonText}>{choiceLabel(remote)}</Text></Pressable>
+        {picking === remote.remoteId ? <OptionList title="Send this account to" options={optionsFor(remote)} onClose={() => setPicking(null)} /> : null}
+      </View>) : <Text style={styles.muted}>No accounts found yet.{activeLink.provider === "snaptrade" ? " Finish connecting in the browser, then choose accounts again." : ""}</Text>}
+      <View style={styles.actionRow}>
+        <Pressable style={[styles.primaryButton, { flex: 1, marginTop: 0 }]} onPress={() => void saveMapping()}><Text style={styles.primaryButtonText}>Save and sync</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => { setMapping(null); setPicking(null); }}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
+      </View>
+    </View> : null}
+    {overview.providers.simplefin ? <View>
+      <Text style={styles.label}>Link a bank (SimpleFIN setup token)</Text>
+      <TextInput style={styles.input} value={token} onChangeText={setToken} placeholder="Paste the token from bridge.simplefin.org" autoCapitalize="none" autoCorrect={false} />
+      <TextInput style={styles.input} value={label} onChangeText={setLabel} placeholder="Name (optional)" />
+      <Pressable style={styles.secondarySmall} disabled={busyId === "new"} onPress={() => void linkBank()}><Text style={styles.secondaryButtonText}>{busyId === "new" ? "Linking..." : "Link a bank"}</Text></Pressable>
+      <Text style={styles.muted}>Create a token at bridge.simplefin.org (about $15/year); each token works once.</Text>
+    </View> : null}
+    {overview.providers.snaptrade ? <Pressable style={styles.secondarySmall} onPress={() => void connectBrokerage()}><Text style={styles.secondaryButtonText}>Connect a brokerage</Text></Pressable> : null}
+  </Card>;
+}
+
 function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; onBack: () => void }) {
   const currency = state.household.currency;
   const today = () => localDateKey();
@@ -3853,6 +4066,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
 
   return <Page>
     <SubScreenHeader title="Wealth" onBack={onBack} />
+    <LinkedAccountsCard state={state} onSave={onSave} />
 
     <Card>
       <Text style={styles.cardTitle}>Net worth</Text>
