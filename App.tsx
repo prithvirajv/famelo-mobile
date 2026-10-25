@@ -46,7 +46,7 @@ import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3657,16 +3657,17 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
   }, []);
   useEffect(() => { void reload(); }, [reload]);
 
-  const sync = async (link: LinkedLink, quiet = false) => {
+  const [historyFrom, setHistoryFrom] = useState(`${new Date().getFullYear()}-01-01`);
+  const sync = async (link: LinkedLink, quiet = false, sinceDate = "") => {
     if (busyId) return;
     setBusyId(link.id);
     if (!quiet) setFeedback(`Syncing ${link.label}...`);
     try {
-      const payload = await api.syncLinkedAccount(link.id);
+      const payload = await api.syncLinkedAccount(link.id, sinceDate || undefined);
       let summary: string;
       if (payload.provider === "simplefin") {
         const current = stateRef.current;
-        const { fresh, unmapped } = selectNewLinkedTransactions(payload.transactions || [], link.mappings, knownLinkedIds(current));
+        const { fresh, unmapped } = selectNewLinkedTransactions(payload.transactions || [], link.mappings, knownLinkedIds(current, !sinceDate));
         const posted = fresh.filter((transaction) => !transaction.pending);
         let working = current;
         const newDraftIds: string[] = [];
@@ -3702,7 +3703,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
           working = { ...working, goals: { ...working.goals, debts: matched.debts, netWorth: { assets: [], ...working.goals?.netWorth, liabilities: matched.liabilities } } };
           debtsMatched += 1;
         });
-        if (exceedsStateLimit(working)) throw new Error("Importing these would push your household data past the 1 MB the server can save. Review or clear some Bank stream rows first.");
+        if (exceedsStateLimit(working) || !historyImportFits(JSON.stringify(current).length, posted.length)) throw new Error(`Importing ${posted.length} transactions would push your household data past the 1 MB the server can save. Import a shorter range (a later start date), or clean up old transactions first.`);
         summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched, debtsMatched);
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
         await onSave(working);
@@ -3732,6 +3733,11 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     void stale.reduce((chain, link) => chain.then(() => sync(link, true)), Promise.resolve());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overview]);
+
+  const importHistory = (link: LinkedLink) => {
+    if (!isRealDateKey(historyFrom.trim())) return Alert.alert("Pick a date", "Enter the day to import from as YYYY-MM-DD.");
+    Alert.alert("Import history?", `Fetch every transaction from ${historyFrom.trim()} onward for the accounts you chose. New rows go to Bank stream (AI categorization and safe auto-add apply), and rows you removed earlier come back.`, [{ text: "Cancel" }, { text: "Import", onPress: () => void sync(link, false, historyFrom.trim()) }]);
+  };
 
   const openMapping = async (link: LinkedLink) => {
     try {
@@ -3851,6 +3857,14 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         {link.provider === "snaptrade" ? <Pressable style={styles.secondarySmall} onPress={() => void addBrokerage(link)}><Text style={styles.secondaryButtonText}>Add brokerage</Text></Pressable> : null}
         <Pressable accessibilityLabel={`Unlink ${link.label}`} hitSlop={8} onPress={() => confirmRemove(link)}><Ionicons name="close" size={20} color={colors.coral} /></Pressable>
       </View>
+      {link.provider === "simplefin" && Object.keys(link.mappings || {}).length ? <View>
+        <Text style={styles.label}>Import older transactions from</Text>
+        <View style={styles.actionRow}>
+          <TextInput style={[styles.input, { flex: 1 }]} value={historyFrom} onChangeText={setHistoryFrom} placeholder="YYYY-MM-DD" autoCapitalize="none" />
+          <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => importHistory(link)}><Text style={styles.secondaryButtonText}>Import history</Text></Pressable>
+        </View>
+        <Text style={styles.muted}>How far back it goes depends on the bank (often 3-12 months). Rows you already have are skipped; rows you removed with Clean up come back.</Text>
+      </View> : null}
     </View>)}
     {mapping && activeLink ? <View style={styles.subtaskList}>
       <Text style={styles.label}>Where should each account go?</Text>

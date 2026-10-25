@@ -64,8 +64,10 @@ export function rememberLinkedImportedIds(existingIds: string[] | undefined, new
   return merged.length > LINKED_IMPORTED_ID_LIMIT ? merged.slice(merged.length - LINKED_IMPORTED_ID_LIMIT) : merged;
 }
 
-export function knownLinkedIds(state: Pick<HouseholdState, "linkedImportedIds" | "transactions" | "transactionInboxDrafts">): string[] {
-  return [...(state.linkedImportedIds || []), ...state.transactions.map((t) => t.externalId).filter((id): id is string => Boolean(id)), ...(state.transactionInboxDrafts || []).map((d) => d.externalId).filter((id): id is string => Boolean(id))];
+// includeRemembered=false is for an explicit history import: rows imported before and since removed (Clean up, dismissed) come back, and only
+// what is currently in the ledger or waiting in Bank stream is skipped.
+export function knownLinkedIds(state: Pick<HouseholdState, "linkedImportedIds" | "transactions" | "transactionInboxDrafts">, includeRemembered = true): string[] {
+  return [...(includeRemembered ? state.linkedImportedIds || [] : []), ...state.transactions.map((t) => t.externalId).filter((id): id is string => Boolean(id)), ...(state.transactionInboxDrafts || []).map((d) => d.externalId).filter((id): id is string => Boolean(id))];
 }
 
 // Rows still waiting in Bank stream count toward an account's balance (accepting one later changes nothing). A card tracks the amount owed.
@@ -190,4 +192,16 @@ export function waitingBanner(links: Array<Pick<LinkedLink, "stagedCount" | "has
   const waiting = links.filter((link) => link.status === "active" && link.hasStaged).reduce((sum, link) => sum + Number(link.stagedCount || 0), 0);
   if (!waiting) return "";
   return `${waiting} bank transaction${waiting === 1 ? "" : "s"} fetched overnight - tap to review`;
+}
+
+// Whether a pull of this many rows still leaves the household inside the server's ~1 MB save limit (a row is roughly 400 bytes saved).
+export function historyImportFits(currentStateBytes: number, rowCount: number, softLimitBytes = 900_000): boolean {
+  return currentStateBytes + rowCount * 400 <= softLimitBytes;
+}
+
+export function isRealDateKey(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return date.getUTCMonth() === Number(match[2]) - 1 && date.getUTCDate() === Number(match[3]);
 }

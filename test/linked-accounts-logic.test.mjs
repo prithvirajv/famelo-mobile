@@ -172,3 +172,17 @@ test("nightly staged data triggers an auto-sync regardless of recency, and the a
   assert.equal(waitingBanner([{ status: "active", hasStaged: true, stagedCount: 1 }]), "1 bank transaction fetched overnight - tap to review");
   assert.equal(waitingBanner([{ status: "active", hasStaged: true, stagedCount: 2 }, { status: "active", hasStaged: true, stagedCount: 3 }, { status: "needs_reconnect", hasStaged: true, stagedCount: 9 }]), "5 bank transactions fetched overnight - tap to review");
 });
+
+import { historyImportFits, isRealDateKey } from "../src/linkedAccountsLogic.ts";
+
+test("a history import skips only rows already in the ledger or Bank stream (removed ones come back), fits the save limit, and needs a real date", () => {
+  const state = { linkedImportedIds: ["sf:A:removed"], transactions: [{ externalId: "sf:A:ledger" }], transactionInboxDrafts: [{ externalId: "sf:A:draft" }] };
+  assert.deepEqual(knownLinkedIds(state).sort(), ["sf:A:draft", "sf:A:ledger", "sf:A:removed"]);
+  assert.deepEqual(knownLinkedIds(state, false).sort(), ["sf:A:draft", "sf:A:ledger"]);
+  const rows = ["removed", "ledger", "draft", "new"].map((id) => ({ externalId: `sf:A:${id}`, remoteAccountId: "A", amount: 1 }));
+  assert.deepEqual(selectNewLinkedTransactions(rows, { A: { accountId: "x" } }, knownLinkedIds(state)).fresh.map((r) => r.externalId), ["sf:A:new"], "an ordinary sync does not resurrect removed rows");
+  assert.deepEqual(selectNewLinkedTransactions(rows, { A: { accountId: "x" } }, knownLinkedIds(state, false)).fresh.map((r) => r.externalId), ["sf:A:removed", "sf:A:new"], "a history import does");
+  assert.equal(historyImportFits(100_000, 1000), true);
+  assert.equal(historyImportFits(600_000, 1000), false);
+  assert.deepEqual(["2026-01-01", "2026-02-30", "01/01/2026", ""].map(isRealDateKey), [true, false, false, false]);
+});

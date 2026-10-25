@@ -110,7 +110,8 @@ export const api = {
   linkedPortal: (id: string, redirectUrl: string) => request<{ portalUrl: string }>(`/api/linked-accounts/${id}/portal`, { method: "POST", body: JSON.stringify({ redirectUrl }) }),
   linkedRemoteAccounts: (id: string) => request<{ accounts: RemoteAccount[] }>(`/api/linked-accounts/${id}/remote-accounts`),
   setLinkedMappings: (id: string, mappings: Record<string, LinkedMapping>) => request<{ link: LinkedLink }>(`/api/linked-accounts/${id}/mappings`, { method: "PUT", body: JSON.stringify({ mappings }) }),
-  syncLinkedAccount: (id: string) => request<SyncPayload>(`/api/linked-accounts/${id}/sync`, { method: "POST", body: "{}" }),
+  // sinceDate (YYYY-MM-DD) asks for an explicit history import instead of "since the last sync".
+  syncLinkedAccount: (id: string, sinceDate?: string) => request<SyncPayload>(`/api/linked-accounts/${id}/sync`, { method: "POST", body: JSON.stringify(sinceDate ? { sinceDate } : {}) }),
   // Tells the server a sync's result is saved, so it can drop what it had staged (it keeps it until then, so a failed save loses nothing).
   ackLinkedSync: (id: string, stagedAt: string) => request<{ ok: boolean }>(`/api/linked-accounts/${id}/ack`, { method: "POST", body: JSON.stringify({ stagedAt }) }),
   removeLinkedAccount: (id: string) => request<{ ok: boolean }>(`/api/linked-accounts/${id}`, { method: "DELETE" }),
