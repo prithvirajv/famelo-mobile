@@ -713,3 +713,45 @@ export function importSummary(fileName: string, importedCount: number, filled: n
   const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([reason, count]) => `${count} ${reason}`).join(", ");
   return `Imported ${importedCount} from ${fileName}.${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
 }
+
+// ---- Clean up old transactions ------------------------------------------------------------------------------------
+// Mirrors web: finds (and removes) ledger transactions and/or waiting Bank stream rows dated before a cutoff ("" = every date). Pure and
+// non-mutating so the screen can preview the counts, offer a CSV backup of exactly what would go, then apply the result.
+export type CleanupOptions = { before: string; includeLedger: boolean; includeStream: boolean };
+export type CleanupPreview = { ledger: Transaction[]; stream: InboxDraft[]; ledgerCount: number; streamCount: number; oldest: string; newest: string };
+
+export function previewTransactionCleanup(state: Pick<HouseholdState, "transactions" | "transactionInboxDrafts">, options: CleanupOptions): CleanupPreview {
+  const inRange = (item: { date?: string }) => !options.before || String(item.date || "") < options.before;
+  const ledger = options.includeLedger ? state.transactions.filter(inRange) : [];
+  const stream = options.includeStream ? (state.transactionInboxDrafts || []).filter(inRange) : [];
+  const dates = [...ledger, ...stream].map((item) => String(item.date || "")).filter(Boolean).sort();
+  return { ledger, stream, ledgerCount: ledger.length, streamCount: stream.length, oldest: dates[0] || "", newest: dates[dates.length - 1] || "" };
+}
+
+export function applyTransactionCleanup(state: HouseholdState, options: CleanupOptions): { state: HouseholdState; removedLedger: number; removedStream: number } {
+  const preview = previewTransactionCleanup(state, options);
+  const drop = new Set<unknown>([...preview.ledger, ...preview.stream]);
+  return {
+    state: { ...state, transactions: state.transactions.filter((item) => !drop.has(item)), transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((item) => !drop.has(item)) },
+    removedLedger: preview.ledgerCount, removedStream: preview.streamCount
+  };
+}
+
+function csvCell(value: unknown): string {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export function removedTransactionsCsv(preview: CleanupPreview, accountNameOf: (id: string | undefined) => string): string {
+  const rows: Array<[string, Transaction | InboxDraft]> = [...preview.ledger.map((item): [string, Transaction] => ["Ledger", item]), ...preview.stream.map((item): [string, InboxDraft] => ["Bank stream", item])];
+  const header = ["Source", "Date", "Payee", "Amount", "Category", "Subcategory", "Account", "Memo", "Tags"];
+  const lines = rows.map(([source, item]) => {
+    const extra = item as Transaction;
+    return [source, item.date, item.payee, item.amount, extra.categoryName || "", extra.subcategoryName || "", accountNameOf(item.accountId), extra.memo || "", (item.tags || []).join("; ")].map(csvCell).join(",");
+  });
+  return [header.join(","), ...lines].join("\n");
+}
+
+export function cleanupSummary(removedLedger: number, removedStream: number): string {
+  return `Removed ${removedLedger} ledger transaction${removedLedger === 1 ? "" : "s"} and ${removedStream} Bank stream row${removedStream === 1 ? "" : "s"}.`;
+}

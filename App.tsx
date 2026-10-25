@@ -57,7 +57,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -2795,6 +2795,34 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   useEffect(() => { void AsyncStorage.getItem("familyloop-ai-import").then((value) => { if (value === "off") setAiImport(false); }).catch(() => undefined); }, []);
   const changeAiImport = (enabled: boolean) => { setAiImport(enabled); void AsyncStorage.setItem("familyloop-ai-import", enabled ? "on" : "off").catch(() => undefined); };
 
+  // Clean up old transactions: permanently removes ledger rows and/or waiting Bank stream rows dated before a day (or every date), after a
+  // preview, an optional CSV backup of exactly what goes, and a confirmation. Linked accounts re-match the bank on their next sync.
+  const [cleanup, setCleanup] = useState({ before: "", all: false, ledger: true, stream: true, backup: true });
+  const cleanupOptions = { before: cleanup.all ? "" : cleanup.before.trim(), includeLedger: cleanup.ledger, includeStream: cleanup.stream };
+  const cleanupReady = (cleanup.all || /^\d{4}-\d{2}-\d{2}$/.test(cleanup.before.trim())) && (cleanup.ledger || cleanup.stream);
+  const cleanupPreview = cleanupReady ? previewTransactionCleanup(state, cleanupOptions) : null;
+  const runCleanup = () => {
+    if (!cleanupPreview) return Alert.alert("Choose what to clean up", "Enter a date as YYYY-MM-DD (or tick Every date) and pick ledger rows, Bank stream rows, or both.");
+    if (!cleanupPreview.ledgerCount && !cleanupPreview.streamCount) return Alert.alert("Nothing matches", "No rows match that cleanup.");
+    Alert.alert("Remove these transactions?", `This permanently removes ${cleanupPreview.ledgerCount} ledger transaction${cleanupPreview.ledgerCount === 1 ? "" : "s"} and ${cleanupPreview.streamCount} Bank stream row${cleanupPreview.streamCount === 1 ? "" : "s"} dated ${cleanupOptions.before ? `before ${cleanupOptions.before}` : "on any date"} (${cleanupPreview.oldest} to ${cleanupPreview.newest}). ${cleanup.backup ? "A CSV backup is offered first." : "No backup will be made."}`, [
+      { text: "Cancel" },
+      { text: "Remove permanently", style: "destructive", onPress: () => void (async () => {
+        try {
+          if (cleanup.backup) {
+            const csv = removedTransactionsCsv(cleanupPreview, (id) => (state.accounts || []).find((account) => account.id === id)?.name || "");
+            const name = `familyloop-removed-transactions-${localDateKey()}.csv`;
+            // iOS can share a real file; Android's share sheet only takes text, so it gets the CSV as text.
+            if (Platform.OS === "ios" && FileSystem.cacheDirectory) { const uri = `${FileSystem.cacheDirectory}${name}`; await FileSystem.writeAsStringAsync(uri, csv); await Share.share({ url: uri, title: name }); }
+            else await Share.share({ title: name, message: csv });
+          }
+          const result = applyTransactionCleanup(stateRef.current, cleanupOptions);
+          await onSave({ ...result.state, household: { ...result.state.household, activity: [cleanupSummary(result.removedLedger, result.removedStream), ...(result.state.household.activity || [])] } });
+          setFeedback(`${cleanupSummary(result.removedLedger, result.removedStream)} Open Wealth and tap Sync now to re-match linked account balances.`);
+        } catch (cause) { Alert.alert("Could not clean up", cause instanceof Error ? cause.message : "Try again"); }
+      })() }
+    ]);
+  };
+
   // A recurring bill that came due since the last visit becomes a draft to review (the shared save does this too; this catches
   // time passing while nothing was being saved).
   useEffect(() => {
@@ -2938,6 +2966,17 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         <Text style={[styles.rowDetail, { flex: 1 }]}>Use AI to categorize imports and add confident rows to the ledger</Text>
       </Pressable>
       {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>Clean up old transactions</Text>
+      <Text style={styles.muted}>Permanently remove ledger transactions and/or waiting Bank stream rows from before a date. A CSV backup of exactly what goes is offered first.</Text>
+      <TextInput style={styles.input} value={cleanup.before} editable={!cleanup.all} onChangeText={(before) => setCleanup({ ...cleanup, before })} placeholder="Remove everything before (YYYY-MM-DD)" autoCapitalize="none" />
+      {([["all", "Every date (remove them all)"], ["ledger", "Ledger transactions"], ["stream", "Bank stream rows"], ["backup", "Share a CSV backup first"]] as const).map(([key, label]) => <Pressable key={key} style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked: cleanup[key] }} onPress={() => setCleanup({ ...cleanup, [key]: !cleanup[key] })}>
+        <Ionicons name={cleanup[key] ? "checkbox" : "square-outline"} size={22} color={cleanup[key] ? colors.green : colors.muted} />
+        <Text style={[styles.rowDetail, { flex: 1 }]}>{label}</Text>
+      </Pressable>)}
+      <Text style={styles.muted}>{cleanupPreview ? (cleanupPreview.ledgerCount + cleanupPreview.streamCount ? `Would remove ${cleanupPreview.ledgerCount} ledger transaction${cleanupPreview.ledgerCount === 1 ? "" : "s"} and ${cleanupPreview.streamCount} Bank stream row${cleanupPreview.streamCount === 1 ? "" : "s"} (${cleanupPreview.oldest} to ${cleanupPreview.newest}).` : "Nothing matches.") : "Enter a date (or tick Every date) and choose what to clean up."}</Text>
+      <Pressable style={styles.dangerButton} onPress={runCleanup}><Text style={styles.dangerText}>Review and remove...</Text></Pressable>
     </Card>
     {Object.keys(counts).length && accounts.length ? <Card>
       <Text style={styles.cardTitle}>Clear an account's backlog</Text>

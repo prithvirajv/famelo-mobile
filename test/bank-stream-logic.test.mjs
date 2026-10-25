@@ -483,3 +483,29 @@ test("the size guard flags state that would push the single save request past th
   assert.ok(stateSizeBytes(big) > HOUSEHOLD_STATE_SOFT_LIMIT_BYTES);
   assert.equal(exceedsStateLimit(big), true);
 });
+
+import { previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary } from "../src/bankStreamLogic.ts";
+
+test("cleanup previews and removes only rows before the cutoff from the chosen places, never mutating input, and backs up exactly what goes", () => {
+  const state = {
+    household: { name: "H", country: "US", currency: "USD", activity: [] },
+    transactions: [{ date: "2026-01-05", payee: "Old, Shop", amount: 10, lineId: "", categoryName: "Food", subcategoryName: "Groceries", accountId: "a1", tags: ["x", "y"] }, { date: "2026-09-30", payee: "Recent", amount: 5, lineId: "" }, { date: "2026-09-01", payee: 'Say "hi"', amount: 7, lineId: "", memo: "line1\nline2" }],
+    transactionInboxDrafts: [{ date: "2026-02-01", payee: "Old draft", amount: 3, lineId: "" }, { date: "2026-10-02", payee: "New draft", amount: 4, lineId: "" }]
+  };
+  const options = { before: "2026-09-15", includeLedger: true, includeStream: true };
+  const preview = previewTransactionCleanup(state, options);
+  assert.deepEqual([preview.ledgerCount, preview.streamCount, preview.oldest, preview.newest], [2, 1, "2026-01-05", "2026-09-01"]);
+  assert.equal(previewTransactionCleanup(state, { ...options, includeLedger: false }).ledgerCount, 0);
+  assert.equal(previewTransactionCleanup(state, { ...options, before: "" }).ledgerCount, 3, "no cutoff means every date");
+  const result = applyTransactionCleanup(state, options);
+  assert.deepEqual(result.state.transactions.map((t) => t.payee), ["Recent"]);
+  assert.deepEqual(result.state.transactionInboxDrafts.map((t) => t.payee), ["New draft"]);
+  assert.deepEqual([result.removedLedger, result.removedStream], [2, 1]);
+  assert.equal(state.transactions.length, 3, "input not mutated");
+  assert.equal(applyTransactionCleanup(state, { ...options, includeStream: false }).state.transactionInboxDrafts.length, 2);
+  const csv = removedTransactionsCsv(preview, (id) => (id === "a1" ? "Checking" : ""));
+  assert.equal(csv.split("\n")[0], "Source,Date,Payee,Amount,Category,Subcategory,Account,Memo,Tags");
+  assert.ok(csv.includes('Ledger,2026-01-05,"Old, Shop",10,Food,Groceries,Checking,,x; y'));
+  assert.ok(csv.includes('"Say ""hi"""') && csv.includes('"line1\nline2"') && csv.includes("Bank stream,2026-02-01,Old draft,3"));
+  assert.equal(cleanupSummary(1, 2), "Removed 1 ledger transaction and 2 Bank stream rows.");
+});

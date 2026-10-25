@@ -611,3 +611,13 @@ test("Linked accounts: Wealth hosts the card, which syncs through the normal sav
   assert.match(card, /<OptionList title="Send this account to"/, "account choice is an inline list, not an Alert (Android allows only 3 buttons)");
   assert.doesNotMatch(card, /accessUrl|userSecret|consumerKey/);
 });
+
+test("Bank stream's cleanup card previews, confirms with a 2-button Alert, offers a backup, and saves through the shared save", () => {
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  const bank = extractFunctionSource(app, "BankStream");
+  assert.match(bank, /previewTransactionCleanup\(state, cleanupOptions\)/);
+  assert.match(bank, /applyTransactionCleanup\(stateRef\.current, cleanupOptions\)/);
+  assert.match(bank, /removedTransactionsCsv\(cleanupPreview/);
+  assert.match(bank, /\{ text: "Cancel" \},\s*\{ text: "Remove permanently", style: "destructive"/);
+  assert.match(bank, /await onSave\(\{ \.\.\.result\.state/);
+});
