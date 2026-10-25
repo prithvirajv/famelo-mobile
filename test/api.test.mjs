@@ -616,8 +616,8 @@ test("Bank stream's cleanup card previews, confirms with a 2-button Alert, offer
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const bank = extractFunctionSource(app, "BankStream");
   assert.match(bank, /previewTransactionCleanup\(state, cleanupOptions\)/);
-  assert.match(bank, /applyTransactionCleanup\(stateRef\.current, cleanupOptions\)/);
+  assert.match(bank, /applyTransactionCleanup\(latest, cleanupOptions\)/);
   assert.match(bank, /removedTransactionsCsv\(cleanupPreview/);
   assert.match(bank, /\{ text: "Cancel" \},\s*\{ text: "Remove permanently", style: "destructive"/);
-  assert.match(bank, /await onSave\(\{ \.\.\.result\.state/);
+  assert.match(bank, /await onSave\(\{ \.\.\.latest, transactions: result\.state\.transactions/);
 });

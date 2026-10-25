@@ -2815,8 +2815,9 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
             if (Platform.OS === "ios" && FileSystem.cacheDirectory) { const uri = `${FileSystem.cacheDirectory}${name}`; await FileSystem.writeAsStringAsync(uri, csv); await Share.share({ url: uri, title: name }); }
             else await Share.share({ title: name, message: csv });
           }
-          const result = applyTransactionCleanup(stateRef.current, cleanupOptions);
-          await onSave({ ...result.state, household: { ...result.state.household, activity: [cleanupSummary(result.removedLedger, result.removedStream), ...(result.state.household.activity || [])] } });
+          const latest = stateRef.current;
+          const result = applyTransactionCleanup(latest, cleanupOptions);
+          await onSave({ ...latest, transactions: result.state.transactions, transactionInboxDrafts: result.state.transactionInboxDrafts, household: { ...latest.household, activity: [cleanupSummary(result.removedLedger, result.removedStream), ...(latest.household.activity || [])] } });
           setFeedback(`${cleanupSummary(result.removedLedger, result.removedStream)} Open Wealth and tap Sync now to re-match linked account balances.`);
         } catch (cause) { Alert.alert("Could not clean up", cause instanceof Error ? cause.message : "Try again"); }
       })() }
