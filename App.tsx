@@ -2756,29 +2756,50 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
 // rows that are safe go straight into the ledger and the rest stay in Bank stream for review. Failures leave every row for review and
 // say why. Reads the latest state through getState because it runs across awaits; returns the summary message.
 async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void, rerun = false): Promise<string> {
-  let filled = 0; let aiNote = "";
+  const lead = rerun ? `Checked ${importedCount} waiting row${importedCount === 1 ? "" : "s"}.` : `Imported ${importedCount} from ${fileName}.`;
+  let filled = 0; let aiNote = ""; let added = 0;
+  const reasons: Record<string, number> = {};
+  // Posts whatever is safe among these rows now, so the ledger fills as the pass goes rather than only at the very end.
+  const postSafe = async (ids: string[], tally = false) => {
+    const posted = autoAcceptSafeDrafts(getState(), ids);
+    added += posted.added;
+    // Reasons are tallied once, on the final pass over everything still waiting, so no row is counted twice.
+    if (tally) Object.entries(posted.reasons).forEach(([reason, count]) => { reasons[reason] = (reasons[reason] || 0) + count; });
+    if (posted.added) await onSave(posted.state);
+  };
   try {
     const needAi = draftsNeedingAi(getState(), draftIds);
+    const needAiIds = new Set(needAi.map((draft) => draft.id));
+    // Rows a rule or history already categorized go in before any AI call.
+    await postSafe(draftIds.filter((id) => !needAiIds.has(id)));
     const budgetLines = allBudgetLines(getState());
     if (needAi.length && budgetLines.length) {
-      setStatus(`${rerun ? `Checked ${importedCount} waiting rows.` : `Imported ${importedCount} from ${fileName}.`} AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
       const lineOptions = budgetLines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }));
       const accountOptions = (getState().accounts || []).filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: account.type ? `${account.name} (${account.type})` : account.name }));
       // Tags the household already uses, so the AI reuses them rather than inventing near-duplicates.
       const knownTags = [...new Set(getState().transactions.flatMap((transaction) => transaction.tags || []))].slice(0, 60);
       for (let start = 0; start < needAi.length; start += AI_IMPORT_CHUNK_SIZE) {
         const chunk = needAi.slice(start, start + AI_IMPORT_CHUNK_SIZE);
-        const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions, knownTags);
-        const applied = applyAiSuggestions(getState(), results);
-        if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
+        setStatus(`${lead} AI is categorizing rows ${start + 1}-${start + chunk.length} of ${needAi.length} (${added} added to the ledger so far)...`);
+        try {
+          const { results } = await Promise.race([
+            api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions, knownTags),
+            new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("the AI took too long to answer")), 45000))
+          ]);
+          const applied = applyAiSuggestions(getState(), results);
+          if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
+        } catch (cause) {
+          // One failed chunk must not stop the rest: its rows stay in Bank stream and the pass carries on.
+          aiNote = ` AI categorization failed for some rows (${cause instanceof Error ? cause.message : "unknown error"}) - they were left for review.`;
+        }
+        await postSafe(chunk.map((draft) => draft.id as string));
       }
     }
   } catch (cause) {
-    aiNote = ` AI categorization wasn't available (${cause instanceof Error ? cause.message : "unknown error"}) - rows were left for review.`;
+    aiNote = ` The import pass stopped (${cause instanceof Error ? cause.message : "unknown error"}) - the remaining rows were left for review.`;
   }
-  const posted = autoAcceptSafeDrafts(getState(), draftIds);
-  if (posted.added) await onSave(posted.state);
-  return importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote, rerun);
+  await postSafe(draftIds, true);
+  return importSummary(fileName, importedCount, filled, added, draftIds.length - added, reasons, aiNote, rerun);
 }
 
 // The inbox of unreviewed bank/credit-card rows: import a statement (CSV or PDF), review each row (category, account,

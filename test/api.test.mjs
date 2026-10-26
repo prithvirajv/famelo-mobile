@@ -594,7 +594,8 @@ test("Bank stream import runs the AI pass against the latest state and only ever
   assert.match(bank, /runAiImport\(\(\) => stateRef\.current/);
   assert.match(bank, /if \(aiImport\)/, "the user can turn the AI pass off");
   const pass = app.slice(app.indexOf("async function runAiImport("), app.indexOf("function BankStream("));
-  assert.match(pass, /autoAcceptSafeDrafts\(getState\(\), draftIds\)/);
+  assert.match(pass, /autoAcceptSafeDrafts\(getState\(\), ids\)/, "rows are posted from the latest state, chunk by chunk");
+  assert.match(pass, /postSafe\(chunk\.map/, "the ledger fills after every AI chunk, not only at the end");
   assert.match(pass, /applyAiSuggestions\(getState\(\), results\)/);
 });
 

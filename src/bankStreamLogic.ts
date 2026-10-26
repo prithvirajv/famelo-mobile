@@ -654,7 +654,7 @@ export function exceedsStateLimit(state: unknown): boolean {
 // straight into the ledger and everything else stays for review. The server only suggests (and validates its ids); these
 // functions decide what is trustworthy.
 export type AiSuggestion = { id: string; lineId: string | null; accountId: string | null; confidence: "high" | "low"; tags?: string[] };
-export const AI_IMPORT_CHUNK_SIZE = 50;
+export const AI_IMPORT_CHUNK_SIZE = 25;
 
 // Drafts the AI should look at: no category, or no account while the household has an open account to choose from.
 export function draftsNeedingAi(state: HouseholdState, draftIds: string[]): InboxDraft[] {
