@@ -39,7 +39,7 @@ test("a linked feed's rows land as drafts on the mapped account and keep their e
   assert.equal(accepted.ok && accepted.state.transactions[0].externalId, "sf:A1:1");
 });
 
-test("reconciling makes the derived balance match the bank for assets and cards, counting Bank stream rows", () => {
+test("reconciling makes the ledger balance match the bank for assets and cards", () => {
   const checking = { id: "chk", type: "checking", openingBalance: 100 };
   const card = { id: "card", type: "credit_card", openingBalance: 0 };
   const drafts = [{ accountId: "chk", amount: 40 }, { accountId: "card", amount: 25 }, { accountId: "other", amount: 999 }];
@@ -52,9 +52,9 @@ test("reconciling makes the derived balance match the bank for assets and cards,
   const balances = { chk: 90, card: 60 };
   const result = reconcileMappedBalances(state, { R1: { accountId: "chk" }, R2: { accountId: "card" } }, [{ remoteId: "R1", balance: 1250.5 }, { remoteId: "R2", balance: -310 }], (_s, id) => balances[id]);
   assert.equal(result.updated, 2);
-  assert.deepEqual(result.state.accounts.map((a) => a.openingBalance), [1300.5, 225]);
-  // Once the derived balance (plus the 40 waiting in Bank stream) already equals the bank's, nothing is adjusted.
-  const unchanged = reconcileMappedBalances(result.state, { R1: { accountId: "chk" } }, [{ remoteId: "R1", balance: 1250.5 }], () => 1290.5);
+  assert.deepEqual(result.state.accounts.map((a) => a.openingBalance), [1260.5, 250]);
+  // Once the ledger balance already equals the bank's, nothing is adjusted.
+  const unchanged = reconcileMappedBalances(result.state, { R1: { accountId: "chk" } }, [{ remoteId: "R1", balance: 1250.5 }], () => 1250.5);
   assert.equal(unchanged.updated, 0);
   assert.equal(unchanged.state, result.state);
 });

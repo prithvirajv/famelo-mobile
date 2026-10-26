@@ -426,6 +426,11 @@ const withActivity = (state: HouseholdState, message: string) => ({ ...state.hou
 // Accepting turns a draft into a real ledger transaction (stamped with a name snapshot of its line and a memo saying
 // where it came from). A closed account blocks a date after its close date. A truly unassigned draft becomes a truly
 // unassigned transaction - never silently the first line alphabetically, which is indistinguishable from a real choice.
+function localTodayKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
 export function acceptDraft(state: HouseholdState, draftId: string): ActionResult {
   const draft = (state.transactionInboxDrafts || []).find((item) => item.id === draftId);
   if (!draft) return { ok: false, error: "That row is no longer in Bank stream." };
@@ -440,8 +445,13 @@ export function acceptDraft(state: HouseholdState, draftId: string): ActionResul
     ...(draft.externalId ? { externalId: draft.externalId } : {})
   };
   const label = lineId ? `${transaction.categoryName} - ${transaction.subcategoryName}` : "no category";
+  // A row from a linked bank feed is already inside the balance synced from the bank, so posting it hands its amount back through the
+  // opening balance and the total stays the bank's (a card's owed amount moves the other way).
+  const shift = draft.externalId && account && Number.isFinite(Number(draft.amount)) && (draft.date || "") <= localTodayKey()
+    ? Math.round((account.type === "credit_card" ? -Number(draft.amount) : Number(draft.amount)) * 100) / 100 : 0;
+  const accounts = shift ? (state.accounts || []).map((item) => item.id === account?.id ? { ...item, openingBalance: Math.round((Number(item.openingBalance || 0) + shift) * 100) / 100 } : item) : state.accounts;
   return { ok: true, state: {
-    ...state, transactions: [transaction, ...state.transactions],
+    ...state, accounts, transactions: [transaction, ...state.transactions],
     transactionInboxDone: withDone(state, draftId),
     transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((item) => item.id !== draftId),
     household: withActivity(state, `Assigned ${draft.payee} to ${label}`)
@@ -643,7 +653,7 @@ export function exceedsStateLimit(state: unknown): boolean {
 // Mirrors web: one batched AI call per chunk fills the category/account that history could not, then rows that are safe go
 // straight into the ledger and everything else stays for review. The server only suggests (and validates its ids); these
 // functions decide what is trustworthy.
-export type AiSuggestion = { id: string; lineId: string | null; accountId: string | null; confidence: "high" | "low" };
+export type AiSuggestion = { id: string; lineId: string | null; accountId: string | null; confidence: "high" | "low"; tags?: string[] };
 export const AI_IMPORT_CHUNK_SIZE = 50;
 
 // Drafts the AI should look at: no category, or no account while the household has an open account to choose from.
@@ -663,26 +673,46 @@ export function applyAiSuggestions(state: HouseholdState, results: AiSuggestion[
     let next = draft;
     if (!draft.lineId && result.lineId) next = { ...next, lineId: result.lineId, lineSource: result.confidence === "high" ? "ai-high" as const : "ai-low" as const };
     if (!draft.accountId && result.accountId) next = { ...next, accountId: result.accountId, accountHistoryMatch: false };
+    if (result.tags?.length && !(draft.tags || []).length) next = { ...next, tags: result.tags.slice(0, 2) };
     if (next !== draft) filled += 1;
     return next;
   });
   return { state: filled ? { ...state, transactionInboxDrafts: drafts } : state, filled };
 }
 
-export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; transferMatch: unknown; accountClosedForDate: boolean };
+export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; transferMatch: unknown; accountClosedForDate: boolean; bankFeed?: boolean; paycheckMatch?: boolean };
 
-// Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision).
+// Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision). A row
+// from a linked bank feed (context.bankFeed) is the bank's own record, so card payments/deposits go in too - except a deposit that matches
+// a paycheck already recorded for that account (context.paycheckMatch), which would count the income twice.
 export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext): { accept: boolean; reason: string } {
   if (!draft.lineId) return { accept: false, reason: "no category" };
   if (context.accountsExist && !draft.accountId) return { accept: false, reason: "no account" };
   if (context.possibleDuplicate) return { accept: false, reason: "possible duplicate" };
   if (context.refundMatch) return { accept: false, reason: "refund" };
   if (context.transferMatch) return { accept: false, reason: "possible transfer" };
-  if (draft.isPayment || draft.isDeposit) return { accept: false, reason: "payment or deposit" };
+  if (context.paycheckMatch) return { accept: false, reason: "matches a recorded paycheck" };
+  if (!context.bankFeed && (draft.isPayment || draft.isDeposit)) return { accept: false, reason: "payment or deposit" };
   if (draft.isPending) return { accept: false, reason: "still pending" };
   if (context.accountClosedForDate) return { accept: false, reason: "account closed" };
   if (!["rule", "history", "ai-high"].includes(draft.lineSource || "")) return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
   return { accept: true, reason: "" };
+}
+
+// A bank deposit (negative amount) that lines up with a recurring paycheck occurrence deposited to the same account: within 2% of the
+// amount and four days of the payday.
+export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "amount" | "date">, occurrences: Array<{ depositAccountId?: string; amount: number; date: string }> | undefined): boolean {
+  const amount = Number(draft.amount);
+  if (!draft.accountId || !Number.isFinite(amount) || amount >= 0) return false;
+  const received = -amount;
+  const when = Date.parse(`${String(draft.date || "").slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(when)) return false;
+  return (occurrences || []).some((occurrence) => {
+    if (occurrence.depositAccountId !== draft.accountId) return false;
+    const expected = Number(occurrence.amount);
+    const day = Date.parse(`${String(occurrence.date || "").slice(0, 10)}T00:00:00Z`);
+    return expected > 0 && Number.isFinite(day) && Math.abs(received - expected) <= expected * 0.02 && Math.abs(day - when) <= 4 * 86400000;
+  });
 }
 
 // Posts every safe draft among draftIds into the ledger (each decided against the ledger as it stands after the previous one).
@@ -700,7 +730,9 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[]):
       possibleDuplicate: isDuplicateTransaction(draft, others),
       refundMatch: refundMatch(draft, others),
       transferMatch: findTransferCandidate(draft, others),
-      accountClosedForDate: !accountAllowsDate(account, draft.date || "")
+      accountClosedForDate: !accountAllowsDate(account, draft.date || ""),
+      bankFeed: true,
+      paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences)
     });
     if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
     const accepted = acceptDraft(current, id);
@@ -709,9 +741,10 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[]):
   return { state: current, added, reasons };
 }
 
-export function importSummary(fileName: string, importedCount: number, filled: number, added: number, remaining: number, reasons: Record<string, number>, aiNote = ""): string {
+export function importSummary(fileName: string, importedCount: number, filled: number, added: number, remaining: number, reasons: Record<string, number>, aiNote = "", rerun = false): string {
   const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([reason, count]) => `${count} ${reason}`).join(", ");
-  return `Imported ${importedCount} from ${fileName}.${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
+  const lead = rerun ? `Checked ${importedCount} waiting row${importedCount === 1 ? "" : "s"}.` : `Imported ${importedCount} from ${fileName}.`;
+  return `${lead}${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
 }
 
 // ---- Clean up old transactions ------------------------------------------------------------------------------------

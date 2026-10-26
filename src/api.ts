@@ -79,8 +79,8 @@ export const api = {
   suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines }) }),
   suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts }) }),
   // One AI call for a whole chunk of imported rows; the server validates every id it returns (rows <= 60 per call).
-  suggestTransactionBatch: (rows: Array<{ id: string; payee: string; amount: number; date: string }>, lines: Array<{ id: string; label: string }>, accounts: Array<{ id: string; label: string }>) =>
-    request<{ results: AiSuggestion[] }>("/api/transactions/suggest-batch", { method: "POST", body: JSON.stringify({ rows, lines, accounts }) }),
+  suggestTransactionBatch: (rows: Array<{ id: string; payee: string; amount: number; date: string }>, lines: Array<{ id: string; label: string }>, accounts: Array<{ id: string; label: string }>, tags: string[] = []) =>
+    request<{ results: AiSuggestion[] }>("/api/transactions/suggest-batch", { method: "POST", body: JSON.stringify({ rows, lines, accounts, tags }) }),
   fxRates: () => request<{ base: string; rates: Record<string, number>; date: string }>("/api/fx-rates"),
   // Note sharing: a one-off email, a public no-login link, or a specific FamilyLoop login (all live-resolved by the server).
   shareNoteByEmail: (body: { to: string; title: string; body: string; message: string; noteId: string; checklist: Array<{ text: string; done: boolean }> }) =>

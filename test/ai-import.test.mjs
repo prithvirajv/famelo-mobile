@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildBankStreamDrafts, updateDraft, clearHistorySuggestions, draftsNeedingAi, applyAiSuggestions, autoAcceptDecision, autoAcceptSafeDrafts, importSummary
+  buildBankStreamDrafts, updateDraft, clearHistorySuggestions, draftsNeedingAi, applyAiSuggestions, autoAcceptDecision, autoAcceptSafeDrafts, importSummary, matchesRecordedPaycheck, acceptDraft
 } from "../src/bankStreamLogic.ts";
 
 const line = (id, name) => ({ id, name, planned: 100 });
@@ -95,4 +95,33 @@ test("importSummary reads naturally with and without leftovers or an AI failure"
   assert.equal(importSummary("a.csv", 3, 2, 1, 2, { "low confidence": 1, "no category": 1 }), "Imported 3 from a.csv. AI filled in 2 rows. 1 added to the ledger; 2 left in Bank stream to review (1 low confidence, 1 no category).");
   assert.equal(importSummary("a.csv", 1, 0, 1, 0, {}), "Imported 1 from a.csv. 1 added to the ledger.");
   assert.match(importSummary("a.csv", 1, 0, 0, 1, { "no category": 1 }, " AI categorization wasn't available (x) - rows were left for review."), /wasn't available/);
+});
+
+test("a linked bank feed also posts deposits, holds back a duplicate of a recorded paycheck, and AI tags are filled in", () => {
+  const draft = { lineId: "salary", accountId: "chk", lineSource: "ai-high", isDeposit: true };
+  const ctx = { accountsExist: true, possibleDuplicate: false, refundMatch: null, transferMatch: null, accountClosedForDate: false };
+  assert.equal(autoAcceptDecision(draft, ctx).reason, "payment or deposit");
+  assert.equal(autoAcceptDecision(draft, { ...ctx, bankFeed: true }).accept, true);
+  assert.equal(autoAcceptDecision(draft, { ...ctx, bankFeed: true, paycheckMatch: true }).reason, "matches a recorded paycheck");
+  const occurrences = [{ depositAccountId: "chk", amount: 2500, date: "2026-03-13" }];
+  assert.equal(matchesRecordedPaycheck({ accountId: "chk", amount: -2500, date: "2026-03-14" }, occurrences), true);
+  assert.equal(matchesRecordedPaycheck({ accountId: "chk", amount: -2700, date: "2026-03-14" }, occurrences), false);
+  assert.equal(matchesRecordedPaycheck({ accountId: "chk", amount: 2500, date: "2026-03-14" }, occurrences), false);
+  const state = { drafts: [{ id: "d1", payee: "SAMPLE" }] };
+  const applied = applyAiSuggestions({ transactionInboxDrafts: state.drafts, accounts: [], transactions: [] }, [{ id: "d1", lineId: null, accountId: null, confidence: "low", tags: ["subscription", "monthly", "extra"] }]);
+  assert.deepEqual(applied.state.transactionInboxDrafts[0].tags, ["subscription", "monthly"]);
+});
+
+test("posting a linked row hands its amount back through the opening balance so the synced balance holds", () => {
+  const base = {
+    household: { name: "H", country: "US", currency: "USD", activity: [] },
+    budget: { month: "2026-10", income: 0, categories: [{ name: "Food", color: "", lines: [{ id: "groceries", name: "Groceries", planned: 100 }] }] },
+    accounts: [{ id: "chk", name: "Checking", type: "checking", openingBalance: 100 }, { id: "card", name: "Card", type: "credit_card", openingBalance: 100 }],
+    transactions: [], transactionInboxDone: []
+  };
+  const linked = (extra) => ({ ...base, transactionInboxDrafts: [{ id: "d1", payee: "SAMPLE", date: "2026-03-01", lineId: "groceries", accountId: "chk", externalId: "sf:A:1", amount: 40, ...extra }] });
+  assert.equal(acceptDraft(linked({}), "d1").state.accounts[0].openingBalance, 140, "money out of checking: balance falls 40, opening gives 40 back");
+  assert.equal(acceptDraft(linked({ accountId: "card" }), "d1").state.accounts[1].openingBalance, 60, "a card purchase raises what is owed, so the opening gives it back");
+  assert.equal(acceptDraft(linked({ externalId: "" }), "d1").state.accounts[0].openingBalance, 100, "a file import row is a plain addition");
+  assert.equal(acceptDraft(linked({ date: "2999-01-01" }), "d1").state.accounts[0].openingBalance, 100, "a future-dated row is not in today's balance yet");
 });

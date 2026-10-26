@@ -84,14 +84,15 @@ export function reconcileOpeningBalance(account: Pick<Account, "type" | "opening
   return Math.round((Number(account.openingBalance || 0) + (target - Number(currentBalance))) * 100) / 100;
 }
 
-// Reconciles every mapped account to the balances in a sync payload; currentBalanceOf must return the account's derived balance now.
+// Reconciles every mapped account to the balances in a sync payload; currentBalanceOf must return the account's derived balance now. The ledger
+// alone is matched to the bank (so the balance shown is the bank's); a Bank stream row posted later hands its amount back through the
+// opening balance (acceptDraft in bankStreamLogic), which keeps it there.
 export function reconcileMappedBalances(state: HouseholdState, mappings: Record<string, LinkedMapping>, remote: RemoteAccount[], currentBalanceOf: (state: HouseholdState, accountId: string) => number): { state: HouseholdState; updated: number } {
   let updated = 0;
   const accounts = (state.accounts || []).map((account) => {
     const entry = remote.find((item) => mappings[item.remoteId]?.accountId === account.id);
     if (!entry || entry.balance === null) return account;
-    const current = currentBalanceOf(state, account.id) + pendingDraftEffect(account, state.transactionInboxDrafts);
-    const opening = reconcileOpeningBalance(account, current, entry.balance);
+    const opening = reconcileOpeningBalance(account, currentBalanceOf(state, account.id), entry.balance);
     if (opening === Number(account.openingBalance || 0)) return account;
     updated += 1;
     return { ...account, openingBalance: opening };

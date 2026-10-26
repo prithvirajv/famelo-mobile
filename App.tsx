@@ -2755,18 +2755,20 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
 // After an import (a file, or a linked-account sync): AI fills the category/account history could not (one call per chunk of rows), then
 // rows that are safe go straight into the ledger and the rest stay in Bank stream for review. Failures leave every row for review and
 // say why. Reads the latest state through getState because it runs across awaits; returns the summary message.
-async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void): Promise<string> {
+async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void, rerun = false): Promise<string> {
   let filled = 0; let aiNote = "";
   try {
     const needAi = draftsNeedingAi(getState(), draftIds);
     const budgetLines = allBudgetLines(getState());
     if (needAi.length && budgetLines.length) {
-      setStatus(`Imported ${importedCount} from ${fileName}. AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
+      setStatus(`${rerun ? `Checked ${importedCount} waiting rows.` : `Imported ${importedCount} from ${fileName}.`} AI is categorizing ${needAi.length} row${needAi.length === 1 ? "" : "s"}...`);
       const lineOptions = budgetLines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }));
       const accountOptions = (getState().accounts || []).filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: account.type ? `${account.name} (${account.type})` : account.name }));
+      // Tags the household already uses, so the AI reuses them rather than inventing near-duplicates.
+      const knownTags = [...new Set(getState().transactions.flatMap((transaction) => transaction.tags || []))].slice(0, 60);
       for (let start = 0; start < needAi.length; start += AI_IMPORT_CHUNK_SIZE) {
         const chunk = needAi.slice(start, start + AI_IMPORT_CHUNK_SIZE);
-        const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions);
+        const { results } = await api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions, knownTags);
         const applied = applyAiSuggestions(getState(), results);
         if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
       }
@@ -2776,7 +2778,7 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
   }
   const posted = autoAcceptSafeDrafts(getState(), draftIds);
   if (posted.added) await onSave(posted.state);
-  return importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote);
+  return importSummary(fileName, importedCount, filled, posted.added, draftIds.length - posted.added, posted.reasons, aiNote, rerun);
 }
 
 // The inbox of unreviewed bank/credit-card rows: import a statement (CSV or PDF), review each row (category, account,
@@ -2851,9 +2853,16 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     return true;
   };
 
-  const runAiImportPass = async (draftIds: string[], fileName: string, importedCount: number) => {
-    const message = await runAiImport(() => stateRef.current, onSave, draftIds, fileName, importedCount, setFeedback);
+  const runAiImportPass = async (draftIds: string[], fileName: string, importedCount: number, rerun = false) => {
+    const message = await runAiImport(() => stateRef.current, onSave, draftIds, fileName, importedCount, setFeedback, rerun);
     setFeedback(message);
+  };
+  const [aiWorking, setAiWorking] = useState(false);
+  const processWaitingRows = async () => {
+    const ids = (stateRef.current.transactionInboxDrafts || []).map((draft) => draft.id as string).filter(Boolean);
+    if (!ids.length || aiWorking) return;
+    setAiWorking(true);
+    try { await runAiImportPass(ids, "Bank stream", ids.length, true); } finally { setAiWorking(false); }
   };
 
   const importFile = async () => {
@@ -2977,8 +2986,9 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       <Pressable style={styles.primaryButton} disabled={importing} onPress={() => void importFile()}>{importing ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Import a statement</Text>}</Pressable>
       <Pressable style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked: aiImport }} onPress={() => changeAiImport(!aiImport)}>
         <Ionicons name={aiImport ? "checkbox" : "square-outline"} size={22} color={aiImport ? colors.green : colors.muted} />
-        <Text style={[styles.rowDetail, { flex: 1 }]}>Use AI to categorize imports and add confident rows to the ledger</Text>
+        <Text style={[styles.rowDetail, { flex: 1 }]}>Use AI to categorize and tag imports and add them to the ledger; anything it is unsure about stays in Bank stream for review</Text>
       </Pressable>
+      {(state.transactionInboxDrafts || []).length ? <Pressable style={styles.secondaryButton} disabled={aiWorking} onPress={() => void processWaitingRows()}>{aiWorking ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Let AI categorize and add the {(state.transactionInboxDrafts || []).length} waiting row{(state.transactionInboxDrafts || []).length === 1 ? "" : "s"}</Text>}</Pressable> : null}
       {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
     </Card>
     <Card>
