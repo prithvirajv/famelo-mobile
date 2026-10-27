@@ -265,7 +265,13 @@ export function refundFuzzyMatch<T extends Matchable>(candidate: Matchable, pool
   const amount = Number(candidate.amount);
   if (amount >= 0 || !normalizeForPayeeMatch(candidate.payee)) return null;
   return pool.find((transaction) => Number(transaction.amount) === -amount && (transaction.date || "") <= (candidate.date || "")
-    && absoluteDaysBetweenDateKeys(transaction.date || "", candidate.date || "") <= REFUND_WINDOW_DAYS && payeesFuzzyMatch(candidate.payee, transaction.payee)) || null;
+    && absoluteDaysBetweenDateKeys(transaction.date || "", candidate.date || "") <= REFUND_WINDOW_DAYS && sameOrUnknownAccount(candidate, transaction) && payeesFuzzyMatch(candidate.payee, transaction.payee)) || null;
+}
+
+// A return lands on the card or account that made the purchase, so a fuzzy payee+amount guess only counts when both rows are on the
+// same account (or one of them doesn't say which yet). An exact order number is strong enough to pair across accounts.
+function sameOrUnknownAccount(a: Matchable, b: Matchable): boolean {
+  return !a.accountId || !b.accountId || a.accountId === b.accountId;
 }
 
 // An order-number match is the stronger signal and tried first; the fuzzy fallback also runs when it comes up empty,
@@ -366,7 +372,7 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   const refundPool: Matchable[] = [...alreadyKnown, ...input.rows];
   const created: InboxDraft[] = [];
   input.rows.forEach((row) => {
-    const refund = refundMatch(row, refundPool);
+    const refund = refundMatch({ ...row, accountId: matchedAccount?.id || "" }, refundPool);
     // A refund match is tied to a specific purchase - a far stronger signal than history, which only applies without one.
     const historyLineId = refund ? "" : suggestSubcategoryFromHistory(row.payee, input.transactions) || "";
     const ruleLineId = refund ? "" : categorizationRuleForPayee(input.rules, row.payee);
@@ -431,7 +437,7 @@ function localTodayKey(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
-export function acceptDraft(state: HouseholdState, draftId: string): ActionResult {
+export function acceptDraft(state: HouseholdState, draftId: string, memo = ""): ActionResult {
   const draft = (state.transactionInboxDrafts || []).find((item) => item.id === draftId);
   if (!draft) return { ok: false, error: "That row is no longer in Bank stream." };
   const account = (state.accounts || []).find((item) => item.id === draft.accountId);
@@ -440,7 +446,7 @@ export function acceptDraft(state: HouseholdState, draftId: string): ActionResul
   }
   const lineId = draft.lineId || "";
   const transaction: Transaction = {
-    date: draft.date || "", payee: draft.payee || "", amount: Number(draft.amount), lineId, memo: draft.recurringId ? "Recurring bill" : "Accepted bank stream item",
+    date: draft.date || "", payee: draft.payee || "", amount: Number(draft.amount), lineId, memo: memo || (draft.recurringId ? "Recurring bill" : "Accepted bank stream item"),
     accountId: draft.accountId || "", orderNumber: draft.orderNumber || "", tags: draft.tags || [], ...lineSnapshot(state, lineId),
     ...(draft.externalId ? { externalId: draft.externalId } : {})
   };
@@ -680,7 +686,7 @@ export function applyAiSuggestions(state: HouseholdState, results: AiSuggestion[
   return { state: filled ? { ...state, transactionInboxDrafts: drafts } : state, filled };
 }
 
-export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; transferMatch: unknown; accountClosedForDate: boolean; bankFeed?: boolean; paycheckMatch?: boolean };
+export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; refundMatchPosted?: boolean; transferMatch: unknown; accountClosedForDate: boolean; bankFeed?: boolean; paycheckMatch?: boolean };
 
 // Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision). A row
 // from a linked bank feed (context.bankFeed) is the bank's own record, so card payments/deposits go in too - except a deposit that matches
@@ -689,14 +695,45 @@ export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext
   if (!draft.lineId) return { accept: false, reason: "no category" };
   if (context.accountsExist && !draft.accountId) return { accept: false, reason: "no account" };
   if (context.possibleDuplicate) return { accept: false, reason: "possible duplicate" };
-  if (context.refundMatch) return { accept: false, reason: "refund" };
+  if (context.refundMatch && !refundCanPost(draft, context)) return { accept: false, reason: "refund" };
   if (context.transferMatch) return { accept: false, reason: "possible transfer" };
   if (context.paycheckMatch) return { accept: false, reason: "matches a recorded paycheck" };
   if (!context.bankFeed && (draft.isPayment || draft.isDeposit)) return { accept: false, reason: "payment or deposit" };
   if (draft.isPending) return { accept: false, reason: "still pending" };
   if (context.accountClosedForDate) return { accept: false, reason: "account closed" };
-  if (!["rule", "history", "ai-high"].includes(draft.lineSource || "")) return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
+  // A "refund" category is only trusted together with a posted purchase it nets against (checked above).
+  if (!["rule", "history", "ai-high"].includes(draft.lineSource || "") && !(draft.lineSource === "refund" && context.refundMatch)) return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
   return { accept: true, reason: "" };
+}
+
+// A return from a linked bank or card goes straight in when it nets against a purchase already in the ledger: same account, the exact
+// opposite amount (that is how the match is made) and the purchase's own category, so it subtracts from the line the money was spent on.
+// A purchase still waiting in Bank stream, another account or another category keeps the return in Bank stream for a look.
+export function refundCanPost(draft: InboxDraft, context: AutoAcceptContext): boolean {
+  const match = context.refundMatch as Matchable | null;
+  return Boolean(context.bankFeed && context.refundMatchPosted && match?.lineId && draft.lineId === match.lineId && Number(draft.amount) < 0
+    && sameOrUnknownAccount(draft, match) && (draft.accountId || !context.accountsExist));
+}
+
+export function refundMemo(match: Matchable): string {
+  return `Refund of the ${Number(match.amount).toFixed(2)} purchase on ${match.date}`;
+}
+
+// Files returns of purchases already in the ledger under that purchase's category and account (instead of a fresh AI guess).
+export function adoptPostedRefunds(state: HouseholdState, draftIds: string[]): { state: HouseholdState; adopted: number } {
+  let adopted = 0;
+  const drafts = (state.transactionInboxDrafts || []).map((draft) => {
+    if (!draftIds.includes(draft.id || "") || Number(draft.amount) >= 0) return draft;
+    const match = refundMatch(draft, state.transactions);
+    if (!match?.lineId) return draft;
+    const next = { ...draft };
+    if (!draft.lineId || draft.lineSource === "ai-low") { next.lineId = match.lineId; next.lineSource = "refund"; }
+    if (!draft.accountId && match.accountId) { next.accountId = match.accountId; next.accountHistoryMatch = false; }
+    if (next.lineId === draft.lineId && next.accountId === draft.accountId) return draft;
+    adopted += 1;
+    return next;
+  });
+  return { state: adopted ? { ...state, transactionInboxDrafts: drafts } : state, adopted };
 }
 
 // A bank deposit (negative amount) that lines up with a recurring paycheck occurrence deposited to the same account: within 2% of the
@@ -716,7 +753,7 @@ export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "a
 }
 
 // Posts every safe draft among draftIds into the ledger (each decided against the ledger as it stands after the previous one).
-export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[]): { state: HouseholdState; added: number; reasons: Record<string, number> } {
+export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], final = false): { state: HouseholdState; added: number; reasons: Record<string, number> } {
   let current = state;
   let added = 0;
   const reasons: Record<string, number> = {};
@@ -725,17 +762,22 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[]):
     if (!draft) continue;
     const others: Array<InboxDraft | Transaction> = [...current.transactions, ...(current.transactionInboxDrafts || []).filter((other) => other.id !== id)];
     const account = (current.accounts || []).find((item) => item.id === draft.accountId);
+    const returnOf = refundMatch(draft, others);
+    const returnOfPosted = Boolean(returnOf) && current.transactions.includes(returnOf as Transaction);
+    // A return whose purchase is still waiting in Bank stream is looked at again on the final pass, once that purchase has had its chance to post.
+    if (returnOf && !returnOfPosted && !final) continue;
     const decision = autoAcceptDecision(draft, {
       accountsExist: (current.accounts || []).some((item) => !item.closedAt),
       possibleDuplicate: isDuplicateTransaction(draft, others),
-      refundMatch: refundMatch(draft, others),
+      refundMatch: returnOf,
+      refundMatchPosted: returnOfPosted,
       transferMatch: findTransferCandidate(draft, others),
       accountClosedForDate: !accountAllowsDate(account, draft.date || ""),
       bankFeed: true,
       paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences)
     });
     if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
-    const accepted = acceptDraft(current, id);
+    const accepted = acceptDraft(current, id, returnOfPosted && returnOf ? refundMemo(returnOf) : "");
     if (accepted.ok) { current = accepted.state; added += 1; } else reasons["could not post"] = (reasons["could not post"] || 0) + 1;
   }
   return { state: current, added, reasons };

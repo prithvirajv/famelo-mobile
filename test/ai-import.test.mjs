@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildBankStreamDrafts, updateDraft, clearHistorySuggestions, draftsNeedingAi, applyAiSuggestions, autoAcceptDecision, autoAcceptSafeDrafts, importSummary, matchesRecordedPaycheck, acceptDraft
+  buildBankStreamDrafts, updateDraft, clearHistorySuggestions, draftsNeedingAi, applyAiSuggestions, autoAcceptDecision, autoAcceptSafeDrafts, importSummary, matchesRecordedPaycheck, acceptDraft, adoptPostedRefunds, refundMatch
 } from "../src/bankStreamLogic.ts";
 
 const line = (id, name) => ({ id, name, planned: 100 });
@@ -124,4 +124,37 @@ test("posting a linked row hands its amount back through the opening balance so 
   assert.equal(acceptDraft(linked({ accountId: "card" }), "d1").state.accounts[1].openingBalance, 60, "a card purchase raises what is owed, so the opening gives it back");
   assert.equal(acceptDraft(linked({ externalId: "" }), "d1").state.accounts[0].openingBalance, 100, "a file import row is a plain addition");
   assert.equal(acceptDraft(linked({ date: "2999-01-01" }), "d1").state.accounts[0].openingBalance, 100, "a future-dated row is not in today's balance yet");
+});
+
+test("a card return nets against its purchase: same account and category, posted straight to the ledger with a note", () => {
+  const purchase = { date: "2026-10-01", payee: "SAMPLE STORE", amount: 12, lineId: "dining", categoryName: "Food", subcategoryName: "Dining", accountId: "card" };
+  const state = baseState({
+    accounts: [{ id: "card", name: "Card", type: "credit_card", balance: 0 }, { id: "chk", name: "Checking", type: "checking", balance: 0 }],
+    transactions: [purchase],
+    transactionInboxDrafts: [draft({ id: "ret", payee: "SAMPLE STORE 12", amount: -12, date: "2026-10-05", accountId: "card", externalId: "sf:c:1" })]
+  });
+  const adopted = adoptPostedRefunds(state, ["ret"]);
+  assert.equal(adopted.adopted, 1);
+  assert.equal(adopted.state.transactionInboxDrafts[0].lineId, "dining");
+  assert.equal(adopted.state.transactionInboxDrafts[0].lineSource, "refund");
+  const posted = autoAcceptSafeDrafts(adopted.state, ["ret"], true);
+  assert.equal(posted.added, 1);
+  assert.equal(posted.state.transactions[0].amount, -12);
+  assert.equal(posted.state.transactions[0].lineId, "dining");
+  assert.match(posted.state.transactions[0].memo, /Refund of the 12\.00 purchase on 2026-10-01/);
+  // A return whose purchase is still a draft waits for the final pass, and is held if the purchase never posts.
+  const waiting = baseState({ transactionInboxDrafts: [
+    draft({ id: "buy", payee: "SAMPLE STORE", amount: 12, date: "2026-10-01", lineId: "dining", accountId: "chk", lineSource: "ai-low" }),
+    draft({ id: "ret", payee: "SAMPLE STORE", amount: -12, date: "2026-10-05", lineId: "dining", accountId: "chk", lineSource: "refund" })
+  ] });
+  const early = autoAcceptSafeDrafts(waiting, ["ret"]);
+  assert.deepEqual([early.added, early.reasons], [0, {}]);
+  assert.deepEqual(autoAcceptSafeDrafts(waiting, ["ret"], true).reasons, { refund: 1 });
+});
+
+test("a fuzzy refund match never pairs a credit with a purchase on a different account", () => {
+  const purchase = { payee: "SAMPLE STORE", amount: 12, date: "2026-10-01", accountId: "chk" };
+  assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05", accountId: "card" }, [purchase]), null);
+  assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05", accountId: "chk" }, [purchase]), purchase);
+  assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05" }, [purchase]), purchase);
 });

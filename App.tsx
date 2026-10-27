@@ -57,7 +57,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -2761,13 +2761,16 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
   const reasons: Record<string, number> = {};
   // Posts whatever is safe among these rows now, so the ledger fills as the pass goes rather than only at the very end.
   const postSafe = async (ids: string[], tally = false) => {
-    const posted = autoAcceptSafeDrafts(getState(), ids);
+    const posted = autoAcceptSafeDrafts(getState(), ids, tally);
     added += posted.added;
     // Reasons are tallied once, on the final pass over everything still waiting, so no row is counted twice.
     if (tally) Object.entries(posted.reasons).forEach(([reason, count]) => { reasons[reason] = (reasons[reason] || 0) + count; });
     if (posted.added) await onSave(posted.state);
   };
   try {
+    // A return of a purchase already in the ledger takes that purchase's category and account without asking the AI.
+    const adopted = adoptPostedRefunds(getState(), draftIds);
+    if (adopted.adopted) await onSave(adopted.state);
     const needAi = draftsNeedingAi(getState(), draftIds);
     const needAiIds = new Set(needAi.map((draft) => draft.id));
     // Rows a rule or history already categorized go in before any AI call.
