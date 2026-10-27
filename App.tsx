@@ -2883,11 +2883,10 @@ function applyIncomeAutomation(state: HouseholdState): HouseholdState {
 async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void, rerun = false): Promise<string> {
   const lead = rerun ? `Checked ${importedCount} waiting row${importedCount === 1 ? "" : "s"}.` : `Imported ${importedCount} from ${fileName}.`;
   let filled = 0; let aiNote = ""; let added = 0; let uncategorized = 0;
-  const aiFailedIds = new Set<string>();
   const reasons: Record<string, number> = {};
   // Posts whatever is safe among these rows now, so the ledger fills as the pass goes rather than only at the very end.
   const postSafe = async (ids: string[], tally = false) => {
-    const posted = autoAcceptSafeDrafts(getState(), ids, tally, aiFailedIds);
+    const posted = autoAcceptSafeDrafts(getState(), ids, tally);
     added += posted.added;
     uncategorized += posted.uncategorized;
     // Reasons are tallied once, on the final pass over everything still waiting, so no row is counted twice.
@@ -2923,8 +2922,7 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
           if (applied.filled) { filled += applied.filled; await onSave(applied.state); }
         } catch (cause) {
           // One failed chunk must not stop the rest: its rows stay in Bank stream and the pass carries on.
-          aiNote = ` AI categorization failed for some rows (${cause instanceof Error ? cause.message : "unknown error"}) - they were left for review.`;
-          chunk.forEach((draft) => aiFailedIds.add(draft.id as string));
+          aiNote = ` AI categorization failed for some rows (${cause instanceof Error ? cause.message : "unknown error"}) - they went in marked "Needs a category".`;
         }
         await postSafe(chunk.map((draft) => draft.id as string));
       }

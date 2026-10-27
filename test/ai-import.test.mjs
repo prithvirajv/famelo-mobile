@@ -93,9 +93,6 @@ test("autoAcceptSafeDrafts posts safe rows to the ledger with their account and 
   assert.deepEqual(result.reasons, { "possible duplicate": 1, "no account": 1 });
   assert.equal(state.transactions.length, 1, "input not mutated");
   assert.equal(result.state.household.activity[0], "Assigned SAMPLE UNSURE to no category");
-  // A row whose AI call failed is kept for the next pass rather than posted without a category.
-  const failed = autoAcceptSafeDrafts(state, ["guess"], true, new Set(["guess"]));
-  assert.deepEqual([failed.added, failed.reasons], [0, { "AI did not answer": 1 }]);
 });
 
 test("importSummary reads naturally with and without leftovers or an AI failure", () => {

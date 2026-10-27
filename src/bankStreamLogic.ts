@@ -767,7 +767,7 @@ export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "a
 }
 
 // Posts every safe draft among draftIds into the ledger (each decided against the ledger as it stands after the previous one).
-export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], final = false, aiFailedIds: Set<string> = new Set()): { state: HouseholdState; added: number; uncategorized: number; reasons: Record<string, number> } {
+export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], final = false): { state: HouseholdState; added: number; uncategorized: number; reasons: Record<string, number> } {
   let current = state;
   let added = 0;
   let uncategorized = 0;
@@ -792,8 +792,6 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], 
       paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences)
     });
     if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
-    // A row the AI never answered for (a failed or timed-out call) is kept for the next pass instead of going in without a category.
-    if (decision.uncategorized && aiFailedIds.has(id)) { reasons["AI did not answer"] = (reasons["AI did not answer"] || 0) + 1; continue; }
     if (decision.uncategorized) current = { ...current, transactionInboxDrafts: (current.transactionInboxDrafts || []).map((item) => item.id === id ? { ...item, lineId: "", lineSource: "" } : item) };
     const accepted = acceptDraft(current, id, decision.uncategorized ? "Needs a category" : returnOfPosted && returnOf ? refundMemo(returnOf) : "");
     if (accepted.ok) { current = accepted.state; added += 1; if (decision.uncategorized) uncategorized += 1; } else reasons["could not post"] = (reasons["could not post"] || 0) + 1;
