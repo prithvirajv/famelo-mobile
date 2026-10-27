@@ -98,6 +98,8 @@ export type Account = {
   // A closed account still allows backdated entries (on/before closedAt) but blocks any new
   // transaction/paycheck-deposit/transfer dated after it - see accountAllowsDate in the web app.
   closedAt?: string;
+  // For a bank-fed account: the date its records are complete from (earlier history has to come from a statement). Shown as a small tag.
+  syncedFrom?: string;
 };
 export type Transfer = { id?: string; fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
 export type PaycheckRecurrence = "once" | "bonus" | "weekly" | "biweekly" | "monthly";

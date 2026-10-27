@@ -13,7 +13,7 @@ export type RemoteAccount = { remoteId: string; name: string; orgName: string; c
 export type HistoryGap = { remoteId: string; name: string; fromMonth: string; toMonth: string; oldestReturned: string; skippedRows: number };
 export type LinkedTransaction = { externalId: string; remoteAccountId: string; date: string; payee: string; amount: number; pending: boolean };
 export type LinkedPosition = { remoteAccountId: string; symbol: string; name: string; units: number; price: number; costBasis: number; currency: string; holdingType: "stock" | "fund" };
-export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[]; historyGaps?: HistoryGap[] };
+export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[]; historyGaps?: HistoryGap[]; coverage?: Record<string, { from: string }> };
 
 // The one-line notice for accounts a link has reported that the user has not decided about yet ('' when there are none).
 export function newAccountsNotice(link: Pick<LinkedLink, "newAccounts">): string {
@@ -230,4 +230,24 @@ export function addHistoryGapNotices(existing: HistoryGapNotice[] | undefined, g
     notices.push({ id: createId("history-gap"), accountId, accountName: nameOf(accountId) || gap.name, fromMonth: gap.fromMonth, toMonth: gap.toMonth, oldestReturned: gap.oldestReturned, createdAt: nowIso });
   }
   return notices;
+}
+
+// Mirrors web's updateAccountsSyncedFrom: the date each bank-fed account's records are complete from (account.syncedFrom), shown as a small tag.
+// A sync that knows the coverage (a first sync or history import) supplies it; otherwise an account without one takes its earliest bank row (or
+// today). An earlier date is never replaced by a later one. Returns the same state object when nothing changed.
+export function updateAccountsSyncedFrom(state: HouseholdState, mappings: Record<string, LinkedMapping>, coverage: Record<string, { from: string }> | undefined, rows: Array<{ externalId?: string; accountId?: string; date?: string }>, todayKey: string): HouseholdState {
+  let changed = false;
+  const accounts = (state.accounts || []).map((account) => {
+    const remoteId = Object.keys(mappings || {}).find((id) => mappings[id]?.accountId === account.id);
+    if (!remoteId) return account;
+    let from = coverage?.[remoteId]?.from || "";
+    if (!from && !account.syncedFrom) {
+      const dates = rows.filter((row) => row.externalId && row.accountId === account.id && row.date).map((row) => row.date as string).sort();
+      from = dates[0] || todayKey;
+    }
+    if (!from || (account.syncedFrom && account.syncedFrom <= from)) return account;
+    changed = true;
+    return { ...account, syncedFrom: from };
+  });
+  return changed ? { ...state, accounts } : state;
 }

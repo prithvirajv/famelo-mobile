@@ -48,7 +48,7 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3863,6 +3863,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
           working = { ...working, transactionInboxDrafts: built.drafts };
         });
         working = { ...working, linkedImportedIds: rememberLinkedImportedIds(working.linkedImportedIds, posted.map((row) => row.externalId)) };
+        working = updateAccountsSyncedFrom(working, link.mappings, payload.coverage, [...working.transactions, ...(working.transactionInboxDrafts || [])], localDateKey());
         const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0);
         working = reconciled.state;
         // Accounts mapped to a holdings group: match the group's total to the bank balance (holdings keep their own detail).
@@ -4387,7 +4388,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
             {group.items.map((account) => <View key={account.id} style={styles.row}>
               <View style={styles.rowCopy}>
                 <Text style={styles.rowTitle}>{account.name}{account.closedAt ? " (closed)" : ""}</Text>
-                <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}</Text>
+                <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}{account.syncedFrom ? ` · Bank sync from ${account.syncedFrom}` : ""}</Text>
               </View>
               <Text style={[styles.rowValue, account.type === "credit_card" && account.balance > 0 && { color: colors.coral }]}>{money(account.balance, currency)}</Text>
               {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : null}

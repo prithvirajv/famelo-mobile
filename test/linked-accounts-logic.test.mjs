@@ -204,3 +204,13 @@ test("missing-history gaps read clearly, are remembered once per account and per
   assert.deepEqual(first.map((n) => [n.accountId, n.accountName, n.fromMonth, n.toMonth]), [["dcu", "DCU Prithvi", "2026-01", "2026-03"], ["other", "Other", "2026-03", "2026-03"]]);
   assert.equal(addHistoryGapNotices(first, gaps, mappings, () => "", ids, "2026-10-28T00:00:00Z").length, 2, "running the same import again does not repeat the reminder");
 });
+
+test("an account's synced-from date takes the coverage a sync reports, never moves later, and is backfilled from its earliest bank row", async () => {
+  const { updateAccountsSyncedFrom } = await import("../src/linkedAccountsLogic.ts");
+  const state = { accounts: [{ id: "a" }, { id: "b", syncedFrom: "2026-02-01" }, { id: "c" }, { id: "d" }] };
+  const mappings = { RA: { accountId: "a" }, RB: { accountId: "b" }, RC: { accountId: "c" }, RD: { accountId: "d" }, RX: { groupId: "g" } };
+  const rows = [{ externalId: "sf:1", accountId: "c", date: "2026-08-14" }, { externalId: "sf:2", accountId: "c", date: "2026-07-02" }, { accountId: "c", date: "2026-01-01" }];
+  const next = updateAccountsSyncedFrom(state, mappings, { RA: { from: "2026-04-01" }, RB: { from: "2026-05-01" } }, rows, "2026-10-27");
+  assert.deepEqual(next.accounts.map((a) => a.syncedFrom), ["2026-04-01", "2026-02-01", "2026-07-02", "2026-10-27"]);
+  assert.equal(updateAccountsSyncedFrom(next, mappings, {}, rows, "2026-10-27"), next, "nothing moves on a plain sync");
+});
