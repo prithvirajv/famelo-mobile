@@ -45,7 +45,8 @@ import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheck
 import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
-import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder } from "./src/homeLogic";
+import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts } from "./src/homeLogic";
+import type { HomeBriefing } from "./src/homeLogic";
 import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
@@ -618,6 +619,37 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
   const noteReminders = homeNoteReminders(state.notes.entries, today);
   const activity = homeRecentActivity(state);
 
+  // The AI briefing: one per viewer per day is kept on this device (Refresh asks again); the number chips never depend on the AI.
+  const currencyMoney = (amount: number) => money(amount, currency);
+  const facts = homeBriefingFacts(state, {
+    today: new Date(), planned, currency, actionItems, weekStrip, funding, planTasks: planTasks.map(({ done }) => ({ done })),
+    balances: accountsWithBalances(state, today).filter((account) => !account.closedAt).map((account) => ({ name: account.name, type: account.type, balance: account.balance })),
+    spentOfLine: (lineId, monthKey) => spentByLineInMonth(state.transactions, lineId, monthKey), formatMoney: currencyMoney
+  });
+  const [briefing, setBriefing] = useState<{ status: "loading" | "ready" | "error" | "off"; data: HomeBriefing | null; error: string; at: string }>({ status: "loading", data: null, error: "", at: "" });
+  const briefingKey = `familyloop-home-briefing:${user.email}:${state.household.name}`;
+  const factsRef = useRef(facts.text);
+  factsRef.current = facts.text;
+  const loadBriefing = useCallback(async (force: boolean) => {
+    if (!force) {
+      try {
+        const cached = JSON.parse((await AsyncStorage.getItem(briefingKey)) || "null");
+        if (cached?.date === localDateKey() && cached.briefing) { setBriefing({ status: "ready", data: cached.briefing, error: "", at: cached.at || "" }); return; }
+      } catch { /* no saved copy */ }
+    }
+    setBriefing((current) => ({ ...current, status: "loading", error: "" }));
+    try {
+      const { briefing: written } = await api.homeBriefing(factsRef.current);
+      const at = new Date().toISOString();
+      setBriefing({ status: "ready", data: written, error: "", at });
+      void AsyncStorage.setItem(briefingKey, JSON.stringify({ date: localDateKey(), briefing: written, at })).catch(() => undefined);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "";
+      setBriefing({ status: /not configured|503/i.test(message) ? "off" : "error", data: null, error: message, at: "" });
+    }
+  }, [briefingKey]);
+  useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
+
   const completeItem = async (item: HomeActionItem) => {
     const next = structuredClone(state);
     if (item.kind === "chore") {
@@ -646,6 +678,22 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
   };
 
   return <Page><Title eyebrow="HOUSEHOLD">Today</Title>
+    <Card>
+      <View style={styles.iouPersonHead}>
+        <Text style={styles.cardTitle}>{new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</Text>
+        {briefing.status === "off" ? null : <Pressable disabled={briefing.status === "loading"} onPress={() => void loadBriefing(true)}><Text style={[styles.secondaryButtonText, { color: colors.green }]}>{briefing.status === "loading" ? "Working..." : "✨ Refresh"}</Text></Pressable>}
+      </View>
+      {facts.chips.length ? <View style={styles.choiceRow}>{facts.chips.map((chip) => <View key={chip} style={styles.choice}><Text style={styles.choiceText}>{chip}</Text></View>)}</View> : null}
+      {briefing.status === "ready" && briefing.data ? <View style={{ marginTop: 8, gap: 6 }}>
+        {briefing.data.headline ? <Text style={styles.rowTitle}>{briefing.data.headline}</Text> : null}
+        {briefing.data.points.map((point, index) => <Text key={index} style={styles.rowDetail}>• {point}</Text>)}
+        {briefing.data.tip ? <Text style={styles.rowDetail}>Tip: {briefing.data.tip}</Text> : null}
+        {briefing.at ? <Text style={styles.muted}>Written {new Date(briefing.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} from your budget, calendar and chores. AI can slip - check the details on each screen.</Text> : null}
+      </View>
+      : briefing.status === "loading" ? <Text style={styles.muted}>Reading today's numbers...</Text>
+      : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
+      : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
+    </Card>
     <Card>
       <Text style={styles.cardTitle}>Quick add</Text>
       <View style={styles.choiceRow}>
