@@ -152,6 +152,8 @@ export type HouseholdState = {
   onboarding?: { dismissed: boolean };
   // externalIds of linked-account rows already turned into drafts (capped), so a re-sync never imports one twice.
   linkedImportedIds?: string[];
+  // Months a bank did not return for a history import, left out on purpose; each stays until the person says they imported it from a statement.
+  historyGapNotices?: Array<{ id: string; accountId: string; accountName: string; fromMonth: string; toMonth: string; oldestReturned: string; createdAt: string }>;
   // false when the household turned off the overnight apply of linked-account transactions (on when absent).
   linkedAutoApply?: boolean;
   // "<accountId>|<payer key>" of salaries the household undid, so they are not detected again.

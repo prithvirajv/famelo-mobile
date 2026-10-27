@@ -626,7 +626,9 @@ test("Bank stream's cleanup card previews, confirms with a 2-button Alert, offer
 test("the app acknowledges a linked sync only after saving it, and shows a banner for data fetched overnight", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const card = extractFunctionSource(app, "LinkedAccountsCard");
-  assert.ok(card.indexOf("api.ackLinkedSync") > card.indexOf("await onSave(working)"), "acknowledge comes after the save");
+  assert.ok(card.lastIndexOf("api.ackLinkedSync") > card.indexOf("await onSave(working)"), "acknowledge comes after the save");
+  assert.ok(card.indexOf("historyGapDialogText(") < card.indexOf("await onSave(working)"), "a history import with missing months waits for the person's agreement before anything is saved");
+  assert.match(card, /Cancel - import nothing[\s\S]*?ackLinkedSync/, "cancelling clears what the server staged so the overnight job does not import it");
   assert.match(extractFunctionSource(app, "AppContent"), /waitingBanner\(\(await api\.linkedAccounts\(\)\)\.links\)/);
 });
 

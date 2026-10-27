@@ -187,17 +187,20 @@ test("a history import skips only rows already in the ledger or Bank stream (rem
   assert.deepEqual(["2026-01-01", "2026-02-30", "01/01/2026", ""].map(isRealDateKey), [true, false, false, false]);
 });
 
-test("history coverage names the accounts whose bank returned less than was asked for", async () => {
-  const { historyCoverageNotes } = await import("../src/linkedAccountsLogic.ts");
-  const remote = [
-    { remoteId: "A", name: "Checking", oldestTransactionDate: "2026-01-04" },
-    { remoteId: "B", name: "Card", oldestTransactionDate: "2026-03-09" },
-    { remoteId: "C", name: "Empty", oldestTransactionDate: "" },
-    { remoteId: "D", name: "Unmapped", oldestTransactionDate: "2026-09-01" },
-    { remoteId: "E", name: "Old server", transactionCount: undefined }
-  ];
-  const mappings = { A: { accountId: "a" }, B: { accountId: "b" }, C: { accountId: "c" }, E: { accountId: "e" } };
-  const nameOf = (id) => ({ a: "Checking", b: "DCU Prithvi", c: "Savings" })[id] || "";
-  assert.deepEqual(historyCoverageNotes(remote, mappings, "2026-01-01", nameOf), ["DCU Prithvi: rows only go back to 2026-03-09", "Savings: no rows at all in that range"]);
-  assert.deepEqual(historyCoverageNotes(remote, mappings, "", nameOf), [], "only a history import reports it");
+test("missing-history gaps read clearly, are remembered once per account and period, and wait on Home until acknowledged", async () => {
+  const { historyGapDialogText, addHistoryGapNotices, historyGapMonths } = await import("../src/linkedAccountsLogic.ts");
+  const label = (month) => ({ "2026-01": "January 2026", "2026-03": "March 2026" })[month] || month;
+  const gaps = [{ remoteId: "B", name: "Card", fromMonth: "2026-01", toMonth: "2026-03", oldestReturned: "2026-03-09", skippedRows: 4 }, { remoteId: "C", name: "Other", fromMonth: "2026-03", toMonth: "2026-03", oldestReturned: "2026-03-15", skippedRows: 0 }];
+  const text = historyGapDialogText(gaps, (remoteId) => (remoteId === "B" ? "DCU Prithvi" : ""), label);
+  assert.match(text, /did not return all the history you asked for/);
+  assert.match(text, /DCU Prithvi: January 2026 to March 2026 will NOT be imported \(the bank's rows only start on 2026-03-09\)/);
+  assert.match(text, /Other: March 2026 will NOT be imported/);
+  assert.match(text, /import those months for those accounts from a bank statement/);
+  assert.match(text, /Import everything else now\?$/);
+  assert.equal(historyGapMonths(gaps[1], label), "March 2026");
+  const ids = (() => { let n = 0; return (prefix) => `${prefix}-${++n}`; })();
+  const mappings = { B: { accountId: "dcu" }, C: { accountId: "other" } };
+  const first = addHistoryGapNotices(undefined, gaps, mappings, (id) => ({ dcu: "DCU Prithvi" })[id] || "", ids, "2026-10-27T00:00:00Z");
+  assert.deepEqual(first.map((n) => [n.accountId, n.accountName, n.fromMonth, n.toMonth]), [["dcu", "DCU Prithvi", "2026-01", "2026-03"], ["other", "Other", "2026-03", "2026-03"]]);
+  assert.equal(addHistoryGapNotices(first, gaps, mappings, () => "", ids, "2026-10-28T00:00:00Z").length, 2, "running the same import again does not repeat the reminder");
 });

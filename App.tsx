@@ -48,7 +48,7 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyCoverageNotes } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -718,6 +718,18 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
       : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
     </Card>
+    {(state.historyGapNotices || []).length ? <Card>
+      <Text style={[styles.cardTitle, { color: colors.coral }]}>Some bank history is missing - import it from a statement</Text>
+      <Text style={styles.muted}>The bank did not return these months, so they were left out rather than half-filled. For each, import a statement for the account (Bank stream, then Import a statement). Mark it done once you have.</Text>
+      {(state.historyGapNotices || []).map((notice) => <View key={notice.id} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{(state.accounts || []).find((account) => account.id === notice.accountId)?.name || notice.accountName}</Text>
+          <Text style={styles.rowDetail}>{historyGapMonths(notice, formatMonthLabel)} · the bank's rows start on {notice.oldestReturned}</Text>
+        </View>
+        <Pressable style={styles.secondarySmall} onPress={() => onGoTab("budget")}><Text style={styles.secondaryButtonText}>Import</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, historyGapNotices: (state.historyGapNotices || []).filter((item) => item.id !== notice.id) })}><Text style={styles.secondaryButtonText}>I've imported it</Text></Pressable>
+      </View>)}
+    </Card> : null}
     {salaryNotices.length ? <Card>
       <Text style={styles.cardTitle}>Added from the salary in your accounts</Text>
       {salaryNotices.map((paycheck) => {
@@ -3818,6 +3830,22 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     try {
       const payload = await api.syncLinkedAccount(link.id, sinceDate || undefined);
       let summary: string;
+      if (payload.provider === "simplefin" && payload.historyGaps?.length) {
+        // The person must agree before anything is imported: those whole months are left out and have to come from a statement.
+        const accountNameOf = (remoteId: string) => (stateRef.current.accounts || []).find((account) => account.id === link.mappings[remoteId]?.accountId)?.name || "";
+        const proceed = await new Promise<boolean>((resolve) => Alert.alert("Part of that history is missing", historyGapDialogText(payload.historyGaps || [], accountNameOf, formatMonthLabel), [
+          { text: "Cancel - import nothing", style: "cancel", onPress: () => resolve(false) },
+          { text: "Import the rest", onPress: () => resolve(true) }
+        ], { cancelable: false }));
+        if (!proceed) {
+          // Nothing is applied; clearing what the server staged keeps the overnight job from importing it behind the person's back.
+          if (payload.stagedAt) await api.ackLinkedSync(link.id, payload.stagedAt);
+          setFeedback(`${link.label}: nothing was imported. The bank's history for those accounts is incomplete - import those months from a statement, or ask for a later start date.`);
+          return;
+        }
+        const latestState = stateRef.current;
+        await onSave({ ...latestState, historyGapNotices: addHistoryGapNotices(latestState.historyGapNotices, payload.historyGaps, link.mappings, (accountId) => (latestState.accounts || []).find((account) => account.id === accountId)?.name || "", uniqueId, new Date().toISOString()) });
+      }
       if (payload.provider === "simplefin") {
         const current = stateRef.current;
         const { fresh, unmapped } = selectNewLinkedTransactions(payload.transactions || [], link.mappings, knownLinkedIds(current, !sinceDate));
@@ -3858,8 +3886,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         });
         if (exceedsStateLimit(working) || !historyImportFits(JSON.stringify(current).length, posted.length)) throw new Error(`Importing ${posted.length} transactions would push your household data past the 1 MB the server can save. Import a shorter range (a later start date), or clean up old transactions first.`);
         summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched, debtsMatched);
-        const coverage = historyCoverageNotes(payload.accounts, link.mappings, sinceDate, (accountId) => (current.accounts || []).find((account) => account.id === accountId)?.name || "");
-        if (coverage.length) summary += ` Less history than you asked for: ${coverage.join("; ")} - that is all the bank holds (it varies by bank), or all it would send.`;
+        if (payload.historyGaps?.length) summary += " Some months were left out because the bank did not return them - see Home for what to import from a statement.";
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
         await onSave(working);
         if (newDraftIds.length) summary += ` ${await runAiImport(() => stateRef.current, onSave, newDraftIds, link.label, newDraftIds.length, () => undefined)}`;

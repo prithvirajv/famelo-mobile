@@ -9,9 +9,11 @@ export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: 
 export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string; transactionCount?: number; oldestTransactionDate?: string };
+// A bank that returned only part of the history a history import asked for: the server leaves those whole months out (trimPartialHistory).
+export type HistoryGap = { remoteId: string; name: string; fromMonth: string; toMonth: string; oldestReturned: string; skippedRows: number };
 export type LinkedTransaction = { externalId: string; remoteAccountId: string; date: string; payee: string; amount: number; pending: boolean };
 export type LinkedPosition = { remoteAccountId: string; symbol: string; name: string; units: number; price: number; costBasis: number; currency: string; holdingType: "stock" | "fund" };
-export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[] };
+export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[]; historyGaps?: HistoryGap[] };
 
 // The one-line notice for accounts a link has reported that the user has not decided about yet ('' when there are none).
 export function newAccountsNotice(link: Pick<LinkedLink, "newAccounts">): string {
@@ -207,18 +209,25 @@ export function isRealDateKey(value: string): boolean {
   return date.getUTCMonth() === Number(match[2]) - 1 && date.getUTCDate() === Number(match[3]);
 }
 
-// After a history import from a date: which mapped accounts came back with less than was asked for (the bank only holds so much), so the
-// person is told instead of wondering where the early months went. Mirrors web's historyCoverageNotes.
-export function historyCoverageNotes(remoteAccounts: RemoteAccount[], mappings: Record<string, LinkedMapping>, sinceDate: string, nameOf: (localAccountId: string) => string, limit = 5): string[] {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(sinceDate || ""))) return [];
-  const since = Date.parse(`${sinceDate}T00:00:00Z`);
-  const notes: string[] = [];
-  for (const remote of remoteAccounts || []) {
-    const accountId = mappings?.[remote.remoteId]?.accountId;
-    if (!accountId || remote.oldestTransactionDate === undefined) continue;
-    const oldest = remote.oldestTransactionDate ? Date.parse(`${remote.oldestTransactionDate}T00:00:00Z`) : null;
-    if (oldest !== null && oldest - since <= 21 * 86400000) continue;
-    notes.push(`${nameOf(accountId) || remote.name}: ${remote.oldestTransactionDate ? `rows only go back to ${remote.oldestTransactionDate}` : "no rows at all in that range"}`);
+// Mirrors web's historyGapDialogText / recordHistoryGapNotices: the months a bank only partly returned are left out whole, the person must
+// agree before the rest is imported, and a reminder stays on Home until they mark the statement import done.
+export function historyGapMonths(gap: Pick<HistoryGap, "fromMonth" | "toMonth">, monthLabel: (monthKey: string) => string): string {
+  return gap.fromMonth === gap.toMonth ? monthLabel(gap.fromMonth) : `${monthLabel(gap.fromMonth)} to ${monthLabel(gap.toMonth)}`;
+}
+
+export function historyGapDialogText(gaps: HistoryGap[], nameOf: (remoteId: string) => string, monthLabel: (monthKey: string) => string): string {
+  const lines = gaps.map((gap) => `\u2022 ${nameOf(gap.remoteId) || gap.name}: ${historyGapMonths(gap, monthLabel)} will NOT be imported (the bank's rows only start on ${gap.oldestReturned})`);
+  return `The bank did not return all the history you asked for.\n\n${lines.join("\n")}\n\nThose whole months are left out on purpose - half a month would make the ledger wrong and double up when you import it yourself. After this, import those months for ${gaps.length === 1 ? "that account" : "those accounts"} from a bank statement (Bank stream, then Import a statement) and pick the account.\n\nImport everything else now?`;
+}
+
+export type HistoryGapNotice = { id: string; accountId: string; accountName: string; fromMonth: string; toMonth: string; oldestReturned: string; createdAt: string };
+
+export function addHistoryGapNotices(existing: HistoryGapNotice[] | undefined, gaps: HistoryGap[], mappings: Record<string, LinkedMapping>, nameOf: (localAccountId: string) => string, createId: (prefix: string) => string, nowIso: string): HistoryGapNotice[] {
+  const notices = [...(existing || [])];
+  for (const gap of gaps) {
+    const accountId = mappings[gap.remoteId]?.accountId || "";
+    if (notices.some((notice) => notice.accountId === accountId && notice.fromMonth === gap.fromMonth && notice.toMonth === gap.toMonth)) continue;
+    notices.push({ id: createId("history-gap"), accountId, accountName: nameOf(accountId) || gap.name, fromMonth: gap.fromMonth, toMonth: gap.toMonth, oldestReturned: gap.oldestReturned, createdAt: nowIso });
   }
-  return notes.slice(0, limit);
+  return notices;
 }
