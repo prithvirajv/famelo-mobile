@@ -4,7 +4,8 @@ import {
   parseBankCsvTransactions, parseDelimitedText, normalizeCsvDate, matchAccountByHints, normalizeForAccountMatch, isDuplicateTransaction, findTransferCandidate,
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
-  acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer
+  acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
+  planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips
 } from "../src/bankStreamLogic.ts";
 
 // All fixtures here are synthetic (SAMPLE names) - never copy rows from a real statement into a test.
@@ -508,4 +509,41 @@ test("cleanup previews and removes only rows before the cutoff from the chosen p
   assert.ok(csv.includes('Ledger,2026-01-05,"Old, Shop",10,Food,Groceries,Checking,,x; y'));
   assert.ok(csv.includes('"Say ""hi"""') && csv.includes('"line1\nline2"') && csv.includes("Bank stream,2026-02-01,Old draft,3"));
   assert.equal(cleanupSummary(1, 2), "Removed 1 ledger transaction and 2 Bank stream rows.");
+});
+
+// ---- Bulk transfers and duplicates ----------------------------------------------------------------------------------
+const bulkDraft = (id, payee, amount, date, accountId, extra = {}) => ({ id, payee, amount, date, accountId, ...extra });
+const bulkState = (drafts, transactions = []) => ({ household: { name: "H", country: "US", currency: "USD", activity: [] }, budget: { month: "2026-09", income: 0, categories: [] }, accounts: [], transactions, transactionInboxDrafts: drafts, transactionInboxDone: [], transfers: [] });
+
+test("bulk transfers pair both halves once, nearest dates first, and clear them without touching the ledger", () => {
+  const ledgerRow = { date: "2026-09-01", payee: "KEEP", amount: 5, lineId: "", accountId: "a" };
+  const drafts = [
+    bulkDraft("a", "TRANSFER TO MBR", 1500, "2026-09-25", "deebiga"), bulkDraft("b", "TRANSFER FROM ACCT", -1500, "2026-09-25", "prithvi"),
+    bulkDraft("c", "ELECTRONIC WITHDRAWAL", 1500, "2026-09-24", "prithvi"), bulkDraft("d", "ONLINE PAYMENT", -1500, "2026-09-23", "card"),
+    bulkDraft("e", "ONLINE PAYMENT", -1500, "2026-09-25", "card"), bulkDraft("f", "NO ACCOUNT", 9, "2026-09-25", "")
+  ];
+  assert.deepEqual(planBulkTransfers(drafts).map((pair) => [pair.out.id, pair.in.id]), [["c", "d"], ["a", "b"]]);
+  let n = 0;
+  const { state, moved } = applyBulkTransfers(bulkState(drafts, [ledgerRow]), () => `t${++n}`);
+  assert.equal(moved, 2);
+  assert.deepEqual(state.transfers.map((t) => [t.fromAccountId, t.toAccountId, t.amount]), [["deebiga", "prithvi", 1500], ["prithvi", "card", 1500]]);
+  assert.deepEqual(state.transactionInboxDrafts.map((d) => d.id), ["e", "f"]);
+  assert.deepEqual(state.transactionInboxDone.sort(), ["a", "b", "c", "d"]);
+  assert.deepEqual(state.transactions, [ledgerRow]);
+  assert.equal(applyBulkTransfers(bulkState([bulkDraft("x", "ONE", 5, "2026-09-25", "a")]), () => "t").moved, 0);
+});
+
+test("bulk duplicates: same bank id or same amount, date and payee word as a ledger entry; never two untagged waiting rows", () => {
+  const ledger = [{ externalId: "sf:A:1", payee: "COSTCO", amount: 50, date: "2026-09-01" }, { payee: "Coffee House", amount: 12, date: "2026-09-10" }];
+  const drafts = [
+    bulkDraft("1", "COSTCO WHSE", 50, "2026-09-01", "a", { externalId: "sf:A:1" }), bulkDraft("2", "SQ *COFFEE HOUSE 123", 12, "2026-09-11", "a", { externalId: "sf:A:2" }),
+    bulkDraft("3", "CHIPOTLE", 12, "2026-09-10", "a", { externalId: "sf:A:3" }), bulkDraft("4", "COSTCO WHSE", 50, "2026-09-01", "a", { externalId: "sf:A:4" }),
+    bulkDraft("5", "ANOTHER", 9, "2026-09-12", "a", { externalId: "sf:A:5" }), bulkDraft("6", "ANOTHER", 9, "2026-09-12", "a", { externalId: "sf:A:5" }),
+    bulkDraft("7", "TWO COFFEES", 5, "2026-09-12", "a"), bulkDraft("8", "TWO COFFEES", 5, "2026-09-12", "a")
+  ];
+  assert.deepEqual(planBulkDuplicateSkips(drafts, ledger).map((d) => d.id), ["1", "2", "6"]);
+  const { state, skipped } = applyBulkDuplicateSkips(bulkState(drafts, ledger));
+  assert.equal(skipped, 3);
+  assert.deepEqual(state.transactionInboxDrafts.map((d) => d.id), ["3", "4", "5", "7", "8"]);
+  assert.equal(state.transactions.length, 2);
 });

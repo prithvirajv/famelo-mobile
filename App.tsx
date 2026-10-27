@@ -59,7 +59,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -3024,7 +3024,32 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     const ids = (stateRef.current.transactionInboxDrafts || []).map((draft) => draft.id as string).filter(Boolean);
     if (!ids.length || aiWorking) return;
     setAiWorking(true);
-    try { await runAiImportPass(ids, "Bank stream", ids.length, true); } finally { setAiWorking(false); }
+    // A pass that has not finished in four minutes is treated as stuck: the button comes back and can be pressed again.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([runAiImportPass(ids, "Bank stream", ids.length, true), new Promise<void>((resolve) => { timer = setTimeout(() => { setFeedback("The AI pass is taking longer than expected - the rows are still in Bank stream. Press the button to try again."); resolve(); }, 4 * 60 * 1000); })]);
+    } finally { if (timer) clearTimeout(timer); setAiWorking(false); }
+  };
+
+  const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || []);
+  const bulkSkips = planBulkDuplicateSkips(state.transactionInboxDrafts || [], state.transactions);
+  const accountLabel = (id?: string) => accounts.find((account) => account.id === id)?.name || "Unknown account";
+  const confirmBulkTransfers = () => {
+    if (!bulkPairs.length) return;
+    const total = bulkPairs.reduce((sum, pair) => sum + Math.abs(Number(pair.out.amount)), 0);
+    const list = bulkPairs.slice(0, 6).map((pair) => `${pair.out.date}  ${exactMoney(Math.abs(Number(pair.out.amount)), currency)}  ${accountLabel(pair.out.accountId)} → ${accountLabel(pair.in.accountId)}`).join("\n");
+    const more = bulkPairs.length > 6 ? `\n…and ${bulkPairs.length - 6} more` : "";
+    Alert.alert(`Move ${bulkPairs.length} pair${bulkPairs.length === 1 ? "" : "s"} to Transfers?`, `${exactMoney(total, currency)} in all. Each pair becomes one transfer from the account the money left to the account it landed in, and both waiting rows are cleared. Nothing in the Ledger is touched.\n\n${list}${more}`, [{ text: "Cancel" }, {
+      text: `Move ${bulkPairs.length}`, onPress: () => { const result = applyBulkTransfers(stateRef.current, () => uniqueId("transfer")); void onSave(result.state); setFeedback(`Moved ${result.moved} pair${result.moved === 1 ? "" : "s"} to Transfers.`); }
+    }]);
+  };
+  const confirmBulkSkips = () => {
+    if (!bulkSkips.length) return;
+    const list = bulkSkips.slice(0, 6).map((draft) => `${draft.date}  ${exactMoney(Math.abs(Number(draft.amount)), currency)}  ${draft.payee}`).join("\n");
+    const more = bulkSkips.length > 6 ? `\n…and ${bulkSkips.length - 6} more` : "";
+    Alert.alert(`Skip ${bulkSkips.length} duplicate${bulkSkips.length === 1 ? "" : "s"}?`, `They are the same bank transaction (or the same amount, date and payee) as an entry already in your Ledger, so adding them would count the money twice. Nothing in the Ledger is touched.\n\n${list}${more}`, [{ text: "Cancel" }, {
+      text: `Skip ${bulkSkips.length}`, onPress: () => { const result = applyBulkDuplicateSkips(stateRef.current); void onSave(result.state); setFeedback(`Skipped ${result.skipped} duplicate${result.skipped === 1 ? "" : "s"}.`); }
+    }]);
   };
 
   const importFile = async () => {
@@ -3154,6 +3179,13 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       {(state.transactionInboxDrafts || []).length ? <Pressable style={styles.secondaryButton} disabled={aiWorking} onPress={() => void processWaitingRows()}>{aiWorking ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Let AI categorize and add the {(state.transactionInboxDrafts || []).length} waiting row{(state.transactionInboxDrafts || []).length === 1 ? "" : "s"}</Text>}</Pressable> : null}
       {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
     </Card>
+    {bulkPairs.length || bulkSkips.length ? <Card>
+      <Text style={styles.cardTitle}>Settle waiting rows</Text>
+      {bulkPairs.length ? <><Text style={styles.muted}>{bulkPairs.length} pair{bulkPairs.length === 1 ? "" : "s"} of waiting rows move money between your own accounts (every month).</Text>
+        <Pressable style={styles.secondaryButton} onPress={confirmBulkTransfers}><Text style={styles.secondaryButtonText}>Move {bulkPairs.length} pair{bulkPairs.length === 1 ? "" : "s"} to Transfers…</Text></Pressable></> : null}
+      {bulkSkips.length ? <><Text style={styles.muted}>{bulkSkips.length} waiting row{bulkSkips.length === 1 ? " is" : "s are"} already recorded (every month).</Text>
+        <Pressable style={styles.secondaryButton} onPress={confirmBulkSkips}><Text style={styles.secondaryButtonText}>Skip {bulkSkips.length} duplicate{bulkSkips.length === 1 ? "" : "s"}…</Text></Pressable></> : null}
+    </Card> : null}
     <Card>
       <Text style={styles.cardTitle}>Clean up old transactions</Text>
       <Text style={styles.muted}>Permanently remove ledger transactions and/or waiting Bank stream rows from before a date. A CSV backup of exactly what goes is offered first.</Text>

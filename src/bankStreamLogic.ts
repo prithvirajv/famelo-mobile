@@ -541,6 +541,88 @@ export function moveDraftToTransfer(state: HouseholdState, draftId: string, coun
   } };
 }
 
+// ---- Settle waiting rows in bulk (same rules as the web Bank stream) -----------------------------------------------------
+// Both planners only choose the rows; the caller shows the list and applies it after the household confirms. The Ledger is never
+// touched, and a row whose other half is already in the Ledger is left for a one-by-one look.
+
+export type TransferPair = { out: InboxDraft; in: InboxDraft };
+
+// Both halves of a move between two own accounts (opposite amounts, different accounts, within the duplicate window), both still
+// waiting. Paired greedily, nearest dates first; a row is used once. The positive amount is the side the money left.
+export function planBulkTransfers(drafts: InboxDraft[]): TransferPair[] {
+  const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0);
+  const used = new Set<string | undefined>();
+  const pairs: TransferPair[] = [];
+  open.filter((draft) => Number(draft.amount) > 0).sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach((out) => {
+    let best: InboxDraft | null = null;
+    let bestGap = Infinity;
+    open.forEach((other) => {
+      if (used.has(other.id) || other.id === out.id || other.accountId === out.accountId || Number(other.amount) !== -Number(out.amount)) return;
+      const gap = absoluteDaysBetweenDateKeys(other.date || "", out.date || "");
+      if (gap <= DUPLICATE_TOLERANCE_DAYS && gap < bestGap) { best = other; bestGap = gap; }
+    });
+    if (!best || used.has(out.id)) return;
+    used.add(out.id);
+    used.add((best as InboxDraft).id);
+    pairs.push({ out, in: best });
+  });
+  return pairs;
+}
+
+function payeesShareAWord(a: unknown, b: unknown): boolean {
+  const words = (value: unknown) => new Set(String(value || "").toLowerCase().split(/[^a-z]+/).filter((word) => word.length >= 4));
+  const left = words(a);
+  return [...words(b)].some((word) => left.has(word));
+}
+
+// Waiting rows that are certainly a transaction already recorded: the same bank id as a Ledger row or an earlier waiting row, or the
+// same amount within the duplicate window as a hand-entered Ledger entry whose payee shares a word of four or more letters. Two
+// waiting rows without bank ids are never judged against each other (two real $5 coffees).
+export function planBulkDuplicateSkips(drafts: InboxDraft[], ledger: Transaction[]): InboxDraft[] {
+  const seenIds = new Set((ledger || []).map((row) => row.externalId).filter(Boolean));
+  const skips: InboxDraft[] = [];
+  (drafts || []).forEach((draft) => {
+    if (draft.externalId && seenIds.has(draft.externalId)) { skips.push(draft); return; }
+    if (draft.externalId) seenIds.add(draft.externalId);
+    const sameAsLedger = (ledger || []).some((row) => !(draft.externalId && row.externalId)
+      && Number(row.amount) === Number(draft.amount)
+      && absoluteDaysBetweenDateKeys(row.date || "", draft.date || "") <= DUPLICATE_TOLERANCE_DAYS
+      && payeesShareAWord(row.payee, draft.payee));
+    if (sameAsLedger) skips.push(draft);
+  });
+  return skips;
+}
+
+export function applyBulkTransfers(state: HouseholdState, createId: () => string): { state: HouseholdState; moved: number } {
+  const pairs = planBulkTransfers(state.transactionInboxDrafts || []);
+  if (!pairs.length) return { state, moved: 0 };
+  const gone = new Set<string | undefined>(pairs.flatMap((pair) => [pair.out.id, pair.in.id]));
+  const transfers = pairs.map((pair) => ({
+    id: createId(), date: pair.out.date || "", fromAccountId: pair.out.accountId || "", toAccountId: pair.in.accountId || "",
+    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim()
+  }));
+  let done = state.transactionInboxDone || [];
+  gone.forEach((id) => { if (id && !done.includes(id)) done = [...done, id]; });
+  return { moved: pairs.length, state: {
+    ...state, transfers: [...transfers.reverse(), ...(state.transfers || [])], transactionInboxDone: done,
+    transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((draft) => !gone.has(draft.id)),
+    household: withActivity(state, `Moved ${pairs.length} waiting bank row pair${pairs.length === 1 ? "" : "s"} to Transfers`)
+  } };
+}
+
+export function applyBulkDuplicateSkips(state: HouseholdState): { state: HouseholdState; skipped: number } {
+  const skips = planBulkDuplicateSkips(state.transactionInboxDrafts || [], state.transactions);
+  if (!skips.length) return { state, skipped: 0 };
+  const gone = new Set(skips.map((draft) => draft.id));
+  let done = state.transactionInboxDone || [];
+  gone.forEach((id) => { if (id && !done.includes(id)) done = [...done, id]; });
+  return { skipped: skips.length, state: {
+    ...state, transactionInboxDone: done,
+    transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((draft) => !gone.has(draft.id)),
+    household: withActivity(state, `Skipped ${skips.length} waiting bank row${skips.length === 1 ? "" : "s"} already in the Ledger`)
+  } };
+}
+
 // ---- Bulk actions and sorting ---------------------------------------------------------------------------------------
 
 export type BulkAccountResult = { state: HouseholdState; applied: number; skippedClosed: number };
