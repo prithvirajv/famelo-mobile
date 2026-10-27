@@ -2757,12 +2757,14 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
 // say why. Reads the latest state through getState because it runs across awaits; returns the summary message.
 async function runAiImport(getState: () => HouseholdState, onSave: (next: HouseholdState) => Promise<void>, draftIds: string[], fileName: string, importedCount: number, setStatus: (message: string) => void, rerun = false): Promise<string> {
   const lead = rerun ? `Checked ${importedCount} waiting row${importedCount === 1 ? "" : "s"}.` : `Imported ${importedCount} from ${fileName}.`;
-  let filled = 0; let aiNote = ""; let added = 0;
+  let filled = 0; let aiNote = ""; let added = 0; let uncategorized = 0;
+  const aiFailedIds = new Set<string>();
   const reasons: Record<string, number> = {};
   // Posts whatever is safe among these rows now, so the ledger fills as the pass goes rather than only at the very end.
   const postSafe = async (ids: string[], tally = false) => {
-    const posted = autoAcceptSafeDrafts(getState(), ids, tally);
+    const posted = autoAcceptSafeDrafts(getState(), ids, tally, aiFailedIds);
     added += posted.added;
+    uncategorized += posted.uncategorized;
     // Reasons are tallied once, on the final pass over everything still waiting, so no row is counted twice.
     if (tally) Object.entries(posted.reasons).forEach(([reason, count]) => { reasons[reason] = (reasons[reason] || 0) + count; });
     if (posted.added) await onSave(posted.state);
@@ -2794,6 +2796,7 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
         } catch (cause) {
           // One failed chunk must not stop the rest: its rows stay in Bank stream and the pass carries on.
           aiNote = ` AI categorization failed for some rows (${cause instanceof Error ? cause.message : "unknown error"}) - they were left for review.`;
+          chunk.forEach((draft) => aiFailedIds.add(draft.id as string));
         }
         await postSafe(chunk.map((draft) => draft.id as string));
       }
@@ -2802,7 +2805,7 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
     aiNote = ` The import pass stopped (${cause instanceof Error ? cause.message : "unknown error"}) - the remaining rows were left for review.`;
   }
   await postSafe(draftIds, true);
-  return importSummary(fileName, importedCount, filled, added, draftIds.length - added, reasons, aiNote, rerun);
+  return importSummary(fileName, importedCount, filled, added, draftIds.length - added, reasons, aiNote, rerun, uncategorized);
 }
 
 // The inbox of unreviewed bank/credit-card rows: import a statement (CSV or PDF), review each row (category, account,

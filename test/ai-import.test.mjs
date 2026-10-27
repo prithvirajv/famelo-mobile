@@ -81,14 +81,21 @@ test("autoAcceptSafeDrafts posts safe rows to the ledger with their account and 
     draft({ id: "uncat", payee: "SAMPLE OTHER", amount: 3 })
   ] });
   const result = autoAcceptSafeDrafts(state, ["safe", "guess", "dup", "uncat"]);
-  assert.equal(result.added, 1);
-  assert.deepEqual(result.state.transactions.map((t) => [t.payee, t.lineId, t.accountId, t.subcategoryName]), [["SAMPLE GROCER", "groceries", "chk", "Groceries"], ["SAMPLE REPEAT", "dining", "chk", "Dining"]]);
-  assert.equal(result.state.transactions.length, 2, "only the one safe row was added to the existing ledger entry");
-  assert.deepEqual(result.state.transactionInboxDrafts.map((d) => d.id).sort(), ["dup", "guess", "uncat"]);
+  // The unsure AI guess goes in without its category (nothing is counted against a line it may have got wrong); the duplicate and the
+  // row with no account stay for review.
+  assert.equal(result.added, 2);
+  assert.equal(result.uncategorized, 1);
+  assert.deepEqual(result.state.transactions.map((t) => [t.payee, t.lineId, t.accountId]), [["SAMPLE UNSURE", "", "chk"], ["SAMPLE GROCER", "groceries", "chk"], ["SAMPLE REPEAT", "dining", "chk"]]);
+  assert.equal(result.state.transactions[0].memo, "Needs a category");
+  assert.equal(result.state.transactions[1].subcategoryName, "Groceries");
+  assert.deepEqual(result.state.transactionInboxDrafts.map((d) => d.id).sort(), ["dup", "uncat"]);
   assert.ok(result.state.transactionInboxDone.includes("safe"));
-  assert.deepEqual(result.reasons, { "low confidence": 1, "possible duplicate": 1, "no category": 1 });
+  assert.deepEqual(result.reasons, { "possible duplicate": 1, "no account": 1 });
   assert.equal(state.transactions.length, 1, "input not mutated");
-  assert.equal(result.state.household.activity[0], "Assigned SAMPLE GROCER to Food - Groceries");
+  assert.equal(result.state.household.activity[0], "Assigned SAMPLE UNSURE to no category");
+  // A row whose AI call failed is kept for the next pass rather than posted without a category.
+  const failed = autoAcceptSafeDrafts(state, ["guess"], true, new Set(["guess"]));
+  assert.deepEqual([failed.added, failed.reasons], [0, { "AI did not answer": 1 }]);
 });
 
 test("importSummary reads naturally with and without leftovers or an AI failure", () => {
@@ -157,4 +164,15 @@ test("a fuzzy refund match never pairs a credit with a purchase on a different a
   assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05", accountId: "card" }, [purchase]), null);
   assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05", accountId: "chk" }, [purchase]), purchase);
   assert.equal(refundMatch({ payee: "SAMPLE STORE", amount: -12, date: "2026-10-05" }, [purchase]), purchase);
+});
+
+test("a bank-feed row with no category at all goes in as Needs a category; a plain file import still holds it", () => {
+  const state = baseState({ transactionInboxDrafts: [draft({ id: "blank", payee: "SAMPLE MYSTERY", amount: 8, accountId: "chk", externalId: "sf:1:1", date: "2026-10-02" })] });
+  const posted = autoAcceptSafeDrafts(state, ["blank"], true);
+  assert.equal(posted.added, 1);
+  assert.equal(posted.uncategorized, 1);
+  assert.equal(posted.state.transactions[0].lineId, "");
+  assert.equal(posted.state.transactions[0].memo, "Needs a category");
+  assert.equal(autoAcceptDecision(draft({ accountId: "chk" }), ctx).reason, "no category", "without the bank-feed flag the old rule holds");
+  assert.match(importSummary("f", 1, 0, 1, 0, {}, "", false, 1), /1 without a category/);
 });

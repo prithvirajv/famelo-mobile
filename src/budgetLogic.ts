@@ -28,6 +28,7 @@ export function lineSnapshot(state: Pick<HouseholdState, "budget">, lineId: stri
 
 export function transactionAssignmentLabel(state: Pick<HouseholdState, "budget">, transaction: Transaction): string {
   if (transaction.splits?.length) return `Split (${transaction.splits.length} categories)`;
+  if (!transaction.lineId) return "Needs a category";
   const liveLine = allBudgetLines(state).find((line) => line.id === transaction.lineId);
   const category = liveLine?.category || transaction.categoryName || "Deleted category";
   const subcategory = liveLine?.name || transaction.subcategoryName || transaction.lineId || "Deleted subcategory";

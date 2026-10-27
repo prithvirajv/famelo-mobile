@@ -26,6 +26,7 @@ function lineSnapshot(state: Pick<HouseholdState, "budget">, lineId: string): { 
     const line = category.lines.find((item) => item.id === lineId);
     if (line) return { categoryName: category.name, subcategoryName: line.name };
   }
+  if (!lineId) return { categoryName: "", subcategoryName: "" };
   return { categoryName: "Deleted category", subcategoryName: lineId || "Deleted subcategory" };
 }
 
@@ -690,9 +691,11 @@ export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boo
 
 // Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision). A row
 // from a linked bank feed (context.bankFeed) is the bank's own record, so card payments/deposits go in too - except a deposit that matches
-// a paycheck already recorded for that account (context.paycheckMatch), which would count the income twice.
-export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext): { accept: boolean; reason: string } {
-  if (!draft.lineId) return { accept: false, reason: "no category" };
+// a paycheck already recorded for that account (context.paycheckMatch), which would count the income twice. A bank-feed row the AI could not
+// categorize (or was unsure about) still goes in with no category (uncategorized: true), marked "Needs a category" in the ledger.
+export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext): { accept: boolean; reason: string; uncategorized?: boolean } {
+  const missingCategory = !draft.lineId;
+  if (missingCategory && !context.bankFeed) return { accept: false, reason: "no category" };
   if (context.accountsExist && !draft.accountId) return { accept: false, reason: "no account" };
   if (context.possibleDuplicate) return { accept: false, reason: "possible duplicate" };
   if (context.refundMatch && !refundCanPost(draft, context)) return { accept: false, reason: "refund" };
@@ -701,9 +704,15 @@ export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext
   if (!context.bankFeed && (draft.isPayment || draft.isDeposit)) return { accept: false, reason: "payment or deposit" };
   if (draft.isPending) return { accept: false, reason: "still pending" };
   if (context.accountClosedForDate) return { accept: false, reason: "account closed" };
+  if (missingCategory) return { accept: true, reason: "", uncategorized: true };
   // A "refund" category is only trusted together with a posted purchase it nets against (checked above).
-  if (!["rule", "history", "ai-high"].includes(draft.lineSource || "") && !(draft.lineSource === "refund" && context.refundMatch)) return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
-  return { accept: true, reason: "" };
+  const trusted = ["rule", "history", "ai-high"].includes(draft.lineSource || "") || (draft.lineSource === "refund" && Boolean(context.refundMatch));
+  if (trusted) return { accept: true, reason: "" };
+  // The AI was unsure: post without its guess rather than count the spend against a category it may have got wrong.
+  if (context.bankFeed && draft.lineSource === "ai-low") return { accept: true, reason: "", uncategorized: true };
+  // A category with no recorded source is one the household set itself (or an older import) - a linked feed keeps it.
+  if (context.bankFeed) return { accept: true, reason: "" };
+  return { accept: false, reason: draft.lineSource === "ai-low" ? "low confidence" : "unverified category" };
 }
 
 // A return from a linked bank or card goes straight in when it nets against a purchase already in the ledger: same account, the exact
@@ -753,9 +762,10 @@ export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "a
 }
 
 // Posts every safe draft among draftIds into the ledger (each decided against the ledger as it stands after the previous one).
-export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], final = false): { state: HouseholdState; added: number; reasons: Record<string, number> } {
+export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], final = false, aiFailedIds: Set<string> = new Set()): { state: HouseholdState; added: number; uncategorized: number; reasons: Record<string, number> } {
   let current = state;
   let added = 0;
+  let uncategorized = 0;
   const reasons: Record<string, number> = {};
   for (const id of draftIds) {
     const draft = (current.transactionInboxDrafts || []).find((item) => item.id === id);
@@ -777,16 +787,19 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], 
       paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences)
     });
     if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
-    const accepted = acceptDraft(current, id, returnOfPosted && returnOf ? refundMemo(returnOf) : "");
-    if (accepted.ok) { current = accepted.state; added += 1; } else reasons["could not post"] = (reasons["could not post"] || 0) + 1;
+    // A row the AI never answered for (a failed or timed-out call) is kept for the next pass instead of going in without a category.
+    if (decision.uncategorized && aiFailedIds.has(id)) { reasons["AI did not answer"] = (reasons["AI did not answer"] || 0) + 1; continue; }
+    if (decision.uncategorized) current = { ...current, transactionInboxDrafts: (current.transactionInboxDrafts || []).map((item) => item.id === id ? { ...item, lineId: "", lineSource: "" } : item) };
+    const accepted = acceptDraft(current, id, decision.uncategorized ? "Needs a category" : returnOfPosted && returnOf ? refundMemo(returnOf) : "");
+    if (accepted.ok) { current = accepted.state; added += 1; if (decision.uncategorized) uncategorized += 1; } else reasons["could not post"] = (reasons["could not post"] || 0) + 1;
   }
-  return { state: current, added, reasons };
+  return { state: current, added, uncategorized, reasons };
 }
 
-export function importSummary(fileName: string, importedCount: number, filled: number, added: number, remaining: number, reasons: Record<string, number>, aiNote = "", rerun = false): string {
+export function importSummary(fileName: string, importedCount: number, filled: number, added: number, remaining: number, reasons: Record<string, number>, aiNote = "", rerun = false, uncategorized = 0): string {
   const reasonText = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([reason, count]) => `${count} ${reason}`).join(", ");
   const lead = rerun ? `Checked ${importedCount} waiting row${importedCount === 1 ? "" : "s"}.` : `Imported ${importedCount} from ${fileName}.`;
-  return `${lead}${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
+  return `${lead}${filled ? ` AI filled in ${filled} row${filled === 1 ? "" : "s"}.` : ""} ${added} added to the ledger${uncategorized ? ` (${uncategorized} without a category - marked "Needs a category" there)` : ""}${remaining ? `; ${remaining} left in Bank stream to review (${reasonText})` : ""}.${aiNote}`;
 }
 
 // ---- Clean up old transactions ------------------------------------------------------------------------------------
