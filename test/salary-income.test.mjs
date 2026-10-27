@@ -18,7 +18,7 @@ const ids = () => { let n = 0; return (prefix) => `${prefix}-${++n}`; };
 test("a steady payer on a regular cadence is detected; transfers, P2P, short series and stale series are not", () => {
   const rows = paydays.map((date) => dep(`ACME PAYROLL #${date.replace(/-/g, "")}`, 2500, date));
   const [salary] = detectSalaryDeposits(rows, TODAY);
-  assert.deepEqual([salary.name, salary.recurrence, salary.amount, salary.anchorDate, salary.count], ["ACME PAYROLL", "biweekly", 2500, "2026-09-11", 6]);
+  assert.deepEqual([salary.name, salary.recurrence, salary.amount, salary.anchorDate, salary.count], ["ACME PAYROLL", "biweekly", 2500, "2026-11-06", 6]);
   assert.equal(detectSalaryDeposits(["2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"].map((date) => dep("Employer Direct Dep", 4000, date)), TODAY)[0].recurrence, "monthly");
   assert.deepEqual(detectSalaryDeposits(rows.slice(0, 2), TODAY), []);
   assert.deepEqual(detectSalaryDeposits(rows.map((row) => ({ ...row, payee: "Zelle payment from Sam" })), TODAY), []);
@@ -27,7 +27,7 @@ test("a steady payer on a regular cadence is detected; transfers, P2P, short ser
   assert.deepEqual(detectSalaryDeposits(["2026-08-01", "2026-08-16", "2026-09-01", "2026-09-16", "2026-10-01", "2026-10-16"].map((date) => dep("Twice Monthly Co", 1800, date)), TODAY), []);
 });
 
-test("a detected salary becomes a paycheck and its deposits are folded in without moving the account total; Undo restores everything", () => {
+test("a detected salary becomes a paycheck from the next payday; ledger entries are never taken out, only waiting deposits are folded in; Undo restores them", () => {
   const rows = paydays.map((date) => dep(`ACME PAYROLL #${date.replace(/-/g, "")}`, 2500, date));
   const state = baseState({
     transactions: rows.slice(0, 5).map((row) => ({ ...row, memo: "Accepted bank stream item" })),
@@ -37,10 +37,10 @@ test("a detected salary becomes a paycheck and its deposits are folded in withou
   assert.equal(result.changed, true);
   assert.equal(result.added, 1);
   const paycheck = result.state.paychecks[0];
-  assert.deepEqual([paycheck.name, paycheck.amount, paycheck.recurrence, paycheck.date, paycheck.depositAccountId], ["ACME PAYROLL (from your deposits)", 2500, "biweekly", "2026-09-11", ""]);
-  assert.equal(result.state.transactions.length, 0, "uncategorized bank deposit rows are taken out of the ledger");
+  assert.deepEqual([paycheck.name, paycheck.amount, paycheck.recurrence, paycheck.date, paycheck.depositAccountId], ["ACME PAYROLL (from your deposits)", 2500, "biweekly", "2026-11-06", ""]);
+  assert.equal(result.state.transactions.length, 5, "every entry already in the ledger stays");
+  assert.equal(result.state.accounts[0].openingBalance, 100, "and the opening balance was not moved to make up for a removal");
   assert.equal(result.state.transactionInboxDrafts.length, 0, "the waiting deposit is skipped");
-  assert.equal(result.state.accounts[0].openingBalance, 100 + 5 * 2500, "five deposits left the ledger, so the opening balance carries them and the total stays the bank's");
   assert.equal(detectedSalaryNotices(result.state).length, 1);
   assert.equal(state.transactions.length, 5, "input not mutated");
   assert.equal(applyDetectedSalaries(result.state, TODAY, ids()).changed, false, "a second pass finds nothing new");
@@ -59,7 +59,7 @@ test("categorized deposits stay, a hand-entered paycheck is authoritative, and a
   const rows = paydays.map((date) => dep(`ACME PAYROLL ${date.replace(/-/g, "")}`, 2500, date));
   const categorized = baseState({ transactions: rows.map((row, i) => ({ ...row, lineId: i === 0 ? "groceries" : "" })) });
   const folded = applyDetectedSalaries(categorized, TODAY, ids());
-  assert.equal(folded.state.transactions.length, 1, "a deposit the household categorized is left alone");
+  assert.equal(folded.state.transactions.length, 6, "no ledger entry is taken out, categorized or not");
   const detection = detectSalaryDeposits(rows, TODAY)[0];
   assert.equal(salaryAlreadyRecorded(detection, [{ amount: 2490, recurrence: "biweekly" }]), true);
   assert.equal(applyDetectedSalaries(baseState({ transactions: rows, paychecks: [{ id: "p", name: "Mine", amount: 2500, recurrence: "biweekly", date: "2026-01-02", assignedLineIds: [] }] }), TODAY, ids()).changed, false);

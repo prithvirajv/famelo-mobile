@@ -982,6 +982,7 @@ function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdS
     const item = state.transactions[index];
     if (!item) return;
     Alert.alert("Delete transaction?", `${item.payee} · ${money(Number(item.amount), currency)}`, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => {
+      api.allowNextShrink();
       void onSave({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) });
       if (editingTxIndex === index) resetTxForm();
     } }]);
@@ -3119,6 +3120,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     setTransferAccountId(draft.transferMatch?.accountId || "");
   };
   const confirmTransfer = async (draft: DraftReview) => {
+    api.allowNextShrink();
     if (await apply(moveDraftToTransfer(state, draft.id || "", transferAccountId, draft.payee || "", () => uniqueId("transfer")))) setTransferDraftId(null);
   };
 
@@ -3263,6 +3265,7 @@ async function inviteNewFriend(name: string, email: string, householdName: strin
 // Applies a split-with-friends to a bank-stream row or ledger transaction, then (best effort) invites any friend who was given
 // an email and isn't already one. Resolves true when it was applied.
 async function applySplitWithFriends(state: HouseholdState, onSave: (next: HouseholdState) => Promise<void>, source: IouSource, shares: FriendShare[], options: SplitWithFriendsOptions): Promise<boolean> {
+  api.allowNextShrink();
   const result = splitRecordWithFriends(state, source, shares, options, uniqueId);
   if (!result.ok) { Alert.alert("Can't split this", result.error); return false; }
   let friends = result.state.friends || [];

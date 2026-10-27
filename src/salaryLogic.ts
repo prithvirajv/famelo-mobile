@@ -29,6 +29,16 @@ export function salaryPayeeKey(payee: string | undefined): string {
 export type SalaryRow = { externalId?: string; accountId?: string; payee?: string; amount?: number | string; date?: string };
 export type SalaryDetection = { key: string; accountId: string; name: string; amount: number; recurrence: "weekly" | "biweekly" | "monthly"; anchorDate: string; lastDate: string; count: number };
 
+function nextSalaryPayday(dateKey: string, recurrence: SalaryDetection["recurrence"]): string {
+  const [year, month, day] = dateKey.split("-").map(Number) as [number, number, number];
+  if (recurrence === "monthly") {
+    const target = new Date(Date.UTC(year, month, 1));
+    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+  }
+  return new Date(Date.UTC(year, month - 1, day + (recurrence === "weekly" ? 7 : 14))).toISOString().slice(0, 10);
+}
+
 function salaryCadence(sortedDates: string[]): { recurrence: SalaryDetection["recurrence"]; stepDays: number } | null {
   const intervals: number[] = [];
   for (let i = 1; i < sortedDates.length; i += 1) intervals.push(daysBetween(sortedDates[i - 1] as string, sortedDates[i] as string));
@@ -67,9 +77,9 @@ export function detectSalaryDeposits(rows: SalaryRow[], todayKey: string): Salar
     if (daysBetween(last.date, todayKey) > cadence.stepDays * 2 + 4) return;
     const [accountId, key] = id.split("|") as [string, string];
     const todayDate = parseDateKey(todayKey);
-    // Income should cover last month and this one, so the series starts at the first deposit in that window (or the latest if none).
-    const windowStart = formatDateKey(new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1));
-    const anchorDate = (byDate.find((deposit) => deposit.date >= windowStart) || last).date;
+    // The paycheck starts at the NEXT payday after the latest deposit: what was already paid is in the ledger (and stays there - nothing that
+    // reached the ledger is ever taken out automatically), so the paycheck only counts income from here on and nothing is counted twice.
+    const anchorDate = nextSalaryPayday(last.date, cadence.recurrence);
     found.push({ key, accountId, name: String(last.payee || "").replace(/\d{3,}/g, " ").replace(/[#*_/\\-]+\s*$/g, "").replace(/\s+/g, " ").trim().slice(0, 60) || "Salary", amount: round2(last.received), recurrence: cadence.recurrence, anchorDate, lastDate: last.date, count: byDate.length });
   });
   return found.sort((a, b) => b.amount - a.amount);
@@ -158,14 +168,7 @@ export function applyDetectedSalaries(state: HouseholdState, todayKey: string, c
       autoDetected: { key: detection.key, accountId: detection.accountId, detectedAt: nowIso, acknowledged: false, removed: [], dismissed: [] }
     };
     const matches = (row: SalaryRow) => salaryDepositMatchesPaycheck(row, paycheck);
-    transactions = transactions.filter((transaction) => {
-      if (!transaction.externalId || transaction.lineId || (transaction.splits || []).length || !matches(transaction)) return true;
-      paycheck.autoDetected?.removed.push(transaction);
-      if (transaction.date <= todayKey) {
-        accounts = accounts.map((account) => account.id === transaction.accountId ? { ...account, openingBalance: round2(Number(account.openingBalance || 0) - openingShift(account, Number(transaction.amount))) } : account);
-      }
-      return false;
-    });
+    // Entries already in the ledger stay exactly as they are; only deposits still waiting in Bank stream are folded into the paycheck.
     drafts.filter(matches).forEach((draft) => dismiss(paycheck, draft));
     paychecks = [...paychecks, paycheck];
     log(`Income added from your deposits: ${paycheck.name}, ${paycheck.amount} ${salaryRecurrenceLabel(paycheck.recurrence)}`);

@@ -15,9 +15,9 @@ export class ApiError extends Error {
 // server - instead of silently overwriting that work. Saves run one at a time so each carries the version the previous one produced.
 let stateVersion: number | null = null;
 let saveChain: Promise<unknown> = Promise.resolve();
-// Set (just before a save) by the one flow that deliberately removes most of the ledger - Clean up - so the server does not take that save for an
-// out-of-date screen overwriting an import; the next save made consumes it.
-let allowShrinkNext = false;
+// A person deliberately removing a ledger entry (deleting it, moving it to Transfers, splitting it entirely with friends, Clean up) says so, so the
+// server does not take the save for an out-of-date screen dropping bank-imported entries. The allowance stays open for a few seconds.
+let allowRemovalUntil = 0;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -52,10 +52,9 @@ export const api = {
     method: "POST", body: JSON.stringify({ householdId })
   }),
   state: () => request<HouseholdState>("/api/state"),
-  allowNextShrink: () => { allowShrinkNext = true; },
+  allowNextShrink: () => { allowRemovalUntil = Date.now() + 10000; },
   saveState: (state: HouseholdState) => {
-    const allowShrink = allowShrinkNext;
-    allowShrinkNext = false;
+    const allowShrink = Date.now() < allowRemovalUntil;
     const send = () => request<{ ok: boolean }>("/api/state", {
       method: "PUT", body: JSON.stringify(state), headers: { ...(stateVersion !== null ? { "X-Base-Version": String(stateVersion) } : {}), ...(allowShrink ? { "X-Allow-Shrink": "1" } : {}) }
     });
