@@ -152,6 +152,8 @@ export type HouseholdState = {
   onboarding?: { dismissed: boolean };
   // externalIds of linked-account rows already turned into drafts (capped), so a re-sync never imports one twice.
   linkedImportedIds?: string[];
+  // false when the household turned off the overnight apply of linked-account transactions (on when absent).
+  linkedAutoApply?: boolean;
   // "<accountId>|<payer key>" of salaries the household undid, so they are not detected again.
   salaryDetectionIgnored?: string[];
   paycheckOccurrences?: PaycheckOccurrence[];

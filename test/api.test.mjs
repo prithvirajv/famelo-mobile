@@ -638,3 +638,13 @@ test("the linked-accounts card can import history from a date through an explici
   assert.match(card, /historyImportFits\(/);
   assert.match(card, /\{ text: "Cancel" \}, \{ text: "Import"/);
 });
+
+test("saves name the version they were based on, run one at a time, and a stale save reloads the household", () => {
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /X-Base-Version/);
+  assert.match(api, /x-state-version/);
+  assert.match(api, /saveChain\.then\(send, send\)/, "saves are queued so each carries the previous save's version");
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /cause\.status === 409\) \{ await loadWorkspace\(\)/, "a refused (stale) save shows the latest household");
+  assert.match(app, /api\.stateChanged\(\)/, "coming back to the app picks up what the server applied overnight");
+});

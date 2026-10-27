@@ -118,6 +118,8 @@ function AppContent() {
   const [waitingNotice, setWaitingNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  savingRef.current = saving;
   const [error, setError] = useState("");
 
   const loadWorkspace = useCallback(async () => {
@@ -148,9 +150,14 @@ function AppContent() {
   useEffect(() => {
     if (!user) return;
     void refreshWaitingNotice();
-    const subscription = AppState.addEventListener("change", (nextState) => { if (nextState === "active") void refreshWaitingNotice(); });
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState !== "active") return;
+      void refreshWaitingNotice();
+      // New bank transactions are applied on the server overnight: pick them up when the app comes back to the front, unless a save is under way.
+      void api.stateChanged().then((changed) => { if (changed && !savingRef.current) void loadWorkspace(); }).catch(() => undefined);
+    });
     return () => subscription.remove();
-  }, [user?.id, refreshWaitingNotice]);
+  }, [user?.id, refreshWaitingNotice, loadWorkspace]);
 
   useEffect(() => {
     if (!user) return;
@@ -181,9 +188,14 @@ function AppContent() {
     setState(next);
     setSaving(true);
     try { await api.saveState(next); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Changes could not be saved"); }
+    catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Changes could not be saved";
+      // Someone else (another device, or the overnight bank sync) wrote first: show their version rather than keep a stale copy, then say so.
+      if (cause instanceof ApiError && cause.status === 409) { await loadWorkspace(); }
+      setError(message);
+    }
     finally { setSaving(false); }
-  }, []);
+  }, [loadWorkspace]);
 
   const saveJournal = useCallback(async (journal: PrivateData["journal"]) => {
     setPrivateData((prev) => prev ? { ...prev, journal } : prev);
@@ -4007,6 +4019,10 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         <Text style={styles.muted}>How far back it goes depends on the bank (often 3-12 months). Rows you already have are skipped; rows you removed with Clean up come back.</Text>
       </View> : null}
     </View>)}
+    {overview.links.length ? <Pressable style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked: state.linkedAutoApply !== false }} onPress={() => void onSave({ ...state, linkedAutoApply: state.linkedAutoApply === false })}>
+      <Ionicons name={state.linkedAutoApply === false ? "square-outline" : "checkbox"} size={22} color={state.linkedAutoApply === false ? colors.muted : colors.green} />
+      <Text style={[styles.rowDetail, { flex: 1 }]}>Add new bank transactions to the ledger overnight, without opening the app (categorized with AI; anything doubtful waits in Bank stream)</Text>
+    </Pressable> : null}
     {mapping && activeLink ? <View style={styles.subtaskList}>
       <Text style={styles.label}>Where should each account go?</Text>
       {mapping.remote.length ? mapping.remote.map((remote) => <View key={remote.remoteId}>

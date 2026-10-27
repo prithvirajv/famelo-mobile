@@ -10,6 +10,12 @@ export class ApiError extends Error {
   }
 }
 
+// The household's version, learned from every load and save of its state. A save names the version it was based on, so the server can
+// refuse it (409) when something else wrote first - another device, or the overnight bank sync that now applies new transactions on the
+// server - instead of silently overwriting that work. Saves run one at a time so each carries the version the previous one produced.
+let stateVersion: number | null = null;
+let saveChain: Promise<unknown> = Promise.resolve();
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -17,6 +23,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers: { "Content-Type": "application/json", Accept: "application/json", ...options.headers }
   });
   const body = await response.json().catch(() => ({}));
+  if (path === "/api/state" && response.ok) {
+    const version = response.headers.get("x-state-version");
+    if (version !== null && /^\d+$/.test(version)) stateVersion = Number(version);
+  }
   if (!response.ok) {
     // The server caps ordinary JSON bodies at 1 MB and replies with a non-JSON error page, which would otherwise surface as a
     // meaningless "Request failed" - and the whole household state is saved in one request, so this is the one that matters.
@@ -39,9 +49,20 @@ export const api = {
     method: "POST", body: JSON.stringify({ householdId })
   }),
   state: () => request<HouseholdState>("/api/state"),
-  saveState: (state: HouseholdState) => request<{ ok: boolean }>("/api/state", {
-    method: "PUT", body: JSON.stringify(state)
-  }),
+  saveState: (state: HouseholdState) => {
+    const send = () => request<{ ok: boolean }>("/api/state", {
+      method: "PUT", body: JSON.stringify(state), headers: stateVersion !== null ? { "X-Base-Version": String(stateVersion) } : {}
+    });
+    const result = saveChain.then(send, send) as Promise<{ ok: boolean }>;
+    saveChain = result.catch(() => undefined);
+    return result;
+  },
+  // Whether the household was written by someone else since this app last loaded or saved it.
+  stateChanged: async (): Promise<boolean> => {
+    if (stateVersion === null) return false;
+    const { version } = await request<{ version: number }>("/api/state/version");
+    return version !== stateVersion;
+  },
   registerPushDevice: (token: string, platform: string) => request<{ ok: boolean }>("/api/push-devices", {
     method: "POST", body: JSON.stringify({ token, platform })
   }),
