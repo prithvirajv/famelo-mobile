@@ -197,7 +197,7 @@ export function parseBankCsvTransactions(text: string): ParsedBankRow[] {
 }
 
 // ---- Matching -----------------------------------------------------------------------------------------------------
-type Matchable = { id?: string; payee?: string; amount?: number | string; date?: string; accountId?: string; lineId?: string; orderNumber?: string };
+type Matchable = { id?: string; externalId?: string; payee?: string; amount?: number | string; date?: string; accountId?: string; lineId?: string; orderNumber?: string };
 
 export function normalizeForAccountMatch(value: unknown): string {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -224,9 +224,14 @@ const DUPLICATE_TOLERANCE_DAYS = 2;
 // A CSV re-imported over an overlapping range reproduces the same amount with the date drifting a day or two (a pending
 // charge posts later). Payee text is deliberately not compared: a CSV payee is the bank's raw description while the same
 // charge in the ledger may carry a short hand-typed name.
+// Two linked-bank rows each carry the bank's own transaction id: the same id is the same transaction, two different ids are two real
+// transactions, so the amount-and-date guess only applies when at least one side has no bank id (a hand-entered row or a file).
 export function isDuplicateTransaction(candidate: Matchable, existing: Matchable[]): boolean {
   const amount = Number(candidate.amount);
-  return existing.some((other) => Number(other.amount) === amount && absoluteDaysBetweenDateKeys(other.date || "", candidate.date || "") <= DUPLICATE_TOLERANCE_DAYS);
+  return existing.some((other) => {
+    if (candidate.externalId && other.externalId) return candidate.externalId === other.externalId;
+    return Number(other.amount) === amount && absoluteDaysBetweenDateKeys(other.date || "", candidate.date || "") <= DUPLICATE_TOLERANCE_DAYS;
+  });
 }
 
 // The other side of an account-to-account transfer (checking's "-500 Payment to Card" and the card's "+500 Payment

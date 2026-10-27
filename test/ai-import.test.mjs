@@ -176,3 +176,11 @@ test("a bank-feed row with no category at all goes in as Needs a category; a pla
   assert.equal(autoAcceptDecision(draft({ accountId: "chk" }), ctx).reason, "no category", "without the bank-feed flag the old rule holds");
   assert.match(importSummary("f", 1, 0, 1, 0, {}, "", false, 1), /1 without a category/);
 });
+
+test("linked rows with different bank ids are not duplicates of each other; the same id is; a hand-entered row can be", async () => {
+  const { isDuplicateTransaction } = await import("../src/bankStreamLogic.ts");
+  const yesterday = { externalId: "sf:a:1", amount: 10, date: "2026-10-09" };
+  assert.equal(isDuplicateTransaction({ externalId: "sf:a:2", amount: 10, date: "2026-10-10" }, [yesterday]), false);
+  assert.equal(isDuplicateTransaction({ externalId: "sf:a:1", amount: 10, date: "2026-10-12" }, [yesterday]), true);
+  assert.equal(isDuplicateTransaction({ externalId: "sf:a:2", amount: 10, date: "2026-10-10" }, [{ amount: 10, date: "2026-10-10" }]), true);
+});
