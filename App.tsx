@@ -2985,6 +2985,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
           }
           const latest = stateRef.current;
           const result = applyTransactionCleanup(latest, cleanupOptions);
+          api.allowNextShrink();
           await onSave({ ...latest, transactions: result.state.transactions, transactionInboxDrafts: result.state.transactionInboxDrafts, household: { ...latest.household, activity: [cleanupSummary(result.removedLedger, result.removedStream), ...(latest.household.activity || [])] } });
           setFeedback(`${cleanupSummary(result.removedLedger, result.removedStream)} Open Wealth and tap Sync now to re-match linked account balances.`);
         } catch (cause) { Alert.alert("Could not clean up", cause instanceof Error ? cause.message : "Try again"); }

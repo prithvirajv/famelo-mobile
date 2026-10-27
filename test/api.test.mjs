@@ -650,3 +650,10 @@ test("saves name the version they were based on, run one at a time, and a stale 
   assert.match(app, /cause\.status === 409\) \{ await loadWorkspace\(\)/, "a refused (stale) save shows the latest household");
   assert.match(app, /api\.stateChanged\(\)/, "coming back to the app picks up what the server applied overnight");
 });
+
+test("Clean up says it is a deliberate removal, so the server does not refuse it as an out-of-date screen", () => {
+  const api = fs.readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /X-Allow-Shrink/);
+  const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+  assert.match(app, /api\.allowNextShrink\(\);\s*await onSave\(\{ \.\.\.latest, transactions: result\.state\.transactions/);
+});

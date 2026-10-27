@@ -15,6 +15,9 @@ export class ApiError extends Error {
 // server - instead of silently overwriting that work. Saves run one at a time so each carries the version the previous one produced.
 let stateVersion: number | null = null;
 let saveChain: Promise<unknown> = Promise.resolve();
+// Set (just before a save) by the one flow that deliberately removes most of the ledger - Clean up - so the server does not take that save for an
+// out-of-date screen overwriting an import; the next save made consumes it.
+let allowShrinkNext = false;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -49,9 +52,12 @@ export const api = {
     method: "POST", body: JSON.stringify({ householdId })
   }),
   state: () => request<HouseholdState>("/api/state"),
+  allowNextShrink: () => { allowShrinkNext = true; },
   saveState: (state: HouseholdState) => {
+    const allowShrink = allowShrinkNext;
+    allowShrinkNext = false;
     const send = () => request<{ ok: boolean }>("/api/state", {
-      method: "PUT", body: JSON.stringify(state), headers: stateVersion !== null ? { "X-Base-Version": String(stateVersion) } : {}
+      method: "PUT", body: JSON.stringify(state), headers: { ...(stateVersion !== null ? { "X-Base-Version": String(stateVersion) } : {}), ...(allowShrink ? { "X-Allow-Shrink": "1" } : {}) }
     });
     const result = saveChain.then(send, send) as Promise<{ ok: boolean }>;
     saveChain = result.catch(() => undefined);
