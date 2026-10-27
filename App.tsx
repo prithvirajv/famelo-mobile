@@ -731,7 +731,7 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       {(state.historyGapNotices || []).map((notice) => <View key={notice.id} style={styles.row}>
         <View style={styles.rowCopy}>
           <Text style={styles.rowTitle}>{(state.accounts || []).find((account) => account.id === notice.accountId)?.name || notice.accountName}</Text>
-          <Text style={styles.rowDetail}>{historyGapMonths(notice, formatMonthLabel)} · the bank's rows start on {notice.oldestReturned}</Text>
+          <Text style={styles.rowDetail}>{historyGapMonths(notice, formatMonthLabel)} · {notice.oldestReturned ? `the bank's rows start on ${notice.oldestReturned}` : "SimpleFIN did not answer for this period"}</Text>
         </View>
         <Pressable style={styles.secondarySmall} onPress={() => onGoTab("budget")}><Text style={styles.secondaryButtonText}>Import</Text></Pressable>
         <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, historyGapNotices: (state.historyGapNotices || []).filter((item) => item.id !== notice.id) })}><Text style={styles.secondaryButtonText}>I've imported it</Text></Pressable>

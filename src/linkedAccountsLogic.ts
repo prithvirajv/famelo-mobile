@@ -273,7 +273,7 @@ export function historyGapMonths(gap: Pick<HistoryGap, "fromMonth" | "toMonth">,
 }
 
 export function historyGapDialogText(gaps: HistoryGap[], nameOf: (remoteId: string) => string, monthLabel: (monthKey: string) => string): string {
-  const lines = gaps.map((gap) => `\u2022 ${nameOf(gap.remoteId) || gap.name}: ${historyGapMonths(gap, monthLabel)} will NOT be imported (the bank's rows only start on ${gap.oldestReturned})`);
+  const lines = gaps.map((gap) => `\u2022 ${nameOf(gap.remoteId) || gap.name}: ${historyGapMonths(gap, monthLabel)} will NOT be imported (${gap.oldestReturned ? `the bank's rows only start on ${gap.oldestReturned}` : "SimpleFIN did not answer for this period"})`);
   return `The bank did not return all the history you asked for.\n\n${lines.join("\n")}\n\nThose whole months are left out on purpose - half a month would make the ledger wrong and double up when you import it yourself. After this, import those months for ${gaps.length === 1 ? "that account" : "those accounts"} from a bank statement (Bank stream, then Import a statement) and pick the account.\n\nImport everything else now?`;
 }
 
