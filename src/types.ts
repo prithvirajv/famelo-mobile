@@ -100,6 +100,8 @@ export type Account = {
   closedAt?: string;
   // For a bank-fed account: the date its records are complete from (earlier history has to come from a statement). Shown as a small tag.
   syncedFrom?: string;
+  // The date the bank's data for this account runs through (the bank's own balance date), and when it was last pulled.
+  syncedThrough?: string; lastSyncedAt?: string;
 };
 export type Transfer = { id?: string; fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
 export type PaycheckRecurrence = "once" | "bonus" | "weekly" | "biweekly" | "monthly";

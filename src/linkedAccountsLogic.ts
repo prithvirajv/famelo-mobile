@@ -6,7 +6,9 @@ import type { Account, Debt, HouseholdState, InboxDraft, WealthAsset, WealthLiab
 export const LINKED_IMPORTED_ID_LIMIT = 3000;
 
 export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
-export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean };
+export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean; lastRun?: LinkedRun };
+// What the last overnight run did for a link: loaded (applied), waiting for a person, or failed with a reason.
+export type LinkedRun = { at?: string; ok?: boolean; stage?: string; error?: string; reason?: string; imported?: number; added?: number; left?: number; newRows?: number };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string; transactionCount?: number; oldestTransactionDate?: string };
 // A bank that returned only part of the history a history import asked for: the server leaves those whole months out (trimPartialHistory).
@@ -27,10 +29,65 @@ export function isNewRemoteAccount(mappings: Record<string, LinkedMapping>, remo
   return !Object.prototype.hasOwnProperty.call(mappings || {}, remoteId);
 }
 
+// What the last overnight run did for a link, in words ('' before it has run).
+export function linkedRunSummary(link: Pick<LinkedLink, "lastRun">, formatTime: (iso: string) => string): string {
+  const run = link.lastRun;
+  if (!run?.at) return "";
+  const time = formatTime(run.at);
+  if (run.ok === false) return `Overnight sync ${time} did not finish: ${run.error || "unknown problem"}`;
+  if (run.stage === "waiting") return `Overnight sync ${time}: ${run.reason || "new transactions are waiting for you to open the app."}`;
+  if (run.stage === "applied") return `Overnight sync ${time}: complete - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} need a look` : ""}.`;
+  return `Overnight sync ${time}: fetched${run.newRows ? ` ${run.newRows} new` : ""} - not loaded yet.`;
+}
+
 export function linkedStatusText(link: LinkedLink, formatTime: (iso: string) => string): string {
   if (link.status === "needs_reconnect") return "Needs reconnecting - remove it and link again";
   const when = link.lastSyncAt ? `Last synced ${formatTime(link.lastSyncAt)}` : "Not synced yet";
-  return link.lastError ? `${when} - ${link.lastError}` : when;
+  const base = link.lastError ? `${when} - ${link.lastError}` : when;
+  const run = linkedRunSummary(link, formatTime);
+  return run ? `${base} · ${run}` : base;
+}
+
+// Mirrors web's markAccountsSynced: the date each bank-fed account's data runs through (the bank's own balance date, never in the future, else
+// today) and when it was last pulled. Returns the same state object when nothing changed.
+export function markAccountsSynced(state: HouseholdState, mappings: Record<string, LinkedMapping>, remote: RemoteAccount[], todayKey: string, nowIso: string): HouseholdState {
+  let changed = false;
+  const accounts = (state.accounts || []).map((account) => {
+    const entry = remote.find((item) => mappings[item.remoteId]?.accountId === account.id);
+    if (!entry) return account;
+    const reported = /^\d{4}-\d{2}-\d{2}/.test(String(entry.balanceDate || "")) ? String(entry.balanceDate).slice(0, 10) : todayKey;
+    const through = reported > todayKey ? todayKey : reported;
+    changed = true;
+    return { ...account, syncedThrough: through, lastSyncedAt: nowIso };
+  });
+  return changed ? { ...state, accounts } : state;
+}
+
+// The "Bank sync" facts the Home briefing is given (mirrors web's bankSyncFacts): whether each connection's overnight run finished, how far each
+// bank-fed account's data runs, and months that were not imported - so the summary can say what is missing and give FYIs.
+export function bankSyncFacts(links: LinkedLink[], accounts: HouseholdState["accounts"], gapNotices: HouseholdState["historyGapNotices"], todayKey: string, formatTime: (iso: string) => string, dayLabel: (dateKey: string) => string, monthLabel: (monthKey: string) => string): string[] {
+  const fed = (accounts || []).filter((account) => account.syncedFrom || account.syncedThrough);
+  if (!links.length && !fed.length) return [];
+  const facts = ["Bank sync:"];
+  for (const link of links) {
+    const run = link.lastRun || {};
+    const when = run.at ? formatTime(run.at) : "";
+    if (link.status === "needs_reconnect") facts.push(`- Connection "${link.label}" needs signing in again; nothing new can sync until then.`);
+    else if (!run.at) facts.push(`- Connection "${link.label}" has not had an overnight run yet.`);
+    else if (run.ok === false) facts.push(`- Connection "${link.label}": the overnight run (${when}) did NOT finish - ${run.error || "unknown problem"}.`);
+    else if (run.stage === "waiting") facts.push(`- Connection "${link.label}": fetched overnight (${when}) but the new transactions are waiting for the household to open the app.`);
+    else if (run.stage === "applied") facts.push(`- Connection "${link.label}": the overnight run (${when}) completed - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} held for review` : ""}.`);
+    else facts.push(`- Connection "${link.label}": fetched overnight (${when}); not loaded yet.`);
+  }
+  const behind = (() => { const d = new Date(`${todayKey}T00:00:00`); d.setDate(d.getDate() - 2); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  for (const account of fed.slice(0, 10)) {
+    facts.push(`- ${account.name}: bank records ${account.syncedFrom ? `from ${dayLabel(account.syncedFrom)} ` : ""}${account.syncedThrough ? `through ${dayLabel(account.syncedThrough)}${account.syncedThrough < behind ? " (BEHIND - the bank has not reported anything newer)" : ""}` : ""}.`);
+  }
+  for (const notice of gapNotices || []) {
+    const months = notice.fromMonth === notice.toMonth ? monthLabel(notice.fromMonth) : `${monthLabel(notice.fromMonth)} to ${monthLabel(notice.toMonth)}`;
+    facts.push(`- NOT imported (the bank did not return it; needs a statement import): ${accounts.find((account) => account.id === notice.accountId)?.name || notice.accountName}, ${months}.`);
+  }
+  return facts;
 }
 
 // Whether opening the screen should quietly refresh this link: it has accounts chosen and either the nightly job has data waiting or it

@@ -67,6 +67,8 @@ export type HomeBriefingInput = {
   balances: Array<{ name: string; type?: string; balance: number }>;
   spentOfLine: (lineId: string, monthKey: string) => number;
   formatMoney: (amount: number) => string;
+  // Lines about the bank sync (see bankSyncFacts in linkedAccountsLogic.ts), appended to the facts.
+  syncFacts?: string[];
 };
 
 export function homeBriefingFacts(state: HouseholdState, input: HomeBriefingInput): { text: string; chips: string[] } {
@@ -106,7 +108,8 @@ export function homeBriefingFacts(state: HouseholdState, input: HomeBriefingInpu
     input.actionItems.length ? `Needs attention today: ${input.actionItems.slice(0, 8).map((item) => `${item.title} (${item.label}, ${item.overdue ? "past due" : "due today"})`).join("; ")}.` : "Nothing is past due or due today.",
     week.length ? `Coming up this week: ${week.map((day) => `${day.label}: ${day.items.map((item) => item.title).join(", ")}`).join("; ")}.` : "",
     input.funding.length ? `Bills and goals open: ${input.funding.slice(0, 5).map((reminder) => `${reminder.title} - ${reminder.detail} ${fmt(reminder.amount)} left`).join("; ")}.` : "",
-    input.planTasks.length ? `The viewer's plan today has ${input.planTasks.length} task${input.planTasks.length === 1 ? "" : "s"}, ${input.planTasks.filter((task) => task.done).length} done.` : ""
+    input.planTasks.length ? `The viewer's plan today has ${input.planTasks.length} task${input.planTasks.length === 1 ? "" : "s"}, ${input.planTasks.filter((task) => task.done).length} done.` : "",
+    ...(input.syncFacts || [])
   ].filter(Boolean).join("\n").slice(0, 5800);
   const chips = [
     planned > 0 ? `${fmt(spent)} of ${fmt(planned)} spent` : `${fmt(spent)} spent this month`,

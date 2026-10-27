@@ -48,7 +48,7 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom, markAccountsSynced, bankSyncFacts } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -634,15 +634,22 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
 
   // The AI briefing: one per viewer per day is kept on this device (Refresh asks again); the number chips never depend on the AI.
   const currencyMoney = (amount: number) => money(amount, currency);
-  const facts = homeBriefingFacts(state, {
+  const factsFor = (syncFacts: string[]) => homeBriefingFacts(state, {
     today: new Date(), planned, currency, actionItems, weekStrip, funding, planTasks: planTasks.map(({ done }) => ({ done })),
     balances: accountsWithBalances(state, today).filter((account) => !account.closedAt).map((account) => ({ name: account.name, type: account.type, balance: account.balance })),
-    spentOfLine: (lineId, monthKey) => spentByLineInMonth(state.transactions, lineId, monthKey), formatMoney: currencyMoney
+    spentOfLine: (lineId, monthKey) => spentByLineInMonth(state.transactions, lineId, monthKey), formatMoney: currencyMoney, syncFacts
   });
+  const facts = factsFor([]);
   const [briefing, setBriefing] = useState<{ status: "loading" | "ready" | "error" | "off"; data: HomeBriefing | null; error: string; at: string }>({ status: "loading", data: null, error: "", at: "" });
   const briefingKey = `familyloop-home-briefing:${user.email}:${state.household.name}`;
-  const factsRef = useRef(facts.text);
-  factsRef.current = facts.text;
+  // The briefing also reports the bank sync, so its facts are built when it is asked for, after fetching what the last overnight run did.
+  const factsForRef = useRef(factsFor);
+  factsForRef.current = factsFor;
+  const syncFactsRef = useRef<() => Promise<string[]>>(async () => []);
+  syncFactsRef.current = async () => {
+    const overview = await api.linkedAccounts().catch(() => null);
+    return bankSyncFacts(overview?.links || [], state.accounts || [], state.historyGapNotices, today, (iso) => new Date(iso).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }), (key) => new Date(`${key}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }), formatMonthLabel);
+  };
   const loadBriefing = useCallback(async (force: boolean) => {
     if (!force) {
       try {
@@ -652,7 +659,7 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
     }
     setBriefing((current) => ({ ...current, status: "loading", error: "" }));
     try {
-      const { briefing: written } = await api.homeBriefing(factsRef.current);
+      const { briefing: written } = await api.homeBriefing(factsForRef.current(await syncFactsRef.current()).text);
       const at = new Date().toISOString();
       setBriefing({ status: "ready", data: written, error: "", at });
       void AsyncStorage.setItem(briefingKey, JSON.stringify({ date: localDateKey(), briefing: written, at })).catch(() => undefined);
@@ -3864,6 +3871,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         });
         working = { ...working, linkedImportedIds: rememberLinkedImportedIds(working.linkedImportedIds, posted.map((row) => row.externalId)) };
         working = updateAccountsSyncedFrom(working, link.mappings, payload.coverage, [...working.transactions, ...(working.transactionInboxDrafts || [])], localDateKey());
+        working = markAccountsSynced(working, link.mappings, payload.accounts, localDateKey(), new Date().toISOString());
         const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0);
         working = reconciled.state;
         // Accounts mapped to a holdings group: match the group's total to the bank balance (holdings keep their own detail).
@@ -4388,7 +4396,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
             {group.items.map((account) => <View key={account.id} style={styles.row}>
               <View style={styles.rowCopy}>
                 <Text style={styles.rowTitle}>{account.name}{account.closedAt ? " (closed)" : ""}</Text>
-                <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}{account.syncedFrom ? ` · Bank sync from ${account.syncedFrom}` : ""}</Text>
+                <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}{account.syncedFrom ? ` · Bank sync from ${account.syncedFrom}` : ""}{account.syncedThrough ? ` · through ${account.syncedThrough}${account.syncedThrough < localDateKey(new Date(Date.now() - 2 * 86400000)) ? " (behind)" : ""}` : ""}</Text>
               </View>
               <Text style={[styles.rowValue, account.type === "credit_card" && account.balance > 0 && { color: colors.coral }]}>{money(account.balance, currency)}</Text>
               {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : null}

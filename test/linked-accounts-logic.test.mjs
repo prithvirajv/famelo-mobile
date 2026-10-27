@@ -214,3 +214,29 @@ test("an account's synced-from date takes the coverage a sync reports, never mov
   assert.deepEqual(next.accounts.map((a) => a.syncedFrom), ["2026-04-01", "2026-02-01", "2026-07-02", "2026-10-27"]);
   assert.equal(updateAccountsSyncedFrom(next, mappings, {}, rows, "2026-10-27"), next, "nothing moves on a plain sync");
 });
+
+test("each account records how far the bank's data runs, and the last overnight run reads in words and feeds the Home summary", async () => {
+  const { markAccountsSynced, linkedStatusText, bankSyncFacts } = await import("../src/linkedAccountsLogic.ts");
+  const state = { accounts: [{ id: "a", name: "Checking" }, { id: "b", name: "Card" }, { id: "c", name: "Other" }] };
+  const mappings = { RA: { accountId: "a" }, RB: { accountId: "b" }, RC: { groupId: "g" } };
+  const next = markAccountsSynced(state, mappings, [{ remoteId: "RA", balanceDate: "2026-10-24" }, { remoteId: "RB", balanceDate: "2026-12-01" }, { remoteId: "RC", balanceDate: "2026-10-26" }], "2026-10-27", "2026-10-27T07:30:00Z");
+  assert.deepEqual(next.accounts.map((a) => a.syncedThrough), ["2026-10-24", "2026-10-27", undefined]);
+  assert.equal(markAccountsSynced(state, mappings, [], "2026-10-27", "x"), state, "nothing to mark means nothing changes");
+
+  const time = () => "Tue 3:30 AM";
+  const base = { id: "L", provider: "simplefin", label: "My bank", status: "active", lastSyncAt: "2026-10-27T07:30:00Z", lastError: "", mappings: {} };
+  assert.match(linkedStatusText({ ...base, lastRun: { at: "x", ok: true, stage: "applied", imported: 5, added: 4, left: 1 } }, time), /complete - 5 new from the bank, 4 added to the ledger, 1 need a look/);
+  assert.match(linkedStatusText({ ...base, lastRun: { at: "x", ok: false, stage: "fetch", error: "SimpleFIN is unavailable right now (HTTP 502)." } }, time), /did not finish: SimpleFIN is unavailable/);
+  assert.match(linkedStatusText({ ...base, lastRun: { at: "x", ok: true, stage: "waiting", reason: "Automatic loading is switched off." } }, time), /Automatic loading is switched off/);
+
+  const accounts = [{ id: "a", name: "Checking", syncedFrom: "2026-04-01", syncedThrough: "2026-10-27" }, { id: "b", name: "Card", syncedFrom: "2026-04-01", syncedThrough: "2026-10-20" }];
+  const facts = bankSyncFacts([{ ...base, lastRun: { at: "x", ok: true, stage: "applied", imported: 5, added: 4, left: 0 } }, { ...base, id: "M", label: "Second", lastRun: { at: "x", ok: false, error: "needs attention" } }], accounts,
+    [{ id: "g", accountId: "b", accountName: "Card", fromMonth: "2026-01", toMonth: "2026-03", oldestReturned: "2026-03-09", createdAt: "" }], "2026-10-27", time, (d) => d, (m) => m);
+  assert.equal(facts[0], "Bank sync:");
+  assert.ok(facts.some((f) => /"My bank": the overnight run \(Tue 3:30 AM\) completed - 5 new from the bank, 4 added/.test(f)));
+  assert.ok(facts.some((f) => /"Second": the overnight run .* did NOT finish - needs attention/.test(f)));
+  assert.ok(facts.some((f) => /Card: bank records from 2026-04-01 through 2026-10-20 \(BEHIND/.test(f)));
+  assert.ok(!facts.some((f) => /Checking.*BEHIND/.test(f)));
+  assert.ok(facts.some((f) => /NOT imported .*Card, 2026-01 to 2026-03/.test(f)));
+  assert.deepEqual(bankSyncFacts([], [{ id: "x", name: "Cash" }], [], "2026-10-27", time, (d) => d, (m) => m), [], "no bank link means nothing to say");
+});
