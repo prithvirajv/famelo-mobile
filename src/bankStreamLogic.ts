@@ -549,8 +549,13 @@ export type TransferPair = { out: InboxDraft; in: InboxDraft };
 
 // Both halves of a move between two own accounts (opposite amounts, different accounts, within the duplicate window), both still
 // waiting. Paired greedily, nearest dates first; a row is used once. The positive amount is the side the money left.
-export function planBulkTransfers(drafts: InboxDraft[]): TransferPair[] {
-  const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0);
+// Never paired automatically: person-to-person payments and direct deposits (income, not a move between own accounts), and two card
+// accounts (a card-to-card match is two unrelated purchases of the same amount). Those stay in Bank stream for a look.
+const BULK_TRANSFER_EXCLUDED_PAYEE = /zelle|venmo|cash\s?app|paypal|direct\s?dep|payroll/i;
+
+export function planBulkTransfers(drafts: InboxDraft[], accounts: Array<{ id: string; type?: string }> = []): TransferPair[] {
+  const typeOf = (id?: string) => accounts.find((account) => account.id === id)?.type;
+  const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0 && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(draft.payee || "")));
   const used = new Set<string | undefined>();
   const pairs: TransferPair[] = [];
   open.filter((draft) => Number(draft.amount) > 0).sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach((out) => {
@@ -558,6 +563,7 @@ export function planBulkTransfers(drafts: InboxDraft[]): TransferPair[] {
     let bestGap = Infinity;
     open.forEach((other) => {
       if (used.has(other.id) || other.id === out.id || other.accountId === out.accountId || Number(other.amount) !== -Number(out.amount)) return;
+      if (typeOf(out.accountId) === "credit_card" && typeOf(other.accountId) === "credit_card") return;
       const gap = absoluteDaysBetweenDateKeys(other.date || "", out.date || "");
       if (gap <= DUPLICATE_TOLERANCE_DAYS && gap < bestGap) { best = other; bestGap = gap; }
     });
@@ -594,7 +600,7 @@ export function planBulkDuplicateSkips(drafts: InboxDraft[], ledger: Transaction
 }
 
 export function applyBulkTransfers(state: HouseholdState, createId: () => string): { state: HouseholdState; moved: number } {
-  const pairs = planBulkTransfers(state.transactionInboxDrafts || []);
+  const pairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []);
   if (!pairs.length) return { state, moved: 0 };
   const gone = new Set<string | undefined>(pairs.flatMap((pair) => [pair.out.id, pair.in.id]));
   const transfers = pairs.map((pair) => ({

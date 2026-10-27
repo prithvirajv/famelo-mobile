@@ -547,3 +547,11 @@ test("bulk duplicates: same bank id or same amount, date and payee word as a led
   assert.deepEqual(state.transactionInboxDrafts.map((d) => d.id), ["3", "4", "5", "7", "8"]);
   assert.equal(state.transactions.length, 2);
 });
+
+test("bulk transfers never pair person-to-person payments, direct deposits or two card accounts", () => {
+  const accounts = [{ id: "chk", type: "checking" }, { id: "card1", type: "credit_card" }, { id: "card2", type: "credit_card" }, { id: "chk2", type: "checking" }];
+  assert.deepEqual(planBulkTransfers([bulkDraft("a", "Zelle payment to Sam", 1500, "2026-09-08", "chk"), bulkDraft("b", "TRANSFER FROM ACCT", -1500, "2026-09-08", "chk2")], accounts), []);
+  assert.deepEqual(planBulkTransfers([bulkDraft("e", "SAMPLE PAYROLL DIRECT DEP", -4800, "2026-08-03", "chk"), bulkDraft("f", "SAMPLE DIRECT DEPOSIT", 4800, "2026-08-03", "card1")], accounts), []);
+  assert.deepEqual(planBulkTransfers([bulkDraft("g", "SAMPLE SHOP A", 7.25, "2026-09-03", "card1"), bulkDraft("h", "SAMPLE SHOP B", -7.25, "2026-09-03", "card2")], accounts), []);
+  assert.equal(planBulkTransfers([bulkDraft("i", "CARD AUTOPAY", 100, "2026-09-03", "chk"), bulkDraft("j", "AUTOPAY THANK YOU", -100, "2026-09-03", "card1")], accounts).length, 1);
+});
