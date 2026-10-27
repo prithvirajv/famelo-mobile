@@ -8,7 +8,7 @@ export const LINKED_IMPORTED_ID_LIMIT = 3000;
 export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
 export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
-export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string };
+export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string; transactionCount?: number; oldestTransactionDate?: string };
 export type LinkedTransaction = { externalId: string; remoteAccountId: string; date: string; payee: string; amount: number; pending: boolean };
 export type LinkedPosition = { remoteAccountId: string; symbol: string; name: string; units: number; price: number; costBasis: number; currency: string; holdingType: "stock" | "fund" };
 export type SyncPayload = { provider: "simplefin" | "snaptrade"; stagedAt?: string; accounts: RemoteAccount[]; transactions?: LinkedTransaction[]; positions?: LinkedPosition[]; cash?: Record<string, number>; errors: string[] };
@@ -205,4 +205,20 @@ export function isRealDateKey(value: string): boolean {
   if (!match) return false;
   const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
   return date.getUTCMonth() === Number(match[2]) - 1 && date.getUTCDate() === Number(match[3]);
+}
+
+// After a history import from a date: which mapped accounts came back with less than was asked for (the bank only holds so much), so the
+// person is told instead of wondering where the early months went. Mirrors web's historyCoverageNotes.
+export function historyCoverageNotes(remoteAccounts: RemoteAccount[], mappings: Record<string, LinkedMapping>, sinceDate: string, nameOf: (localAccountId: string) => string, limit = 5): string[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(sinceDate || ""))) return [];
+  const since = Date.parse(`${sinceDate}T00:00:00Z`);
+  const notes: string[] = [];
+  for (const remote of remoteAccounts || []) {
+    const accountId = mappings?.[remote.remoteId]?.accountId;
+    if (!accountId || remote.oldestTransactionDate === undefined) continue;
+    const oldest = remote.oldestTransactionDate ? Date.parse(`${remote.oldestTransactionDate}T00:00:00Z`) : null;
+    if (oldest !== null && oldest - since <= 21 * 86400000) continue;
+    notes.push(`${nameOf(accountId) || remote.name}: ${remote.oldestTransactionDate ? `rows only go back to ${remote.oldestTransactionDate}` : "no rows at all in that range"}`);
+  }
+  return notes.slice(0, limit);
 }

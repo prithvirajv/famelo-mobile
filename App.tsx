@@ -48,7 +48,7 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyCoverageNotes } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -3858,6 +3858,8 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         });
         if (exceedsStateLimit(working) || !historyImportFits(JSON.stringify(current).length, posted.length)) throw new Error(`Importing ${posted.length} transactions would push your household data past the 1 MB the server can save. Import a shorter range (a later start date), or clean up old transactions first.`);
         summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched, debtsMatched);
+        const coverage = historyCoverageNotes(payload.accounts, link.mappings, sinceDate, (accountId) => (current.accounts || []).find((account) => account.id === accountId)?.name || "");
+        if (coverage.length) summary += ` Less history than you asked for: ${coverage.join("; ")} - that is all the bank holds (it varies by bank), or all it would send.`;
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };
         await onSave(working);
         if (newDraftIds.length) summary += ` ${await runAiImport(() => stateRef.current, onSave, newDraftIds, link.label, newDraftIds.length, () => undefined)}`;

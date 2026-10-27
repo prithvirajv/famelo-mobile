@@ -186,3 +186,18 @@ test("a history import skips only rows already in the ledger or Bank stream (rem
   assert.equal(historyImportFits(600_000, 1000), false);
   assert.deepEqual(["2026-01-01", "2026-02-30", "01/01/2026", ""].map(isRealDateKey), [true, false, false, false]);
 });
+
+test("history coverage names the accounts whose bank returned less than was asked for", async () => {
+  const { historyCoverageNotes } = await import("../src/linkedAccountsLogic.ts");
+  const remote = [
+    { remoteId: "A", name: "Checking", oldestTransactionDate: "2026-01-04" },
+    { remoteId: "B", name: "Card", oldestTransactionDate: "2026-03-09" },
+    { remoteId: "C", name: "Empty", oldestTransactionDate: "" },
+    { remoteId: "D", name: "Unmapped", oldestTransactionDate: "2026-09-01" },
+    { remoteId: "E", name: "Old server", transactionCount: undefined }
+  ];
+  const mappings = { A: { accountId: "a" }, B: { accountId: "b" }, C: { accountId: "c" }, E: { accountId: "e" } };
+  const nameOf = (id) => ({ a: "Checking", b: "DCU Prithvi", c: "Savings" })[id] || "";
+  assert.deepEqual(historyCoverageNotes(remote, mappings, "2026-01-01", nameOf), ["DCU Prithvi: rows only go back to 2026-03-09", "Savings: no rows at all in that range"]);
+  assert.deepEqual(historyCoverageNotes(remote, mappings, "", nameOf), [], "only a history import reports it");
+});
