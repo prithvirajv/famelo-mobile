@@ -107,6 +107,9 @@ export type Paycheck = {
   // Self-healing materialization watermark (see ensurePaycheckOccurrencesGenerated on web) - not
   // meant to be hand-edited by the client, just preserved on save.
   generatedThroughDate?: string; generatedRecurrence?: string; generatedAnchorDate?: string; generatedEndDate?: string;
+  // Set when the paycheck was recorded automatically from a steady salary in a linked account's deposits (see salaryLogic.ts); holds what was
+  // folded into it so Undo can put it back.
+  autoDetected?: { key: string; accountId: string; detectedAt: string; acknowledged: boolean; removed: Transaction[]; dismissed: InboxDraft[]; pendingAmount?: number };
 };
 // Materialized, individually editable/deletable real pay dates for a recurring paycheck - one row
 // per actual payday, generated on demand server/web-side (not part of the seeded default state, so
@@ -149,6 +152,8 @@ export type HouseholdState = {
   onboarding?: { dismissed: boolean };
   // externalIds of linked-account rows already turned into drafts (capped), so a re-sync never imports one twice.
   linkedImportedIds?: string[];
+  // "<accountId>|<payer key>" of salaries the household undid, so they are not detected again.
+  salaryDetectionIgnored?: string[];
   paycheckOccurrences?: PaycheckOccurrence[];
   recurringExpenses: RecurringExpense[];
   calendar: { events: CalendarEvent[]; chores: Chore[] };

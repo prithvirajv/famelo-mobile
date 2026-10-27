@@ -116,3 +116,30 @@ export function homeBriefingFacts(state: HouseholdState, input: HomeBriefingInpu
   ].filter(Boolean);
   return { text, chips };
 }
+
+// ---- Last month vs this month's plan --------------------------------------------------------------------------------------
+// Mirrors web's budgetPlanSuggestions: on the current month, lines where last month's real spending was well above (or far below) the
+// plan, so one tap can plan what was actually spent. Fixed pieces are left alone: a line carrying a rollover, one dismissed this month,
+// or one with no spending at all (savings lines are rarely logged as transactions).
+export type PlanSuggestion = { lineId: string; name: string; planned: number; actual: number; suggested: number };
+
+export function budgetPlanSuggestions(state: HouseholdState, monthKey: string, spentInMonth: (lineId: string, monthKey: string) => number): PlanSuggestion[] {
+  if (state.budget.month !== monthKey) return [];
+  const [year, month] = monthKey.split("-").map(Number) as [number, number];
+  const previous = `${month === 1 ? year - 1 : year}-${String(month === 1 ? 12 : month - 1).padStart(2, "0")}`;
+  const dismissed = state.budget.dismissedReminders?.[monthKey] || [];
+  return state.budget.categories.flatMap((category) => category.lines)
+    .map((line) => ({ line, planned: Number(line.planned || 0), actual: Math.round(spentInMonth(line.id, previous) * 100) / 100 }))
+    .filter(({ line, planned, actual }) => !dismissed.includes(`plan:${line.id}`) && !(Number(line.rolloverAmount || 0) > 0) && (
+      (planned > 0 && actual >= planned * 1.25 && actual - planned >= 25) ||
+      (planned > 0 && actual > 0 && actual <= planned * 0.5 && planned - actual >= 50)
+    ))
+    .map(({ line, planned, actual }): PlanSuggestion => ({ lineId: line.id, name: line.name, planned, actual, suggested: Math.ceil(actual / 5) * 5 }))
+    .sort((a, b) => Math.abs(b.actual - b.planned) - Math.abs(a.actual - a.planned))
+    .slice(0, 5);
+}
+
+export function applyPlanSuggestion(state: HouseholdState, lineId: string, amount: number): HouseholdState {
+  const categories = state.budget.categories.map((category) => ({ ...category, lines: category.lines.map((line) => line.id === lineId ? { ...line, planned: amount } : line) }));
+  return dismissBudgetReminder({ ...state, budget: { ...state.budget, categories } }, `plan:${lineId}`);
+}

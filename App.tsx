@@ -45,7 +45,8 @@ import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheck
 import { HELP_GUIDES } from "./src/helpContent";
 import { ACCESS_ROLES, ALL_SCOPES, toggleScope, setShareEverything, allScopesShared, sharedScopesOf, recordInvitation, recordRevoked, recordAccessLevel, emailOutcomeMessage, validateNewPassword, isDemoAccount } from "./src/sharingLogic";
 import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOTOS, validateEntryInput, createEntry, updateEntry, removePhoto, sortedEntries, writingStreak, entriesInYear, allTags, filterEntries, moodTrend, todaysJournalContext } from "./src/journalLogic";
-import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts } from "./src/homeLogic";
+import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
+import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
 import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
@@ -649,6 +650,17 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
     }
   }, [briefingKey]);
   useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
+  // Once when Home opens: record any salary the deposits show and open the current month, saving only if something changed.
+  const automationRan = useRef(false);
+  useEffect(() => {
+    if (automationRan.current) return;
+    automationRan.current = true;
+    const next = applyIncomeAutomation(state);
+    if (next !== state) void onSave(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const salaryNotices = detectedSalaryNotices(state);
+  const planSuggestions = budgetPlanSuggestions(state, localDateKey().slice(0, 7), spentByLineInMonth.bind(null, state.transactions) as (lineId: string, monthKey: string) => number);
 
   const completeItem = async (item: HomeActionItem) => {
     const next = structuredClone(state);
@@ -694,6 +706,29 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
       : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
     </Card>
+    {salaryNotices.length ? <Card>
+      <Text style={styles.cardTitle}>Added from the salary in your accounts</Text>
+      {salaryNotices.map((paycheck) => {
+        const folded = (paycheck.autoDetected?.removed.length || 0) + (paycheck.autoDetected?.dismissed.length || 0);
+        const account = (state.accounts || []).find((item) => item.id === paycheck.autoDetected?.accountId);
+        return <View key={paycheck.id} style={styles.row}>
+          <View style={styles.rowCopy}>
+            <Text style={styles.rowTitle}>{paycheck.name}</Text>
+            <Text style={styles.rowDetail}>{money(paycheck.amount, currency)} {salaryRecurrenceLabel(paycheck.recurrence)}{account ? ` into ${account.name}` : ""}{folded ? ` · ${folded} matching deposit${folded === 1 ? "" : "s"} folded in so income isn't counted twice` : ""}</Text>
+          </View>
+          <Pressable style={styles.secondarySmall} onPress={() => void onSave(keepDetectedSalary(state, paycheck.id))}><Text style={styles.secondaryButtonText}>Keep</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => void onSave(undoDetectedSalary(state, paycheck.id, localDateKey()))}><Text style={styles.secondaryButtonText}>Undo</Text></Pressable>
+        </View>;
+      })}
+    </Card> : null}
+    {planSuggestions.length ? <Card>
+      <Text style={styles.cardTitle}>Last month vs this month's plan</Text>
+      {planSuggestions.map((suggestion) => <View key={suggestion.lineId} style={styles.row}>
+        <View style={styles.rowCopy}><Text style={styles.rowTitle}>{suggestion.name}</Text><Text style={styles.rowDetail}>Planned {money(suggestion.planned, currency)}, spent {money(suggestion.actual, currency)} last month</Text></View>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave(applyPlanSuggestion(state, suggestion.lineId, suggestion.suggested))}><Text style={styles.secondaryButtonText}>Plan {money(suggestion.suggested, currency)}</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave(dismissBudgetReminder(state, `plan:${suggestion.lineId}`))}><Text style={styles.secondaryButtonText}>Keep</Text></Pressable>
+      </View>)}
+    </Card> : null}
     <Card>
       <Text style={styles.cardTitle}>Quick add</Text>
       <View style={styles.choiceRow}>
@@ -2800,6 +2835,24 @@ function Decisions({ state, user, onSave, onBack }: { state: HouseholdState; use
   </Page>;
 }
 
+// Income and the month follow the data (see web's autoAddDetectedSalaries / maybeOpenCurrentMonth): a steady salary in the linked deposits
+// is recorded as a paycheck (its occurrences are materialized right away so the budget's income shows it), and a new calendar month opens
+// with last month's plan. Returns the same object when nothing changed.
+function applyIncomeAutomation(state: HouseholdState): HouseholdState {
+  let next = state;
+  const salary = applyDetectedSalaries(next, localDateKey(), uniqueId);
+  if (salary.changed) {
+    const occurrences = ensurePaycheckOccurrencesGenerated(salary.state.paychecks, salary.state.paycheckOccurrences || [], () => uniqueId("paycheck-occurrence"));
+    next = { ...salary.state, paychecks: occurrences.paychecks, paycheckOccurrences: occurrences.paycheckOccurrences };
+  }
+  const month = localDateKey().slice(0, 7);
+  if (next.budget.month && next.budget.month < month) {
+    const switched = switchBudgetMonth(next, month, (lineId, monthKey) => spentByLineInMonth(next.transactions, lineId, monthKey));
+    next = { ...switched, household: { ...switched.household, activity: [`Opened ${formatMonthLabel(month)} with last month's plan`, ...(switched.household.activity || [])] } };
+  }
+  return next;
+}
+
 // After an import (a file, or a linked-account sync): AI fills the category/account history could not (one call per chunk of rows), then
 // rows that are safe go straight into the ledger and the rest stay in Bank stream for review. Failures leave every row for review and
 // say why. Reads the latest state through getState because it runs across awaits; returns the summary message.
@@ -2818,6 +2871,9 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
     if (posted.added) await onSave(posted.state);
   };
   try {
+    // Salary in the deposits becomes a paycheck first, so its deposit rows are folded in rather than posted as extra income.
+    const automated = applyIncomeAutomation(getState());
+    if (automated !== getState()) await onSave(automated);
     // A return of a purchase already in the ledger takes that purchase's category and account without asking the AI.
     const adopted = adoptPostedRefunds(getState(), draftIds);
     if (adopted.adopted) await onSave(adopted.state);
