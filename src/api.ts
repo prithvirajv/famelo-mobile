@@ -1,6 +1,6 @@
 import type { AiSuggestion, ParsedBankRow } from "./bankStreamLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount, SyncPayload } from "./linkedAccountsLogic";
-import type { NoteUserShare, ReminderPhotoDraft, SharedNote, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
+import type { AssistantAction } from "./assistantLogic";import type { NoteUserShare, ReminderPhotoDraft, SharedNote, Document, DocumentFolder, DocumentsData, Household, HouseholdAccess, HouseholdState, PrivateData, User, WealthItemType } from "./types";
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL || "https://familyloop.net").replace(/\/$/, "");
 
@@ -121,6 +121,7 @@ export const api = {
   addSharedNoteItem: (shareId: string, text: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items`, { method: "POST", body: JSON.stringify({ text }) }),
   deleteSharedNoteItem: (shareId: string, itemId: string) => request<{ ok: boolean }>(`/api/notes/shared-with-me/${encodeURIComponent(shareId)}/items/${encodeURIComponent(itemId)}`, { method: "DELETE" }),
   stockQuote: (symbol: string) => request<{ symbol: string; price: number }>(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`),
+  assistantPlan: (requestText: string, context: unknown) => request<{ say: string; clarify: string; actions: AssistantAction[] }>("/api/assistant/plan", { method: "POST", body: JSON.stringify({ request: requestText, context }) }),
   homeBriefing: (context: string) => request<{ briefing: { headline: string; points: string[]; tip: string } }>("/api/home/briefing", { method: "POST", body: JSON.stringify({ context }) }),
   journalReflection: (context: string) => request<{ message: string }>("/api/journal/reflection", { method: "POST", body: JSON.stringify({ context }) }),
   // Profile and household sharing (web's Profile and Sharing pages).

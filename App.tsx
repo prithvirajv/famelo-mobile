@@ -35,6 +35,8 @@ import {
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, Recipe, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import type { HomeActionItem } from "./src/calendarLogic";
+import { assistantContext, assistantActionProblem, describeAssistantAction, applyAssistantActions } from "./src/assistantLogic";
+import type { AssistantAction } from "./src/assistantLogic";
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, directionsUrl, matchesOwnerFilter, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
@@ -669,6 +671,35 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
     }
   }, [briefingKey]);
   useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
+  // Ask FamilyLoop: a request in plain words becomes a plan (the AI only plans); the plan is shown in words written from the household's own
+  // data and nothing changes until it is confirmed. A finished change can be undone while this screen stays open.
+  const assistantDeps = { groupStockHoldings, assetValue, setPayeeRule };
+  const [assistant, setAssistant] = useState<{ request: string; status: "idle" | "planning" | "ready" | "error" | "done"; say: string; clarify: string; error: string; actions: AssistantAction[]; done: string; undo: Record<string, unknown> | null }>({ request: "", status: "idle", say: "", clarify: "", error: "", actions: [], done: "", undo: null });
+  const askAssistant = async () => {
+    const request = assistant.request.trim();
+    if (!request || assistant.status === "planning") return;
+    setAssistant((current) => ({ ...current, status: "planning", error: "", say: "", clarify: "", actions: [], done: "", undo: null }));
+    try {
+      const plan = await api.assistantPlan(request, assistantContext(state, assistantDeps));
+      setAssistant((current) => ({ ...current, status: "ready", say: plan.say || "", clarify: plan.clarify || "", actions: plan.actions || [] }));
+    } catch (cause) {
+      setAssistant((current) => ({ ...current, status: "error", error: cause instanceof Error ? cause.message : "The assistant couldn't be reached." }));
+    }
+  };
+  const assistantRows = assistant.actions.map((action) => ({ action, problem: assistantActionProblem(action, state, today, assistantDeps) }));
+  const assistantReady = assistantRows.filter((row) => !row.problem);
+  const confirmAssistant = async () => {
+    const result = applyAssistantActions(state, assistant.actions, today, assistantDeps);
+    if (!result.applied.length) { setAssistant((current) => ({ ...current, status: "error", error: "Nothing could be changed - the data has moved on since I made the plan." })); return; }
+    const said = result.applied.map((action) => describeAssistantAction(action, state, currencyMoney, today, assistantDeps)).join(" ").slice(0, 400);
+    await onSave({ ...state, ...result.patch, household: { ...state.household, activity: [`Ask FamilyLoop: ${said}`, ...(state.household.activity || [])] } });
+    setAssistant((current) => ({ ...current, status: "done", actions: [], undo: result.undo as Record<string, unknown>, done: `Done - ${result.applied.length} change${result.applied.length === 1 ? "" : "s"} made.${result.skipped.length ? ` ${result.skipped.length} could not be done and was skipped.` : ""}` }));
+  };
+  const undoAssistant = async () => {
+    if (!assistant.undo) return;
+    await onSave({ ...state, ...assistant.undo, household: { ...state.household, activity: ["Ask FamilyLoop: undid the last change", ...(state.household.activity || [])] } } as HouseholdState);
+    setAssistant((current) => ({ ...current, status: "done", undo: null, done: "Undone - everything is back as it was." }));
+  };
   // What needs attention about the bank sync (a bank that needs signing in again, a run that did not finish, data that is days old).
   const [syncProblems, setSyncProblems] = useState<Array<{ title: string; detail: string }>>([]);
   useEffect(() => {
@@ -731,6 +762,25 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       : briefing.status === "loading" ? <Text style={styles.muted}>Reading today's numbers...</Text>
       : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
       : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
+    </Card>
+    <Card>
+      <Text style={styles.cardTitle}>Ask FamilyLoop</Text>
+      <Text style={styles.muted}>Tell me what changed, for example "my M1 account is closed and moved to Fidelity". I will show exactly what I would change and wait for your OK.</Text>
+      <TextInput style={styles.input} value={assistant.request} onChangeText={(request) => setAssistant((current) => ({ ...current, request }))} editable={assistant.status !== "planning"} placeholder="What changed?" maxLength={500} returnKeyType="send" onSubmitEditing={() => void askAssistant()} />
+      <Pressable style={styles.secondaryButton} disabled={assistant.status === "planning" || !assistant.request.trim()} onPress={() => void askAssistant()}>{assistant.status === "planning" ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Ask</Text>}</Pressable>
+      {assistant.status === "error" ? <Text style={styles.muted}>{assistant.error}</Text> : null}
+      {assistant.status === "ready" ? <View>
+        {assistant.say ? <Text style={styles.rowTitle}>{assistant.say}</Text> : null}
+        {assistant.clarify ? <Text style={styles.rowDetail}>{assistant.clarify}</Text> : null}
+        {assistantRows.map((row, index) => <Text key={index} style={styles.rowDetail}>{index + 1}. {row.problem ? `Skipped - ${row.problem}` : describeAssistantAction(row.action, state, currencyMoney, today, assistantDeps)}</Text>)}
+        {!assistantRows.length && !assistant.clarify ? <Text style={styles.muted}>I couldn't turn that into a change I'm able to make. I can close or rename an account, move one investment account's holdings into another, rename an investment account, or always file a payee under a Subcategory.</Text> : null}
+        {assistantReady.length ? <Pressable style={styles.primaryButton} onPress={() => void confirmAssistant()}><Text style={styles.primaryButtonText}>Confirm {assistantReady.length === 1 ? "this change" : `these ${assistantReady.length} changes`}</Text></Pressable> : null}
+        <Pressable style={styles.secondarySmall} onPress={() => setAssistant((current) => ({ ...current, status: "idle", actions: [], say: "", clarify: "" }))}><Text style={styles.secondaryButtonText}>{assistantReady.length ? "Cancel" : "Close"}</Text></Pressable>
+      </View> : null}
+      {assistant.status === "done" ? <View>
+        <Text style={styles.rowDetail}>{assistant.done}</Text>
+        {assistant.undo ? <Pressable style={styles.secondarySmall} onPress={() => void undoAssistant()}><Text style={styles.secondaryButtonText}>Undo</Text></Pressable> : null}
+      </View> : null}
     </Card>
     {syncProblems.length ? <Card>
       <Text style={[styles.cardTitle, { color: colors.coral }]}>The overnight sync needs a look</Text>
