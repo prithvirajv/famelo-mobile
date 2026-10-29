@@ -8,7 +8,7 @@ export const LINKED_IMPORTED_ID_LIMIT = 3000;
 export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
 export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean; lastRun?: LinkedRun };
 // What the last overnight run did for a link: loaded (applied), waiting for a person, or failed with a reason.
-export type LinkedRun = { at?: string; ok?: boolean; stage?: string; error?: string; reason?: string; imported?: number; added?: number; left?: number; newRows?: number; notices?: string[] };
+export type LinkedRun = { at?: string; ok?: boolean; stage?: string; error?: string; reason?: string; imported?: number; added?: number; left?: number; newRows?: number; notices?: string[]; sinceDate?: string };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string; transactionCount?: number; oldestTransactionDate?: string };
 // A bank that returned only part of the history a history import asked for: the server leaves those whole months out (trimPartialHistory).
@@ -29,6 +29,22 @@ export function isNewRemoteAccount(mappings: Record<string, LinkedMapping>, remo
   return !Object.prototype.hasOwnProperty.call(mappings || {}, remoteId);
 }
 
+// When a run had to reach back further than the usual few days of overlap (a night was missed), the status line says where it caught up from.
+export function linkedCaughtUpNote(run: NonNullable<LinkedLink["lastRun"]>): string {
+  if (!run.sinceDate || !run.at) return "";
+  const since = new Date(`${run.sinceDate}T00:00:00`);
+  const days = (new Date(run.at).getTime() - since.getTime()) / 86400000;
+  return days > 5 ? ` (caught up from ${since.toLocaleDateString(undefined, { month: "short", day: "numeric" })})` : "";
+}
+
+// A bank link whose overnight run has not happened for over a day: the scheduler missed a night. The next run starts from the last successful
+// sync, so nothing is lost, but it is worth saying.
+export function linkRunIsStale(link: Pick<LinkedLink, "status" | "mappings" | "lastRun" | "lastSyncAt">, nowMs: number = Date.now()): boolean {
+  if (link.status !== "active" || !Object.keys(link.mappings || {}).length) return false;
+  const last = link.lastRun?.at || link.lastSyncAt;
+  return Boolean(last) && nowMs - new Date(last as string).getTime() > 30 * 3600 * 1000;
+}
+
 // What the last overnight run did for a link, in words ('' before it has run).
 export function linkedRunSummary(link: Pick<LinkedLink, "lastRun">, formatTime: (iso: string) => string): string {
   const run = link.lastRun;
@@ -36,7 +52,7 @@ export function linkedRunSummary(link: Pick<LinkedLink, "lastRun">, formatTime: 
   const time = formatTime(run.at);
   if (run.ok === false) return `Overnight sync ${time} did not finish: ${run.error || "unknown problem"}`;
   if (run.stage === "waiting") return `Overnight sync ${time}: ${run.reason || "new transactions are waiting for you to open the app."}`;
-  if (run.stage === "applied") return `Overnight sync ${time}: complete - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} need a look` : ""}.`;
+  if (run.stage === "applied") return `Overnight sync ${time}: complete${linkedCaughtUpNote(run)} - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} need a look` : ""}.`;
   return `Overnight sync ${time}: fetched${run.newRows ? ` ${run.newRows} new` : ""} - not loaded yet.`;
 }
 
@@ -74,6 +90,7 @@ export function bankSyncFacts(links: LinkedLink[], accounts: HouseholdState["acc
     const when = run.at ? formatTime(run.at) : "";
     if (link.status === "needs_reconnect") facts.push(`- Connection "${link.label}" needs signing in again; nothing new can sync until then.`);
     else if (!run.at) facts.push(`- Connection "${link.label}" has not had an overnight run yet.`);
+    else if (linkRunIsStale(link)) facts.push(`- Connection "${link.label}": NO overnight run since ${when} (a night was missed); the next run catches up from the last successful sync.`);
     else if (run.ok === false) facts.push(`- Connection "${link.label}": the overnight run (${when}) did NOT finish - ${run.error || "unknown problem"}.`);
     else if (run.stage === "waiting") facts.push(`- Connection "${link.label}": fetched overnight (${when}) but the new transactions are waiting for the household to open the app.`);
     else if (run.stage === "applied") facts.push(`- Connection "${link.label}": the overnight run (${when}) completed - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} held for review` : ""}.`);
@@ -106,6 +123,7 @@ export function bankSyncProblems(links: LinkedLink[], accounts: HouseholdState["
     else if (run.ok === false) problems.push({ title: link.label, detail: `did not finish overnight: ${run.error || "unknown problem"}` });
     else if (run.stage === "waiting") problems.push({ title: link.label, detail: run.reason || "new transactions are waiting for you to open the app" });
     else if (link.hasStaged && link.status === "active") problems.push({ title: link.label, detail: "has fetched transactions that are not loaded yet" });
+    else if (linkRunIsStale(link)) problems.push({ title: link.label, detail: `no overnight sync has run since ${new Date(link.lastRun?.at || link.lastSyncAt || "").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}. The next run catches up from the last successful sync on its own.` });
     for (const notice of run.notices || []) problems.push({ title: link.label, detail: bridgeNoticeText(notice) });
   }
   const stale = (() => { const d = new Date(`${todayKey}T00:00:00`); d.setDate(d.getDate() - 2); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();

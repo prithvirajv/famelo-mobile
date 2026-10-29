@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, pendingDraftEffect, reconcileOpeningBalance, reconcileMappedBalances,
-  mergeBrokeragePositions, linkNeedsAutoSync, linkedStatusText, simplefinSummary, LINKED_IMPORTED_ID_LIMIT, bankSyncProblems, bankSyncFacts
+  mergeBrokeragePositions, linkNeedsAutoSync, linkedStatusText, simplefinSummary, LINKED_IMPORTED_ID_LIMIT, bankSyncProblems, bankSyncFacts, linkRunIsStale, linkedRunSummary
 } from "../src/linkedAccountsLogic.ts";
 import { buildBankStreamDrafts, acceptDraft } from "../src/bankStreamLogic.ts";
 
@@ -253,4 +253,18 @@ test("Home lists what the bank connection reported (a bank that needs signing in
   assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ok: false, at: "2026-10-28T07:30:00Z", error: "boom" } }], [], "2026-10-28", day)[0].detail, "did not finish overnight: boom");
   assert.equal(bankSyncProblems([healthy], [{ id: "a", name: "Sample Checking", syncedThrough: "2026-10-20" }], "2026-10-28", day)[0].title, "Sample Checking");
   assert.ok(bankSyncFacts([withNotice], [], [], "2026-10-28", (iso) => iso, day, (m) => m).some((fact) => /needs the household's attention.*Auth required/.test(fact)), "the AI summary is told about it too");
+});
+
+test("a missed night is flagged after 30 hours, and a catch-up run says where it started from", () => {
+  const now = Date.parse("2026-10-29T12:00:00Z");
+  const link = (runAt, extra = {}) => ({ id: "L", provider: "simplefin", label: "Sample Bridge", status: "active", lastSyncAt: runAt, lastError: "", mappings: { A: { accountId: "x" } }, lastRun: { at: runAt, ok: true, stage: "applied", imported: 1, added: 1, left: 0, ...extra } });
+  assert.equal(linkRunIsStale(link("2026-10-29T07:30:00Z"), now), false);
+  assert.equal(linkRunIsStale(link("2026-10-28T07:30:00Z"), now), false, "a normal night 29 hours ago is fine");
+  assert.equal(linkRunIsStale(link("2026-10-27T07:30:00Z"), now), true, "a night that never ran");
+  assert.equal(linkRunIsStale({ ...link("2026-10-27T07:30:00Z"), status: "needs_reconnect" }, now), false, "a link that needs signing in is reported for that instead");
+  assert.equal(linkRunIsStale({ ...link("2026-10-27T07:30:00Z"), mappings: {} }, now), false, "nothing is expected of a link with no accounts chosen");
+  const day = (key) => key;
+  assert.match(linkedRunSummary(link("2026-10-29T07:30:00Z", { sinceDate: "2026-10-20" }), (iso) => iso), /complete \(caught up from /);
+  assert.doesNotMatch(linkedRunSummary(link("2026-10-29T07:30:00Z", { sinceDate: "2026-10-26" }), (iso) => iso), /caught up/);
+  assert.ok(bankSyncFacts([link("2026-10-27T07:30:00Z")], [], [], "2026-10-29", (iso) => iso, day, (m) => m).some((fact) => /NO overnight run since/.test(fact)));
 });
