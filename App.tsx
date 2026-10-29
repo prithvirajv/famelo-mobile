@@ -48,7 +48,7 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom, markAccountsSynced, bankSyncFacts } from "./src/linkedAccountsLogic";
+import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom, markAccountsSynced, bankSyncFacts, bankSyncProblems } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
@@ -669,6 +669,13 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
     }
   }, [briefingKey]);
   useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
+  // What needs attention about the bank sync (a bank that needs signing in again, a run that did not finish, data that is days old).
+  const [syncProblems, setSyncProblems] = useState<Array<{ title: string; detail: string }>>([]);
+  useEffect(() => {
+    let live = true;
+    void api.linkedAccounts().then((overview) => { if (live) setSyncProblems(bankSyncProblems(overview.links || [], state.accounts || [], today, (key) => new Date(`${key}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))); }).catch(() => { if (live) setSyncProblems([]); });
+    return () => { live = false; };
+  }, [state.accounts, today]);
   // Once when Home opens: record any salary the deposits show and open the current month, saving only if something changed.
   const automationRan = useRef(false);
   useEffect(() => {
@@ -725,6 +732,15 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
       : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
     </Card>
+    {syncProblems.length ? <Card>
+      <Text style={[styles.cardTitle, { color: colors.coral }]}>The overnight sync needs a look</Text>
+      {syncProblems.map((problem, index) => <View key={`${problem.title}-${index}`} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{problem.title}</Text>
+          <Text style={styles.rowDetail}>{problem.detail}</Text>
+        </View>
+      </View>)}
+    </Card> : null}
     {(state.historyGapNotices || []).length ? <Card>
       <Text style={[styles.cardTitle, { color: colors.coral }]}>Some bank history is missing - import it from a statement</Text>
       <Text style={styles.muted}>The bank did not return these months, so they were left out rather than half-filled. For each, import a statement for the account (Bank stream, then Import a statement). Mark it done once you have.</Text>

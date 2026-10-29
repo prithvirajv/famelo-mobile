@@ -8,7 +8,7 @@ export const LINKED_IMPORTED_ID_LIMIT = 3000;
 export type LinkedMapping = { accountId?: string; groupId?: string; groupName?: string; debtId?: string; skipped?: boolean };
 export type LinkedLink = { id: string; provider: "simplefin" | "snaptrade"; label: string; status: string; lastSyncAt: string | null; lastError: string; mappings: Record<string, LinkedMapping>; newAccounts?: Array<{ remoteId: string; name: string; orgName: string }>; stagedCount?: number; hasStaged?: boolean; lastRun?: LinkedRun };
 // What the last overnight run did for a link: loaded (applied), waiting for a person, or failed with a reason.
-export type LinkedRun = { at?: string; ok?: boolean; stage?: string; error?: string; reason?: string; imported?: number; added?: number; left?: number; newRows?: number };
+export type LinkedRun = { at?: string; ok?: boolean; stage?: string; error?: string; reason?: string; imported?: number; added?: number; left?: number; newRows?: number; notices?: string[] };
 export type LinkedOverview = { configured: boolean; providers: { simplefin?: boolean; snaptrade?: boolean }; links: LinkedLink[] };
 export type RemoteAccount = { remoteId: string; name: string; orgName: string; currency: string; balance: number | null; balanceDate: string; transactionCount?: number; oldestTransactionDate?: string };
 // A bank that returned only part of the history a history import asked for: the server leaves those whole months out (trimPartialHistory).
@@ -78,6 +78,7 @@ export function bankSyncFacts(links: LinkedLink[], accounts: HouseholdState["acc
     else if (run.stage === "waiting") facts.push(`- Connection "${link.label}": fetched overnight (${when}) but the new transactions are waiting for the household to open the app.`);
     else if (run.stage === "applied") facts.push(`- Connection "${link.label}": the overnight run (${when}) completed - ${run.imported || 0} new from the bank, ${run.added || 0} added to the ledger${run.left ? `, ${run.left} held for review` : ""}.`);
     else facts.push(`- Connection "${link.label}": fetched overnight (${when}); not loaded yet.`);
+    for (const notice of run.notices || []) facts.push(`- The bank connection reported (needs the household's attention): ${notice}`);
   }
   const behind = (() => { const d = new Date(`${todayKey}T00:00:00`); d.setDate(d.getDate() - 2); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
   for (const account of fed.slice(0, 10)) {
@@ -88,6 +89,30 @@ export function bankSyncFacts(links: LinkedLink[], accounts: HouseholdState["acc
     facts.push(`- NOT imported (the bank did not return it; needs a statement import): ${accounts.find((account) => account.id === notice.accountId)?.name || notice.accountName}, ${months}.`);
   }
   return facts;
+}
+
+// Home: what needs attention about the bank sync (mirrors web's bankSyncProblems) - a connection that needs signing in, an overnight run that did
+// not finish or is waiting for the app, what the bank connection itself reported (e.g. "Auth required"), or a bank-fed account whose data is
+// more than two days old. Empty when everything loaded.
+export function bridgeNoticeText(notice: string): string {
+  return /auth|attention|log\s?in|sign\s?in|credential|password/i.test(notice) ? `${notice} - sign in to your SimpleFIN Bridge account and re-authorise that bank; until then it may stop sending new transactions.` : notice;
+}
+
+export function bankSyncProblems(links: LinkedLink[], accounts: HouseholdState["accounts"], todayKey: string, dayLabel: (dateKey: string) => string): Array<{ title: string; detail: string }> {
+  const problems: Array<{ title: string; detail: string }> = [];
+  for (const link of links) {
+    const run = link.lastRun || {};
+    if (link.status === "needs_reconnect") problems.push({ title: link.label, detail: "needs signing in again - remove it and link it again under Wealth" });
+    else if (run.ok === false) problems.push({ title: link.label, detail: `did not finish overnight: ${run.error || "unknown problem"}` });
+    else if (run.stage === "waiting") problems.push({ title: link.label, detail: run.reason || "new transactions are waiting for you to open the app" });
+    else if (link.hasStaged && link.status === "active") problems.push({ title: link.label, detail: "has fetched transactions that are not loaded yet" });
+    for (const notice of run.notices || []) problems.push({ title: link.label, detail: bridgeNoticeText(notice) });
+  }
+  const stale = (() => { const d = new Date(`${todayKey}T00:00:00`); d.setDate(d.getDate() - 2); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  for (const account of (accounts || []).filter((item) => item.syncedThrough && item.syncedThrough < stale && !item.closedAt)) {
+    problems.push({ title: account.name, detail: `the bank has data only through ${dayLabel(account.syncedThrough as string)}` });
+  }
+  return problems;
 }
 
 // Whether opening the screen should quietly refresh this link: it has accounts chosen and either the nightly job has data waiting or it

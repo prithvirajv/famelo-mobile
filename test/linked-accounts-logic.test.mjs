@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, pendingDraftEffect, reconcileOpeningBalance, reconcileMappedBalances,
-  mergeBrokeragePositions, linkNeedsAutoSync, linkedStatusText, simplefinSummary, LINKED_IMPORTED_ID_LIMIT
+  mergeBrokeragePositions, linkNeedsAutoSync, linkedStatusText, simplefinSummary, LINKED_IMPORTED_ID_LIMIT, bankSyncProblems, bankSyncFacts
 } from "../src/linkedAccountsLogic.ts";
 import { buildBankStreamDrafts, acceptDraft } from "../src/bankStreamLogic.ts";
 
@@ -239,4 +239,18 @@ test("each account records how far the bank's data runs, and the last overnight 
   assert.ok(!facts.some((f) => /Checking.*BEHIND/.test(f)));
   assert.ok(facts.some((f) => /NOT imported .*Card, 2026-01 to 2026-03/.test(f)));
   assert.deepEqual(bankSyncFacts([], [{ id: "x", name: "Cash" }], [], "2026-10-27", time, (d) => d, (m) => m), [], "no bank link means nothing to say");
+});
+
+test("Home lists what the bank connection reported (a bank that needs signing in) alongside failed runs and stale data", () => {
+  const day = (key) => key;
+  const healthy = { id: "L", provider: "simplefin", label: "Sample Bridge", status: "active", lastSyncAt: "2026-10-28T07:30:00Z", lastError: "", mappings: {}, lastRun: { at: "2026-10-28T07:30:00Z", ok: true, stage: "applied", imported: 4, added: 4, left: 0 } };
+  assert.deepEqual(bankSyncProblems([healthy], [], "2026-10-28", day), []);
+  const withNotice = { ...healthy, lastRun: { ...healthy.lastRun, notices: ["Connection to Sample Credit Union may need attention. Auth required"] } };
+  const [problem] = bankSyncProblems([withNotice], [], "2026-10-28", day);
+  assert.equal(problem.title, "Sample Bridge");
+  assert.match(problem.detail, /Auth required.*re-authorise that bank/);
+  assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ...healthy.lastRun, notices: ["Rate limited"] } }], [], "2026-10-28", day)[0].detail, "Rate limited", "a message that is not about signing in is shown as the bank said it");
+  assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ok: false, at: "2026-10-28T07:30:00Z", error: "boom" } }], [], "2026-10-28", day)[0].detail, "did not finish overnight: boom");
+  assert.equal(bankSyncProblems([healthy], [{ id: "a", name: "Sample Checking", syncedThrough: "2026-10-20" }], "2026-10-28", day)[0].title, "Sample Checking");
+  assert.ok(bankSyncFacts([withNotice], [], [], "2026-10-28", (iso) => iso, day, (m) => m).some((fact) => /needs the household's attention.*Auth required/.test(fact)), "the AI summary is told about it too");
 });
