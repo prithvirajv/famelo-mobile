@@ -5,7 +5,8 @@ import {
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
   acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
-  planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips
+  planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips,
+  payeeLearnKey, setPayeeRule, planCategoryRelearn, learnFromLineChange, categoryRuleEntries, removeCategoryRule
 } from "../src/bankStreamLogic.ts";
 
 // All fixtures here are synthetic (SAMPLE names) - never copy rows from a real statement into a test.
@@ -554,4 +555,46 @@ test("bulk transfers never pair person-to-person payments, direct deposits or tw
   assert.deepEqual(planBulkTransfers([bulkDraft("e", "SAMPLE PAYROLL DIRECT DEP", -4800, "2026-08-03", "chk"), bulkDraft("f", "SAMPLE DIRECT DEPOSIT", 4800, "2026-08-03", "card1")], accounts), []);
   assert.deepEqual(planBulkTransfers([bulkDraft("g", "SAMPLE SHOP A", 7.25, "2026-09-03", "card1"), bulkDraft("h", "SAMPLE SHOP B", -7.25, "2026-09-03", "card2")], accounts), []);
   assert.equal(planBulkTransfers([bulkDraft("i", "CARD AUTOPAY", 100, "2026-09-03", "chk"), bulkDraft("j", "AUTOPAY THANK YOU", -100, "2026-09-03", "card1")], accounts).length, 1);
+});
+
+// ---- Learning from category changes -------------------------------------------------------------------------------------
+const learnState = (transactions, drafts = []) => ({ household: { name: "H", country: "US", currency: "USD", activity: [] }, budget: { month: "2026-10", income: 0, categories: [] }, accounts: [], transactions, transactionInboxDrafts: drafts, transactionInboxDone: [], transfers: [] });
+
+test("a merchant written with store numbers or reference codes keeps one learn key; people and transfers never do", () => {
+  assert.equal(payeeLearnKey("SAMPLE MARKT*532WR2451"), "samplemarkt");
+  assert.equal(payeeLearnKey("SAMPLE MARKT #1234 TOWNVILLE ST"), "samplemarkt");
+  assert.equal(payeeLearnKey("SQ *CORNER CAFE 123"), "cornercafe");
+  assert.equal(payeeLearnKey("Zelle payment to Sam"), "");
+  assert.equal(payeeLearnKey("TRANSFER TO SAVINGS 1234"), "");
+});
+
+test("a rule is found by a differently written payee, replaces older rules of the same merchant, and clears together", () => {
+  let state = setPayeeRule(learnState([]), "SAMPLE MARKT*ABC123", "groceries");
+  assert.equal(categorizationRuleForPayee(state.transactionCategorizationRules, "SAMPLE MARKT*ZZZ999"), "groceries");
+  state = setPayeeRule(state, "SAMPLE MARKT*ZZZ999", "dining");
+  assert.equal(categorizationRuleForPayee(state.transactionCategorizationRules, "SAMPLE MARKT*ABC123"), "dining", "the newest choice wins over the older writing's rule");
+  assert.equal(categoryRuleEntries(state).length, 1);
+  const [entry] = categoryRuleEntries(state);
+  state = removeCategoryRule(state, entry.keys);
+  assert.equal(categorizationRuleForPayee(state.transactionCategorizationRules, "SAMPLE MARKT*ABC123"), "");
+  assert.equal(categoryRuleEntries(state).length, 0);
+});
+
+test("changing a ledger transaction's Subcategory makes the rule, moves waiting rows, and lists the earlier ones to offer", () => {
+  const rows = [{ payee: "SAMPLE MARKT*A1", lineId: "groceries" }, { payee: "SAMPLE MARKT*B2", lineId: "dining" }, { payee: "OTHER", lineId: "dining" }];
+  const state = learnState(rows, [{ id: "w1", payee: "SAMPLE MARKT*C3", lineId: "dining" }, { id: "w2", payee: "OTHER", lineId: "dining" }]);
+  const result = learnFromLineChange(state, 0);
+  assert.deepEqual(result.others, [1]);
+  assert.equal(result.waiting, 1);
+  assert.deepEqual(result.state.transactionInboxDrafts.map((d) => [d.id, d.lineId, d.lineSource || ""]), [["w1", "groceries", "rule"], ["w2", "dining", ""]]);
+  assert.equal(categorizationRuleForPayee(result.state.transactionCategorizationRules, "SAMPLE MARKT*NEW"), "groceries");
+  assert.deepEqual(planCategoryRelearn(rows, 2, "dining"), []);
+});
+
+test("picking a Subcategory by hand on a waiting row teaches the rule and the payee's other waiting rows follow", () => {
+  const state = learnState([], [{ id: "a", payee: "SAMPLE MARKT*A1", lineId: "" }, { id: "b", payee: "SAMPLE MARKT*B2", lineId: "" }, { id: "c", payee: "OTHER", lineId: "" }]);
+  const result = updateDraft(state, "a", { lineId: "groceries" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.state.transactionInboxDrafts.map((d) => [d.id, d.lineId]), [["a", "groceries"], ["b", "groceries"], ["c", ""]]);
+  assert.equal(categorizationRuleForPayee(result.state.transactionCategorizationRules, "SAMPLE MARKT*Z9"), "groceries");
 });

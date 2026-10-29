@@ -299,7 +299,100 @@ export function suggestSubcategoryFromHistory(payee: string, transactions: Match
     const date = String(transaction.date || "");
     if (!best || date > best.date) best = { lineId: transaction.lineId, date };
   });
+  if (best) return (best as { lineId: string }).lineId;
+  // Nothing under this exact payee: the same merchant written differently (a different store or reference number) counts.
+  const loose = payeeLearnKey(payee);
+  if (!loose) return null;
+  transactions.forEach((transaction) => {
+    if (!transaction.lineId || payeeLearnKey(transaction.payee) !== loose) return;
+    const date = String(transaction.date || "");
+    if (!best || date > best.date) best = { lineId: transaction.lineId, date };
+  });
   return best ? (best as { lineId: string }).lineId : null;
+}
+
+// ---- Learning from category changes (mirrors web's shared-logic) ------------------------------------------------------------
+// A Subcategory the household picks by hand becomes the payee's rule; rules already win over the history guess. A rule is stored under the
+// payee's exact key and, for a merchant written with varying store numbers or reference codes, also under a looser key. People and transfers
+// only ever match exactly.
+const LEARN_EXACT_ONLY_PAYEE = /zelle|venmo|cash\s?app|paypal|transfer|withdrawal|deposit|payroll|check\s?#|\bpayment\b|\batm\b/i;
+const LEARN_PROCESSOR_PREFIX = /^(sq|tst|sp|pp|paypal|pos|ach|dbt|debit|purchase)\s*[*:\-]\s*/i;
+
+export function payeeLearnKey(payee: unknown): string {
+  const raw = String(payee || "");
+  if (!raw.trim() || LEARN_EXACT_ONLY_PAYEE.test(raw)) return "";
+  const text = raw.toLowerCase().replace(LEARN_PROCESSOR_PREFIX, "").split(/[*#]/)[0] || "";
+  const words = text.split(/[^a-z.]+/).filter((word) => word.replace(/[^a-z]/g, "").length >= 2);
+  const first = words[0];
+  if (!first) return "";
+  const picked = first.includes(".") ? [first] : words.slice(0, 2);
+  const key = picked.join("").replace(/[^a-z]/g, "");
+  return key.length >= 4 ? key : "";
+}
+
+// Sets (lineId) or clears ("") the rule for a payee under both keys, retiring rules made earlier from other writings of the same merchant, and
+// remembers how the payee was written so a rules list can show it.
+export function setPayeeRule(state: HouseholdState, payee: string, lineId: string): HouseholdState {
+  const exact = normalizeForPayeeMatch(payee);
+  const loose = payeeLearnKey(payee);
+  const keys = [...new Set([exact, loose].filter(Boolean))];
+  if (!keys.length) return state;
+  const rules = { ...(state.transactionCategorizationRules || {}) };
+  const labels = { ...(state.transactionCategorizationRuleLabels || {}) };
+  if (loose) Object.keys(labels).forEach((key) => { if (payeeLearnKey(labels[key]) === loose) { delete rules[key]; delete labels[key]; } });
+  keys.forEach((key) => { if (lineId) { rules[key] = lineId; labels[key] = String(payee).trim().slice(0, 80); } else { delete rules[key]; delete labels[key]; } });
+  return { ...state, transactionCategorizationRules: rules, transactionCategorizationRuleLabels: labels };
+}
+
+// The household's "always categorize this way" rules, one entry per payee (a rule lives under an exact and a looser key; both belong to one entry).
+export function categoryRuleEntries(state: Pick<HouseholdState, "transactionCategorizationRules" | "transactionCategorizationRuleLabels">): Array<{ label: string; lineId: string; keys: string[] }> {
+  const groups = new Map<string, { label: string; lineId: string; keys: string[] }>();
+  Object.entries(state.transactionCategorizationRules || {}).forEach(([key, lineId]) => {
+    const label = state.transactionCategorizationRuleLabels?.[key] || key;
+    const id = `${label.toLowerCase()}|${lineId}`;
+    const group = groups.get(id) || { label, lineId, keys: [] };
+    group.keys.push(key);
+    groups.set(id, group);
+  });
+  return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export function removeCategoryRule(state: HouseholdState, keys: string[]): HouseholdState {
+  const rules = { ...(state.transactionCategorizationRules || {}) };
+  const labels = { ...(state.transactionCategorizationRuleLabels || {}) };
+  keys.forEach((key) => { delete rules[key]; delete labels[key]; });
+  return { ...state, transactionCategorizationRules: rules, transactionCategorizationRuleLabels: labels };
+}
+
+// Earlier ledger transactions of the same payee (exact or loose match) filed under a different Subcategory than the one just chosen: the
+// ones to offer to move. Returns indexes into `transactions`; the changed row itself is never included.
+export function planCategoryRelearn(transactions: Array<{ payee?: string; lineId?: string }>, changedIndex: number, lineId: string): number[] {
+  const changed = transactions[changedIndex];
+  if (!changed || !lineId) return [];
+  const exact = normalizeForPayeeMatch(changed.payee);
+  const loose = payeeLearnKey(changed.payee);
+  const matches: number[] = [];
+  transactions.forEach((transaction, index) => {
+    if (index === changedIndex || transaction.lineId === lineId) return;
+    if ((exact && normalizeForPayeeMatch(transaction.payee) === exact) || (loose && payeeLearnKey(transaction.payee) === loose)) matches.push(index);
+  });
+  return matches;
+}
+
+// After a ledger transaction's Subcategory was changed by hand: remember it as the payee's rule, move waiting Bank stream rows of the payee
+// to it, and report which earlier ledger transactions could follow (the caller asks before moving them).
+export function learnFromLineChange(state: HouseholdState, ledgerIndex: number): { state: HouseholdState; others: number[]; waiting: number } {
+  const transaction = state.transactions[ledgerIndex];
+  if (!transaction || !transaction.lineId || !String(transaction.payee || "").trim()) return { state, others: [], waiting: 0 };
+  let next = setPayeeRule(state, transaction.payee, transaction.lineId);
+  let waiting = 0;
+  const drafts = (next.transactionInboxDrafts || []).map((draft) => {
+    if (draft.lineId === transaction.lineId || categorizationRuleForPayee(next.transactionCategorizationRules, draft.payee || "") !== transaction.lineId) return draft;
+    waiting += 1;
+    return { ...draft, lineId: transaction.lineId, lineSource: "rule" as const, historyMatch: false };
+  });
+  next = { ...next, transactionInboxDrafts: drafts };
+  return { state: next, others: planCategoryRelearn(next.transactions, ledgerIndex, transaction.lineId), waiting };
 }
 
 export type CategorizationConfidence = { lineId: string; confidence: number; sampleSize: number };
@@ -335,8 +428,11 @@ export function suggestAccountFromHistory(payee: string, transactions: Matchable
 
 // ---- Categorization rules ("always categorize this payee this way") ---------------------------------------------
 export function categorizationRuleForPayee(rules: Record<string, string> | undefined, payee: string): string {
-  const key = normalizeForPayeeMatch(payee);
-  return key ? rules?.[key] || "" : "";
+  if (!rules) return "";
+  const exact = normalizeForPayeeMatch(payee);
+  if (exact && rules[exact]) return rules[exact];
+  const loose = payeeLearnKey(payee);
+  return (loose && rules[loose]) || "";
 }
 
 export function setCategorizationRule(rules: Record<string, string> | undefined, payee: string, lineId: string): Record<string, string> {
@@ -500,7 +596,13 @@ export function updateDraft(state: HouseholdState, draftId: string, patch: Draft
     ...(patch.lineId !== undefined ? { historyMatch: false, lineSource: patch.lineId ? "manual" as const : "" as const } : {}),
     ...(patch.accountId !== undefined ? { accountHistoryMatch: false } : {})
   };
-  return { ok: true, state: { ...state, transactionInboxDrafts: (state.transactionInboxDrafts || []).map((item) => item.id === draftId ? next : item) } };
+  let result: HouseholdState = { ...state, transactionInboxDrafts: (state.transactionInboxDrafts || []).map((item) => item.id === draftId ? next : item) };
+  // A Subcategory picked by hand is remembered for the payee (like a change in the ledger), and other waiting rows of the payee follow it.
+  if (patch.lineId && String(next.payee || "").trim()) {
+    result = setPayeeRule(result, next.payee || "", patch.lineId);
+    result = { ...result, transactionInboxDrafts: (result.transactionInboxDrafts || []).map((item) => item.id === draftId || item.lineId === patch.lineId || categorizationRuleForPayee(result.transactionCategorizationRules, item.payee || "") !== patch.lineId ? item : { ...item, lineId: patch.lineId, lineSource: "rule" as const, historyMatch: false }) };
+  }
+  return { ok: true, state: result };
 }
 
 // Hard-deletes every unreviewed row for ONE account (not added to the done list) - for clearing a stale backlog without

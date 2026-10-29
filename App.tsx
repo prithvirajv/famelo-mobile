@@ -59,7 +59,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -968,7 +968,21 @@ function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdS
       const updated = existing.splits?.length
         ? { ...existing, date: input.date, payee: input.payee, accountId: input.accountId, tags: input.tags }
         : { ...existing, ...input, ...lineSnapshot(state, txLineId) };
-      await onSave({ ...state, transactions: state.transactions.map((item, index) => index === editingTxIndex ? updated : item) });
+      const edited = { ...state, transactions: state.transactions.map((item, index) => index === editingTxIndex ? updated : item) };
+      // A Subcategory changed by hand is remembered for the payee: its rule becomes the new one, and earlier transactions of the same payee
+      // filed elsewhere are offered to move too (asked first; nothing else changes).
+      const learned = !existing.splits?.length && txLineId && existing.lineId !== txLineId ? learnFromLineChange(edited, editingTxIndex) : null;
+      await onSave(learned ? learned.state : edited);
+      if (learned) {
+        const label = learned.state.transactions[editingTxIndex]?.subcategoryName || "this Subcategory";
+        const lineId = txLineId;
+        if (learned.others.length) {
+          const list = learned.others.slice(0, 5).map((i) => `${learned.state.transactions[i]?.date}  ${exactMoney(Math.abs(Number(learned.state.transactions[i]?.amount)), currency)}  ${learned.state.transactions[i]?.payee}`).join("\n");
+          Alert.alert(`Learned: "${updated.payee}" goes to ${label} from now on`, `Also move the ${learned.others.length} earlier transaction${learned.others.length === 1 ? "" : "s"} of this payee to ${label}?\n\n${list}${learned.others.length > 5 ? `\n…and ${learned.others.length - 5} more` : ""}`, [{ text: "Just this one" }, {
+            text: `Move ${learned.others.length}`, onPress: () => void onSave({ ...learned.state, transactions: learned.state.transactions.map((item, index) => learned.others.includes(index) ? { ...item, lineId, ...lineSnapshot(learned.state, lineId) } : item) })
+          }]);
+        }
+      }
     } else {
       await onSave({ ...state, transactions: [makeTransaction(state, input), ...state.transactions] });
     }
@@ -3195,6 +3209,17 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       {(state.transactionInboxDrafts || []).length ? <Pressable style={styles.secondaryButton} disabled={aiWorking} onPress={() => void processWaitingRows()}>{aiWorking ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Let AI categorize and add the {(state.transactionInboxDrafts || []).length} waiting row{(state.transactionInboxDrafts || []).length === 1 ? "" : "s"}</Text>}</Pressable> : null}
       {feedback ? <Text style={styles.muted}>{feedback}</Text> : null}
     </Card>
+    {categoryRuleEntries(state).length ? <Card>
+      <Text style={styles.cardTitle}>Category rules</Text>
+      <Text style={styles.muted}>Whenever you move a transaction to a different Subcategory, FamilyLoop remembers it for that payee and files the next one there too. Remove a rule to go back to guessing from history.</Text>
+      {categoryRuleEntries(state).map((entry) => <View key={entry.keys.join(",")} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{entry.label}</Text>
+          <Text style={styles.rowDetail}>{(() => { const line = (state.budget.categories || []).flatMap((category) => category.lines.map((item) => ({ ...item, category: category.name }))).find((item) => item.id === entry.lineId); return line ? `${line.category} - ${line.name}` : "A Subcategory that no longer exists"; })()}</Text>
+        </View>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave(removeCategoryRule(state, entry.keys))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Remove</Text></Pressable>
+      </View>)}
+    </Card> : null}
     {bulkPairs.length || bulkSkips.length ? <Card>
       <Text style={styles.cardTitle}>Settle waiting rows</Text>
       {bulkPairs.length ? <><Text style={styles.muted}>{bulkPairs.length} pair{bulkPairs.length === 1 ? "" : "s"} of waiting rows move money between your own accounts (every month).</Text>
@@ -3255,7 +3280,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         </ScrollView>
         <View style={styles.actionRow}>
           {!draft.lineId && lines.length ? <Pressable style={styles.secondarySmall} disabled={aiBusyId === id} onPress={() => void suggestLine(id, draft.payee || "")}>{aiBusyId === id ? <ActivityIndicator size="small" color={colors.green} /> : <Text style={styles.secondaryButtonText}>✨ Suggest category</Text>}</Pressable> : null}
-          {draft.lineId ? <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, transactionCategorizationRules: setCategorizationRule(state.transactionCategorizationRules, draft.payee || "", draft.categorizationRuleLineId === draft.lineId ? "" : draft.lineId) })}><Text style={styles.secondaryButtonText}>{draft.categorizationRuleLineId === draft.lineId ? "🔒 Always this category - remove" : "🔒 Always categorize this payee this way"}</Text></Pressable> : null}
+          {draft.lineId ? <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, ...setPayeeRule(state, draft.payee || "", draft.categorizationRuleLineId === draft.lineId ? "" : draft.lineId) })}><Text style={styles.secondaryButtonText}>{draft.categorizationRuleLineId === draft.lineId ? "🔒 Always this category - remove" : "🔒 Always categorize this payee this way"}</Text></Pressable> : null}
         </View>
         {accounts.length ? <>
           <Text style={styles.label}>Account</Text>

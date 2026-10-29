@@ -314,7 +314,7 @@ test("Bank stream is reachable from More, imports CSV/PDF into reviewable drafts
   assert.match(api, /\/api\/transactions\/suggest-subcategory/);
   assert.match(api, /\/api\/transactions\/suggest-account/);
   const body = extractFunctionSource(app, "BankStream");
-  for (const name of ["parseBankCsvTransactions", "buildBankStreamDrafts", "reviewDrafts", "acceptDraft", "dismissDraft", "updateDraft", "clearDraftsForAccount", "moveDraftToTransfer", "setCategorizationRule"]) {
+  for (const name of ["parseBankCsvTransactions", "buildBankStreamDrafts", "reviewDrafts", "acceptDraft", "dismissDraft", "updateDraft", "clearDraftsForAccount", "moveDraftToTransfer", "setPayeeRule", "categoryRuleEntries", "removeCategoryRule"]) {
     assert.match(body, new RegExp(name + "\\("), `BankStream should use ${name}`);
   }
   assertOnlyWholeStateSaves(body, "BankStream");

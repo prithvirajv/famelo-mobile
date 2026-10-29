@@ -178,6 +178,7 @@ export type HouseholdState = {
   transactionInboxDone?: string[];
   // { normalized payee: lineId } - "always categorize this payee this way".
   transactionCategorizationRules?: Record<string, string>;
+  transactionCategorizationRuleLabels?: Record<string, string>;
 };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
