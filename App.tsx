@@ -273,6 +273,7 @@ function AppContent() {
         else if (target === "wealth" || target === "sharing") setSubScreen(target);
         else { setSubScreen(null); setTab(target); }
       }} />
+    {state ? <AssistantSheet state={state} onSave={save} bottomOffset={Math.max(insets.bottom, 8) + 64 + 12} /> : null}
     <View style={[styles.tabBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
       {tabs.map((item) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: tab === item.id }} style={styles.tab} onPress={() => setTab(item.id)}>
         <Ionicons name={item.icon} size={23} color={tab === item.id ? colors.green : colors.muted} />
@@ -614,6 +615,75 @@ function Card({ children }: React.PropsWithChildren) { return <View style={style
 function Metric({ label, value, accent = colors.green }: { label: string; value: string; accent?: string }) { return <View style={[styles.metric, { borderTopColor: accent }]}><Text style={styles.metricLabel}>{label}</Text><Text style={styles.metricValue}>{value}</Text></View>; }
 function Centered({ children }: React.PropsWithChildren) { return <SafeAreaView style={styles.centered}>{children}</SafeAreaView>; }
 
+// Ask FamilyLoop, on every screen: a floating button opens a sheet where a request in plain words becomes a plan (the AI only plans). The plan
+// is shown in words written from the household's own data and nothing changes until it is confirmed; a finished change can be undone while
+// the app stays open. Rules live in src/assistantLogic.ts.
+function AssistantSheet({ state, onSave, bottomOffset }: { state: HouseholdState; onSave: (next: HouseholdState) => Promise<void>; bottomOffset: number }) {
+  const [open, setOpen] = useState(false);
+  const today = localDateKey();
+  const currencyMoney = (amount: number) => money(amount, state.household.currency);
+  const assistantDeps = { groupStockHoldings, assetValue, setPayeeRule };
+  const [assistant, setAssistant] = useState<{ request: string; status: "idle" | "planning" | "ready" | "error" | "done"; say: string; clarify: string; error: string; actions: AssistantAction[]; done: string; undo: Record<string, unknown> | null }>({ request: "", status: "idle", say: "", clarify: "", error: "", actions: [], done: "", undo: null });
+  const askAssistant = async () => {
+    const request = assistant.request.trim();
+    if (!request || assistant.status === "planning") return;
+    setAssistant((current) => ({ ...current, status: "planning", error: "", say: "", clarify: "", actions: [], done: "", undo: null }));
+    try {
+      const plan = await api.assistantPlan(request, assistantContext(state, assistantDeps));
+      setAssistant((current) => ({ ...current, status: "ready", say: plan.say || "", clarify: plan.clarify || "", actions: plan.actions || [] }));
+    } catch (cause) {
+      setAssistant((current) => ({ ...current, status: "error", error: cause instanceof Error ? cause.message : "The assistant couldn't be reached." }));
+    }
+  };
+  const rows = assistant.actions.map((action) => ({ action, problem: assistantActionProblem(action, state, today, assistantDeps) }));
+  const ready = rows.filter((row) => !row.problem);
+  const confirm = async () => {
+    const result = applyAssistantActions(state, assistant.actions, today, assistantDeps);
+    if (!result.applied.length) { setAssistant((current) => ({ ...current, status: "error", error: "Nothing could be changed - the data has moved on since I made the plan." })); return; }
+    const said = result.applied.map((action) => describeAssistantAction(action, state, currencyMoney, today, assistantDeps)).join(" ").slice(0, 400);
+    await onSave({ ...state, ...result.patch, household: { ...state.household, activity: [`Ask FamilyLoop: ${said}`, ...(state.household.activity || [])] } });
+    setAssistant((current) => ({ ...current, status: "done", actions: [], undo: result.undo as Record<string, unknown>, done: `Done - ${result.applied.length} change${result.applied.length === 1 ? "" : "s"} made.${result.skipped.length ? ` ${result.skipped.length} could not be done and was skipped.` : ""}` }));
+  };
+  const undo = async () => {
+    if (!assistant.undo) return;
+    await onSave({ ...state, ...assistant.undo, household: { ...state.household, activity: ["Ask FamilyLoop: undid the last change", ...(state.household.activity || [])] } } as HouseholdState);
+    setAssistant((current) => ({ ...current, status: "done", undo: null, done: "Undone - everything is back as it was." }));
+  };
+  return <>
+    <Pressable accessibilityRole="button" accessibilityLabel="Ask FamilyLoop" style={[styles.assistantFab, { bottom: bottomOffset }]} onPress={() => setOpen(true)}>
+      <Ionicons name="sparkles" size={18} color="#fff" /><Text style={styles.assistantFabText}>Ask</Text>
+    </Pressable>
+    <Modal visible={open} animationType="slide" transparent onRequestClose={() => setOpen(false)}>
+      <KeyboardAvoidingView style={styles.assistantBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <View style={styles.assistantSheet}>
+          <View style={styles.iouPersonHead}>
+            <Text style={styles.cardTitle}>Ask FamilyLoop</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setOpen(false)}><Ionicons name="close" size={24} color={colors.muted} /></Pressable>
+          </View>
+          <ScrollView keyboardShouldPersistTaps="handled">
+            <Text style={styles.muted}>Tell me what changed, for example "my M1 account is closed and moved to Fidelity". I will show exactly what I would change and wait for your OK.</Text>
+            <TextInput style={styles.input} value={assistant.request} onChangeText={(request) => setAssistant((current) => ({ ...current, request }))} editable={assistant.status !== "planning"} placeholder="What changed?" maxLength={500} returnKeyType="send" onSubmitEditing={() => void askAssistant()} />
+            <Pressable style={styles.secondaryButton} disabled={assistant.status === "planning" || !assistant.request.trim()} onPress={() => void askAssistant()}>{assistant.status === "planning" ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Ask</Text>}</Pressable>
+            {assistant.status === "error" ? <Text style={styles.muted}>{assistant.error}</Text> : null}
+            {assistant.status === "ready" ? <View>
+              {assistant.say ? <Text style={styles.rowTitle}>{assistant.say}</Text> : null}
+              {assistant.clarify ? <Text style={styles.rowDetail}>{assistant.clarify}</Text> : null}
+              {rows.map((row, index) => <Text key={index} style={styles.rowDetail}>{index + 1}. {row.problem ? `Skipped - ${row.problem}` : describeAssistantAction(row.action, state, currencyMoney, today, assistantDeps)}</Text>)}
+              {!rows.length && !assistant.clarify ? <Text style={styles.muted}>I couldn't turn that into a change I'm able to make. I can close or rename an account, move one investment account's holdings into another, rename an investment account, or always file a payee under a Subcategory.</Text> : null}
+              {ready.length ? <Pressable style={styles.primaryButton} onPress={() => void confirm()}><Text style={styles.primaryButtonText}>Confirm {ready.length === 1 ? "this change" : `these ${ready.length} changes`}</Text></Pressable> : null}
+              <Pressable style={styles.secondarySmall} onPress={() => setAssistant((current) => ({ ...current, status: "idle", actions: [], say: "", clarify: "" }))}><Text style={styles.secondaryButtonText}>{ready.length ? "Cancel" : "Close"}</Text></Pressable>
+            </View> : null}
+            {assistant.status === "done" ? <View>
+              <Text style={styles.rowDetail}>{assistant.done}</Text>
+              {assistant.undo ? <Pressable style={styles.secondarySmall} onPress={() => void undo()}><Text style={styles.secondaryButtonText}>Undo</Text></Pressable> : null}
+            </View> : null}
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  </>;
+}
+
 function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPaychecks }: { state: HouseholdState; user: User; privateData: PrivateData; onSave: (next: HouseholdState) => Promise<void>; onSavePlans: (plans: PrivateData["plans"]) => Promise<void>; onGoTab: (tab: Tab) => void; onOpenPaychecks: () => void }) {
   const currency = state.household.currency;
   const planned = state.budget.categories.flatMap((c) => c.lines).reduce((sum, line) => sum + Number(line.planned || 0), 0);
@@ -671,35 +741,6 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
     }
   }, [briefingKey]);
   useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
-  // Ask FamilyLoop: a request in plain words becomes a plan (the AI only plans); the plan is shown in words written from the household's own
-  // data and nothing changes until it is confirmed. A finished change can be undone while this screen stays open.
-  const assistantDeps = { groupStockHoldings, assetValue, setPayeeRule };
-  const [assistant, setAssistant] = useState<{ request: string; status: "idle" | "planning" | "ready" | "error" | "done"; say: string; clarify: string; error: string; actions: AssistantAction[]; done: string; undo: Record<string, unknown> | null }>({ request: "", status: "idle", say: "", clarify: "", error: "", actions: [], done: "", undo: null });
-  const askAssistant = async () => {
-    const request = assistant.request.trim();
-    if (!request || assistant.status === "planning") return;
-    setAssistant((current) => ({ ...current, status: "planning", error: "", say: "", clarify: "", actions: [], done: "", undo: null }));
-    try {
-      const plan = await api.assistantPlan(request, assistantContext(state, assistantDeps));
-      setAssistant((current) => ({ ...current, status: "ready", say: plan.say || "", clarify: plan.clarify || "", actions: plan.actions || [] }));
-    } catch (cause) {
-      setAssistant((current) => ({ ...current, status: "error", error: cause instanceof Error ? cause.message : "The assistant couldn't be reached." }));
-    }
-  };
-  const assistantRows = assistant.actions.map((action) => ({ action, problem: assistantActionProblem(action, state, today, assistantDeps) }));
-  const assistantReady = assistantRows.filter((row) => !row.problem);
-  const confirmAssistant = async () => {
-    const result = applyAssistantActions(state, assistant.actions, today, assistantDeps);
-    if (!result.applied.length) { setAssistant((current) => ({ ...current, status: "error", error: "Nothing could be changed - the data has moved on since I made the plan." })); return; }
-    const said = result.applied.map((action) => describeAssistantAction(action, state, currencyMoney, today, assistantDeps)).join(" ").slice(0, 400);
-    await onSave({ ...state, ...result.patch, household: { ...state.household, activity: [`Ask FamilyLoop: ${said}`, ...(state.household.activity || [])] } });
-    setAssistant((current) => ({ ...current, status: "done", actions: [], undo: result.undo as Record<string, unknown>, done: `Done - ${result.applied.length} change${result.applied.length === 1 ? "" : "s"} made.${result.skipped.length ? ` ${result.skipped.length} could not be done and was skipped.` : ""}` }));
-  };
-  const undoAssistant = async () => {
-    if (!assistant.undo) return;
-    await onSave({ ...state, ...assistant.undo, household: { ...state.household, activity: ["Ask FamilyLoop: undid the last change", ...(state.household.activity || [])] } } as HouseholdState);
-    setAssistant((current) => ({ ...current, status: "done", undo: null, done: "Undone - everything is back as it was." }));
-  };
   // What needs attention about the bank sync (a bank that needs signing in again, a run that did not finish, data that is days old).
   const [syncProblems, setSyncProblems] = useState<Array<{ title: string; detail: string }>>([]);
   useEffect(() => {
@@ -762,25 +803,6 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
       : briefing.status === "loading" ? <Text style={styles.muted}>Reading today's numbers...</Text>
       : briefing.status === "off" ? <Text style={styles.muted}>The AI summary isn't set up on this deployment - the numbers above are still live.</Text>
       : <Text style={styles.muted}>The summary couldn't be written just now{briefing.error ? ` (${briefing.error})` : ""}. Try Refresh.</Text>}
-    </Card>
-    <Card>
-      <Text style={styles.cardTitle}>Ask FamilyLoop</Text>
-      <Text style={styles.muted}>Tell me what changed, for example "my M1 account is closed and moved to Fidelity". I will show exactly what I would change and wait for your OK.</Text>
-      <TextInput style={styles.input} value={assistant.request} onChangeText={(request) => setAssistant((current) => ({ ...current, request }))} editable={assistant.status !== "planning"} placeholder="What changed?" maxLength={500} returnKeyType="send" onSubmitEditing={() => void askAssistant()} />
-      <Pressable style={styles.secondaryButton} disabled={assistant.status === "planning" || !assistant.request.trim()} onPress={() => void askAssistant()}>{assistant.status === "planning" ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Ask</Text>}</Pressable>
-      {assistant.status === "error" ? <Text style={styles.muted}>{assistant.error}</Text> : null}
-      {assistant.status === "ready" ? <View>
-        {assistant.say ? <Text style={styles.rowTitle}>{assistant.say}</Text> : null}
-        {assistant.clarify ? <Text style={styles.rowDetail}>{assistant.clarify}</Text> : null}
-        {assistantRows.map((row, index) => <Text key={index} style={styles.rowDetail}>{index + 1}. {row.problem ? `Skipped - ${row.problem}` : describeAssistantAction(row.action, state, currencyMoney, today, assistantDeps)}</Text>)}
-        {!assistantRows.length && !assistant.clarify ? <Text style={styles.muted}>I couldn't turn that into a change I'm able to make. I can close or rename an account, move one investment account's holdings into another, rename an investment account, or always file a payee under a Subcategory.</Text> : null}
-        {assistantReady.length ? <Pressable style={styles.primaryButton} onPress={() => void confirmAssistant()}><Text style={styles.primaryButtonText}>Confirm {assistantReady.length === 1 ? "this change" : `these ${assistantReady.length} changes`}</Text></Pressable> : null}
-        <Pressable style={styles.secondarySmall} onPress={() => setAssistant((current) => ({ ...current, status: "idle", actions: [], say: "", clarify: "" }))}><Text style={styles.secondaryButtonText}>{assistantReady.length ? "Cancel" : "Close"}</Text></Pressable>
-      </View> : null}
-      {assistant.status === "done" ? <View>
-        <Text style={styles.rowDetail}>{assistant.done}</Text>
-        {assistant.undo ? <Pressable style={styles.secondarySmall} onPress={() => void undoAssistant()}><Text style={styles.secondaryButtonText}>Undo</Text></Pressable> : null}
-      </View> : null}
     </Card>
     {syncProblems.length ? <Card>
       <Text style={[styles.cardTitle, { color: colors.coral }]}>The overnight sync needs a look</Text>
@@ -5021,6 +5043,10 @@ const styles = StyleSheet.create({
   choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, primarySmall: { flex: 1, minHeight: 44, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", borderRadius: 7, backgroundColor: colors.green }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
   documentsBreadcrumbRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", paddingVertical: 6 }, documentsBreadcrumbItem: { flexDirection: "row", alignItems: "center" }, documentsBreadcrumbText: { color: colors.muted, fontWeight: "700" }, documentsBreadcrumbActive: { color: colors.text },
+  assistantFab: { position: "absolute", right: 16, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.green, borderRadius: 24, paddingVertical: 10, paddingHorizontal: 16, elevation: 4, shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } },
+  assistantFabText: { color: "#fff", fontWeight: "700" },
+  assistantBackdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.35)" },
+  assistantSheet: { maxHeight: "85%", backgroundColor: colors.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16, gap: 8 },
   tabBar: { minHeight: 64, paddingTop: 7, flexDirection: "row", backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border }, tab: { flex: 1, alignItems: "center", gap: 3 }, tabText: { color: colors.muted, fontSize: 10, fontWeight: "700" }, tabTextActive: { color: colors.green },
   authPage: { flex: 1, backgroundColor: colors.navy }, authInner: { flex: 1, paddingHorizontal: 24, justifyContent: "center" }, logo: { width: 52, height: 52, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#43d6a5" }, logoText: { color: colors.navy, fontSize: 28, fontWeight: "900" }, authTitle: { color: "white", fontSize: 34, lineHeight: 40, fontWeight: "800", marginTop: 22, maxWidth: 340 }, authCopy: { color: "#c2cce0", lineHeight: 22, marginTop: 10, marginBottom: 25 }, authCard: { backgroundColor: "white", borderRadius: 8, padding: 18, gap: 9 }, label: { color: colors.text, fontWeight: "700", marginTop: 3 }, input: { height: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 7, paddingHorizontal: 13, fontSize: 16, color: colors.text, backgroundColor: "#f8fafc" }, formError: { color: colors.coral, marginVertical: 3 }, primaryButton: { height: 52, alignItems: "center", justifyContent: "center", backgroundColor: colors.green, borderRadius: 7, marginTop: 6 }, primaryButtonText: { color: "white", fontSize: 16, fontWeight: "800" }, secondaryButton: { height: 48, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.border }, secondaryButtonText: { color: colors.text, fontWeight: "800" },
   subScreenHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 4 }, subScreenBack: { minHeight: 44, minWidth: 44, alignItems: "center", justifyContent: "center" },
