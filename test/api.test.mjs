@@ -635,7 +635,7 @@ test("the app acknowledges a linked sync only after saving it, and shows a banne
 test("the linked-accounts card can import history from a date through an explicit confirmation and the save-limit guard", () => {
   const app = fs.readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
   const card = extractFunctionSource(app, "LinkedAccountsCard");
-  assert.match(card, /api\.syncLinkedAccount\(link\.id, sinceDate \|\| undefined\)/);
+  assert.match(card, /api\.syncLinkedAccount\(link\.id, sinceDate \|\| undefined, accountIds\)/);
   assert.match(card, /knownLinkedIds\(current, !sinceDate\)/);
   assert.match(card, /historyImportFits\(/);
   assert.match(card, /\{ text: "Cancel" \}, \{ text: "Import"/);
