@@ -35,7 +35,7 @@ import {
 import type { ReportScope } from "./src/reportsLogic";
 import type { Account, AccountType, ActualLog, Recipe, BudgetLine, CalendarEvent, CalendarImportDraft, ChoreRecurrence, Debt, Decision, NoteUserShare, SharedNote, Document, DocumentsData, Friend, Household, HouseholdAccess, HouseholdState, Iou, IouDirection, JournalEntry, Note, Paycheck, PaycheckRecurrence, PlanBucket, PlanRecurrence, PlanTask, PlannedMeal, PrivateData, ReminderPhotoDraft, ReminderRecurrence, SinkingFund, User, WealthAsset, WealthItemType, WealthLiability } from "./src/types";
 import type { HomeActionItem } from "./src/calendarLogic";
-import { assistantContext, assistantActionProblem, describeAssistantAction, applyAssistantActions } from "./src/assistantLogic";
+import { assistantContext, assistantFacts, assistantActionProblem, describeAssistantAction, applyAssistantActions } from "./src/assistantLogic";
 import type { AssistantAction } from "./src/assistantLogic";
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, directionsUrl, matchesOwnerFilter, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
@@ -623,14 +623,14 @@ function AssistantSheet({ state, onSave, bottomOffset }: { state: HouseholdState
   const today = localDateKey();
   const currencyMoney = (amount: number) => money(amount, state.household.currency);
   const assistantDeps = { groupStockHoldings, assetValue, setPayeeRule };
-  const [assistant, setAssistant] = useState<{ request: string; status: "idle" | "planning" | "ready" | "error" | "done"; say: string; clarify: string; error: string; actions: AssistantAction[]; done: string; undo: Record<string, unknown> | null }>({ request: "", status: "idle", say: "", clarify: "", error: "", actions: [], done: "", undo: null });
+  const [assistant, setAssistant] = useState<{ request: string; status: "idle" | "planning" | "ready" | "error" | "done"; say: string; answer: string; clarify: string; error: string; actions: AssistantAction[]; done: string; undo: Record<string, unknown> | null }>({ request: "", status: "idle", say: "", answer: "", clarify: "", error: "", actions: [], done: "", undo: null });
   const askAssistant = async () => {
     const request = assistant.request.trim();
     if (!request || assistant.status === "planning") return;
-    setAssistant((current) => ({ ...current, status: "planning", error: "", say: "", clarify: "", actions: [], done: "", undo: null }));
+    setAssistant((current) => ({ ...current, status: "planning", error: "", say: "", answer: "", clarify: "", actions: [], done: "", undo: null }));
     try {
-      const plan = await api.assistantPlan(request, assistantContext(state, assistantDeps));
-      setAssistant((current) => ({ ...current, status: "ready", say: plan.say || "", clarify: plan.clarify || "", actions: plan.actions || [] }));
+      const plan = await api.assistantPlan(request, assistantContext(state, assistantDeps), assistantFacts(state, today, currencyMoney, { accountsWithBalances, assetValue, groupStockHoldings, isHoldingAssetClass, spentByLineInMonth }));
+      setAssistant((current) => ({ ...current, status: "ready", say: plan.say || "", answer: plan.answer || "", clarify: plan.clarify || "", actions: plan.actions || [] }));
     } catch (cause) {
       setAssistant((current) => ({ ...current, status: "error", error: cause instanceof Error ? cause.message : "The assistant couldn't be reached." }));
     }
@@ -661,17 +661,18 @@ function AssistantSheet({ state, onSave, bottomOffset }: { state: HouseholdState
             <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setOpen(false)}><Ionicons name="close" size={24} color={colors.muted} /></Pressable>
           </View>
           <ScrollView keyboardShouldPersistTaps="handled">
-            <Text style={styles.muted}>Tell me what changed, for example "my M1 account is closed and moved to Fidelity". I will show exactly what I would change and wait for your OK.</Text>
-            <TextInput style={styles.input} value={assistant.request} onChangeText={(request) => setAssistant((current) => ({ ...current, request }))} editable={assistant.status !== "planning"} placeholder="What changed?" maxLength={500} returnKeyType="send" onSubmitEditing={() => void askAssistant()} />
+            <Text style={styles.muted}>Ask a question - "summarize my wealth", "where am I over budget this month?" - or tell me what changed: "my M1 account is closed and moved to Fidelity". Answers come only from your own numbers; changes are shown first and wait for your OK.</Text>
+            <TextInput style={styles.input} value={assistant.request} onChangeText={(request) => setAssistant((current) => ({ ...current, request }))} editable={assistant.status !== "planning"} placeholder="Ask a question or say what changed" maxLength={500} returnKeyType="send" onSubmitEditing={() => void askAssistant()} />
             <Pressable style={styles.secondaryButton} disabled={assistant.status === "planning" || !assistant.request.trim()} onPress={() => void askAssistant()}>{assistant.status === "planning" ? <ActivityIndicator /> : <Text style={styles.secondaryButtonText}>Ask</Text>}</Pressable>
             {assistant.status === "error" ? <Text style={styles.muted}>{assistant.error}</Text> : null}
             {assistant.status === "ready" ? <View>
               {assistant.say ? <Text style={styles.rowTitle}>{assistant.say}</Text> : null}
+              {assistant.answer ? <Text style={styles.rowDetail} selectable>{assistant.answer}</Text> : null}
               {assistant.clarify ? <Text style={styles.rowDetail}>{assistant.clarify}</Text> : null}
               {rows.map((row, index) => <Text key={index} style={styles.rowDetail}>{index + 1}. {row.problem ? `Skipped - ${row.problem}` : describeAssistantAction(row.action, state, currencyMoney, today, assistantDeps)}</Text>)}
-              {!rows.length && !assistant.clarify ? <Text style={styles.muted}>I couldn't turn that into a change I'm able to make. I can close or rename an account, move one investment account's holdings into another, rename an investment account, or always file a payee under a Subcategory.</Text> : null}
+              {!rows.length && !assistant.clarify && !assistant.answer ? <Text style={styles.muted}>I couldn't turn that into a change I'm able to make. I can close or rename an account, move one investment account's holdings into another, rename an investment account, or always file a payee under a Subcategory.</Text> : null}
               {ready.length ? <Pressable style={styles.primaryButton} onPress={() => void confirm()}><Text style={styles.primaryButtonText}>Confirm {ready.length === 1 ? "this change" : `these ${ready.length} changes`}</Text></Pressable> : null}
-              <Pressable style={styles.secondarySmall} onPress={() => setAssistant((current) => ({ ...current, status: "idle", actions: [], say: "", clarify: "" }))}><Text style={styles.secondaryButtonText}>{ready.length ? "Cancel" : "Close"}</Text></Pressable>
+              <Pressable style={styles.secondarySmall} onPress={() => setAssistant((current) => ({ ...current, status: "idle", actions: [], say: "", answer: "", clarify: "" }))}><Text style={styles.secondaryButtonText}>{ready.length ? "Cancel" : "Clear"}</Text></Pressable>
             </View> : null}
             {assistant.status === "done" ? <View>
               <Text style={styles.rowDetail}>{assistant.done}</Text>

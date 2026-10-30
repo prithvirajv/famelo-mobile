@@ -4,7 +4,7 @@
 // delete anything, touch ledger transactions, or run an action outside ASSISTANT_ACTIONS.
 // Logic files do not import each other's values, so the few helpers that live elsewhere (holdings grouping, asset value, setting a payee rule)
 // are passed in as `deps`.
-import type { HouseholdState, WealthAsset } from "./types";
+import type { Account, HouseholdState, Transaction, WealthAsset } from "./types";
 
 export type AssistantAction =
   | { type: "close_account"; accountId: string; closedAt?: string }
@@ -13,7 +13,7 @@ export type AssistantAction =
   | { type: "rename_holdings_group"; groupId: string; name: string }
   | { type: "set_payee_category"; payee: string; lineId: string };
 
-export type AssistantPlan = { say: string; clarify: string; actions: AssistantAction[] };
+export type AssistantPlan = { say: string; answer?: string; clarify: string; actions: AssistantAction[] };
 type Group = { groupId: string; groupName: string; items: WealthAsset[] };
 export type AssistantDeps = {
   groupStockHoldings: (assets: WealthAsset[]) => Group[];
@@ -31,6 +31,72 @@ export function assistantContext(state: HouseholdState, deps: Pick<AssistantDeps
     groups: deps.groupStockHoldings(assetsOf(state)).map((group) => ({ groupId: group.groupId, name: group.groupName, holdings: group.items.length })),
     lines: linesOf(state).map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` }))
   };
+}
+
+export type AssistantFactsDeps = {
+  accountsWithBalances: (state: HouseholdState, referenceDateKey: string) => Array<Account & { balance: number }>;
+  assetValue: (asset: WealthAsset) => number;
+  groupStockHoldings: (assets: WealthAsset[]) => Group[];
+  isHoldingAssetClass: (assetClass?: string) => boolean;
+  spentByLineInMonth: (transactions: Transaction[], lineId: string, monthKey: string) => number;
+};
+
+// The numbers the assistant may answer questions from ("summarize my wealth", "where am I over budget"): a compact plain-text read of the
+// household's own tables - net worth, assets by type, investment accounts, other assets, liabilities, debts, account balances and this month's
+// budget (mirrors web's assistantFacts). The AI is told to answer from this text only, so it cannot quote a number that is not here.
+export function assistantFacts(state: HouseholdState, todayKey: string, money: (value: number) => string, deps: AssistantFactsDeps): string {
+  const fmt = (value: unknown) => money(Number(value) || 0);
+  const accounts = deps.accountsWithBalances(state, todayKey);
+  const assets = assetsOf(state);
+  const liabilities = state.goals?.netWorth?.liabilities || [];
+  const debts = state.goals?.debts || [];
+  const linkedBalance = (field: "netWorthAssetId" | "netWorthLiabilityId", id: string | undefined) => { const account = accounts.find((item) => item[field] === id && id); return account ? account.balance : null; };
+  const valueOf = (asset: WealthAsset) => { const linked = linkedBalance("netWorthAssetId", asset.id); return linked === null ? deps.assetValue(asset) : linked; };
+  const liabilityOf = (liability: { id?: string; value?: number }) => { const linked = linkedBalance("netWorthLiabilityId", liability.id); return linked === null ? Number(liability.value || 0) : linked; };
+  const lines: string[] = [`Today is ${todayKey}. Money is in ${state.household?.currency || "USD"}.`];
+  const assetTotal = assets.reduce((sum, asset) => sum + valueOf(asset), 0);
+  const liabilityTotal = liabilities.reduce((sum, liability) => sum + liabilityOf(liability), 0);
+  lines.push(`NET WORTH: ${fmt(assetTotal - liabilityTotal)} (assets ${fmt(assetTotal)} minus liabilities ${fmt(liabilityTotal)})`);
+  const byClass = new Map<string, number>();
+  assets.forEach((asset) => byClass.set(asset.assetClass || "other", (byClass.get(asset.assetClass || "other") || 0) + valueOf(asset)));
+  if (byClass.size) lines.push(`ASSETS BY TYPE: ${[...byClass.entries()].sort((a, b) => b[1] - a[1]).map(([name, total]) => `${name} ${fmt(total)}`).join("; ")}`);
+  const groups = deps.groupStockHoldings(assets);
+  if (groups.length) {
+    lines.push("INVESTMENT ACCOUNTS (holdings groups):");
+    groups.slice(0, 20).forEach((group) => lines.push(`- ${group.groupName}: ${group.items.length} holding${group.items.length === 1 ? "" : "s"}, ${fmt(group.items.reduce((sum, item) => sum + deps.assetValue(item), 0))} (${group.items.slice(0, 6).map((item) => `${item.symbol || item.name} ${fmt(deps.assetValue(item))}`).join(", ")}${group.items.length > 6 ? ", ..." : ""})`));
+  }
+  const others = assets.filter((asset) => !deps.isHoldingAssetClass(asset.assetClass));
+  if (others.length) {
+    lines.push("OTHER ASSETS:");
+    others.slice(0, 25).forEach((asset) => lines.push(`- ${asset.name} (${asset.assetClass || "other"}): ${fmt(valueOf(asset))}`));
+  }
+  if (liabilities.length) {
+    lines.push("LIABILITIES:");
+    liabilities.slice(0, 20).forEach((liability) => lines.push(`- ${liability.name}: ${fmt(liabilityOf(liability))}`));
+  }
+  if (debts.length) {
+    lines.push("DEBT PLANS:");
+    debts.slice(0, 10).forEach((debt) => lines.push(`- ${debt.name}: balance ${fmt(debt.balance)}${debt.rate ? `, ${debt.rate}% interest` : ""}${debt.minimum ? `, minimum ${fmt(debt.minimum)}/month` : ""}`));
+  }
+  if (accounts.length) {
+    lines.push("ACCOUNTS (balances now; a credit card shows what is owed):");
+    accounts.slice(0, 30).forEach((account) => lines.push(`- ${account.name} (${account.type})${account.closedAt ? " [closed]" : ""}: ${fmt(account.balance)}`));
+  }
+  const month = state.budget?.month || todayKey.slice(0, 7);
+  const categories = state.budget?.categories || [];
+  const spentIn = (lineId: string) => deps.spentByLineInMonth(state.transactions, lineId, month);
+  const plannedTotal = categories.reduce((sum, category) => sum + (category.lines || []).reduce((inner, line) => inner + Number(line.planned || 0), 0), 0);
+  const spentTotal = categories.reduce((sum, category) => sum + (category.lines || []).reduce((inner, line) => inner + spentIn(line.id), 0), 0);
+  lines.push(`BUDGET ${month}: income ${fmt(state.budget?.income)}, planned ${fmt(plannedTotal)}, spent ${fmt(spentTotal)}`);
+  categories.slice(0, 25).forEach((category) => {
+    const planned = (category.lines || []).reduce((sum, line) => sum + Number(line.planned || 0), 0);
+    const spent = (category.lines || []).reduce((sum, line) => sum + spentIn(line.id), 0);
+    if (planned || spent) lines.push(`- ${category.name}: planned ${fmt(planned)}, spent ${fmt(spent)}${spent > planned && planned ? " (OVER)" : ""}`);
+  });
+  const waiting = (state.transactionInboxDrafts || []).length;
+  const uncategorized = (state.transactions || []).filter((row) => !row.lineId && !(row.splits || []).length).length;
+  lines.push(`WAITING: ${waiting} bank row${waiting === 1 ? "" : "s"} in Bank stream; ${uncategorized} ledger transaction${uncategorized === 1 ? "" : "s"} without a category.`);
+  return lines.join("\n").slice(0, 9000);
 }
 
 // Why an action cannot run against the household's current data ("" when it can).

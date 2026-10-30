@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assistantContext, assistantActionProblem, describeAssistantAction, applyAssistantActions } from "../src/assistantLogic.ts";
-import { groupStockHoldings, assetValue } from "../src/wealthLogic.ts";
+import { assistantContext, assistantFacts, assistantActionProblem, describeAssistantAction, applyAssistantActions } from "../src/assistantLogic.ts";
+import { groupStockHoldings, assetValue, accountsWithBalances, isHoldingAssetClass } from "../src/wealthLogic.ts";
+import { spentByLineInMonth } from "../src/reportsLogic.ts";
 import { setPayeeRule, categorizationRuleForPayee } from "../src/bankStreamLogic.ts";
 
 const deps = { groupStockHoldings, assetValue, setPayeeRule };
@@ -60,4 +61,20 @@ test("confirmed actions change only what they name, never mutate the input, and 
   assert.deepEqual(restored.goals, state.goals);
   assert.deepEqual(restored.accounts, state.accounts);
   assert.equal(restored.transactionCategorizationRules, undefined);
+});
+
+test("the facts the assistant answers questions from read the household's own tables: net worth, holdings groups, liabilities, accounts and the budget", () => {
+  const state = household();
+  state.goals.netWorth.liabilities = [{ id: "loan", name: "Sample Loan", value: 1000 }];
+  state.goals.debts = [{ name: "Sample Loan", balance: 1000, rate: 5, minimum: 50 }];
+  state.transactions = [{ accountId: "chk", date: "2026-10-05", payee: "X", amount: 40, lineId: "groceries" }, { accountId: "chk", date: "2026-10-06", payee: "Y", amount: 10, lineId: "" }];
+  state.transactionInboxDrafts = [{ id: "d" }];
+  const text = assistantFacts(state, TODAY, money, { accountsWithBalances, assetValue, groupStockHoldings, isHoldingAssetClass, spentByLineInMonth });
+  assert.match(text, /NET WORTH: \$2000\.00 \(assets \$3000\.00 minus liabilities \$1000\.00\)/);
+  assert.match(text, /Sample M1: 2 holdings, \$2300\.00/);
+  assert.match(text, /Sample Fidelity: 1 holding, \$200\.00/);
+  assert.match(text, /Sample Loan: \$1000\.00/);
+  assert.match(text, /BUDGET 2026-10: income \$0\.00, planned \$400\.00, spent \$40\.00/);
+  assert.match(text, /WAITING: 1 bank row in Bank stream; 1 ledger transaction without a category\./);
+  assert.ok(text.length < 9000);
 });
