@@ -78,16 +78,24 @@ export function homeBriefingFacts(state: HouseholdState, input: HomeBriefingInpu
   const lines = state.budget.categories.flatMap((category) => category.lines.map((line) => ({ ...line, category: category.name })));
   const lineById = new Map(lines.map((line) => [line.id, line]));
   const monthSpend = new Map<string, number>();
-  let spent = 0;
+  // "Spent" means spending against the budget: what went out on budget lines (a refund nets against its line) plus expenses with no category yet.
+  // Money-in rows with no line (a card payment received, a deposit) are not spending and never reduce it - adding up every amount in the month
+  // understates spending by whatever came in (mirrors web's monthSpendingSummary).
+  let onLines = 0;
+  let uncategorizedOut = 0;
   for (const transaction of state.transactions) {
     if (String(transaction.date || "").slice(0, 7) !== monthKey) continue;
-    spent += Number(transaction.amount || 0);
     const parts = transaction.splits?.length ? transaction.splits : [{ lineId: transaction.lineId, amount: transaction.amount }];
     for (const part of parts) {
+      const amount = Number(part.amount || 0);
+      const known = lineById.has(part.lineId);
+      if (known) onLines += amount; else if (amount > 0) uncategorizedOut += amount;
+      if (!known && amount <= 0) continue;
       const category = lineById.get(part.lineId)?.category || "Uncategorized";
-      monthSpend.set(category, (monthSpend.get(category) || 0) + Number(part.amount || 0));
+      monthSpend.set(category, (monthSpend.get(category) || 0) + amount);
     }
   }
+  const spent = onLines + uncategorizedOut;
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
   const topCategories = [...monthSpend.entries()].filter(([, amount]) => amount > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const overBudget = lines.filter((line) => Number(line.planned || 0) > 0)
@@ -99,7 +107,7 @@ export function homeBriefingFacts(state: HouseholdState, input: HomeBriefingInpu
   const monthName = today.toLocaleDateString("en-US", { month: "long", year: "numeric" });
   const text = [
     `Today is ${today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}.`,
-    `Budget this month (${monthName}): ${fmt(spent)} spent of ${fmt(planned)} planned; day ${today.getDate()} of ${daysInMonth}.`,
+    `Budget this month (${monthName}): ${fmt(spent)} spent of ${fmt(planned)} planned (${fmt(onLines)} on budget lines + ${fmt(uncategorizedOut)} of expenses with no category yet); day ${today.getDate()} of ${daysInMonth}.`,
     topCategories.length ? `Biggest categories this month: ${topCategories.map(([name, amount]) => `${name} ${fmt(amount)}`).join(", ")}.` : "",
     overBudget.length ? `Over budget: ${overBudget.map((line) => `${line.name} by ${fmt(line.over)}`).join(", ")}.` : "No budget line is over its plan.",
     input.balances.length ? `Accounts: ${input.balances.slice(0, 8).map((account) => `${account.name}${account.type ? ` (${account.type})` : ""} ${fmt(account.balance)}`).join("; ")}.` : "",

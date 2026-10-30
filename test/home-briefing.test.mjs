@@ -25,7 +25,7 @@ const input = (overrides = {}) => ({
 test("home briefing facts state this month's spending, overages and what is waiting, from the household's own numbers", () => {
   const { text, chips } = homeBriefingFacts(state, input());
   assert.match(text, /Today is Monday, October 26, 2026\./);
-  assert.match(text, /\$165 spent of \$1150 planned; day 26 of 31/, "only this month's transactions count");
+  assert.match(text, /\$165 spent of \$1150 planned \(\$150 on budget lines \+ \$15 of expenses with no category yet\); day 26 of 31/, "only this month's transactions count");
   assert.match(text, /Biggest categories this month: Food \$150, Uncategorized \$15\./);
   assert.match(text, /Over budget: Groceries by \$30\./);
   assert.match(text, /2 imported transactions are waiting for review in Bank stream\./);
@@ -50,4 +50,16 @@ test("home briefing facts list what needs attention, what is coming up and accou
   assert.ok(chips.includes("1 needs attention"));
   const long = homeBriefingFacts(state, input({ funding: Array.from({ length: 5 }, () => ({ title: "x".repeat(2000), detail: "d", amount: 1 })) }));
   assert.ok(long.text.length <= 5800);
+});
+
+test("money coming in (a card payment received, a deposit) is not subtracted from what was spent", () => {
+  const withCredits = { ...state, transactions: [...state.transactions,
+    { date: "2026-10-06", payee: "ONLINE PAYMENT THANK YOU", amount: -4000, lineId: "" },
+    { date: "2026-10-07", payee: "DEPOSIT", amount: -300, lineId: "" },
+    { date: "2026-10-08", payee: "REFUND", amount: -10, lineId: "groceries" }
+  ] };
+  const { text, chips } = homeBriefingFacts(withCredits, input({ spentOfLine: (lineId, monthKey) => withCredits.transactions.filter((t) => t.lineId === lineId && t.date.startsWith(monthKey)).reduce((sum, t) => sum + t.amount, 0) }));
+  assert.match(text, /\$155 spent of \$1150 planned \(\$140 on budget lines \+ \$15 of expenses with no category yet\)/, "a refund on a line nets against it; the payment and the deposit do not count at all");
+  assert.equal(chips[0], "$155 of $1150 spent");
+  assert.doesNotMatch(text, /Uncategorized -/);
 });
