@@ -3978,24 +3978,32 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
   useEffect(() => { void reload(); }, [reload]);
 
   const [historyFrom, setHistoryFrom] = useState(`${new Date().getFullYear()}-01-01`);
-  // Which kinds of account Sync now and Import history work on (all checking accounts, all credit cards, ...), not single accounts: link id -> kind
-  // keys. None ticked, or every kind ticked, means every account.
+  // Which accounts Sync now and Import history work on: a whole kind (all checking accounts, all credit cards, ...) or any individual accounts
+  // under it. link id -> ticked remote account ids; none ticked, or every one ticked, means every account. SimpleFIN counts requests, not
+  // accounts, so ticking a whole group costs the same as ticking one.
   const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const [showIndividual, setShowIndividual] = useState<Record<string, boolean>>({});
   const ACCOUNT_KINDS: Array<[string, string]> = [["checking", "Checking accounts"], ["savings", "Savings accounts"], ["credit_card", "Credit cards"], ["cash", "Cash accounts"], ["other", "Other accounts"]];
   const pickableKinds = (link: LinkedLink) => {
-    const byKind = new Map<string, string[]>();
+    const byKind = new Map<string, Array<{ remoteId: string; name: string }>>();
     Object.entries(link.mappings || {}).forEach(([remoteId, mapping]) => {
       if (!mapping?.accountId) return;
-      const type = (stateRef.current.accounts || []).find((account) => account.id === mapping.accountId)?.type || "other";
+      const account = (stateRef.current.accounts || []).find((item) => item.id === mapping.accountId);
+      const type = account?.type || "other";
       const kind = ACCOUNT_KINDS.some(([key]) => key === type) ? type : "other";
-      byKind.set(kind, [...(byKind.get(kind) || []), remoteId]);
+      byKind.set(kind, [...(byKind.get(kind) || []), { remoteId, name: account?.name || "Account" }]);
     });
-    return ACCOUNT_KINDS.filter(([key]) => byKind.has(key)).map(([key, label]) => ({ key, label, remoteIds: byKind.get(key) || [] }));
+    return ACCOUNT_KINDS.filter(([key]) => byKind.has(key)).map(([key, label]) => { const accounts = (byKind.get(key) || []).sort((a, b) => a.name.localeCompare(b.name)); return { key, label, accounts, remoteIds: accounts.map((entry) => entry.remoteId) }; });
   };
-  const pickedKinds = (link: LinkedLink) => pickableKinds(link).filter((kind) => (picked[link.id] || []).includes(kind.key));
-  const pickedIds = (link: LinkedLink) => { const kinds = pickableKinds(link); const chosen = pickedKinds(link); return !chosen.length || chosen.length === kinds.length ? [] : chosen.flatMap((kind) => kind.remoteIds); };
-  const pickedLabel = (link: LinkedLink) => { const chosen = pickedKinds(link); return !pickedIds(link).length ? "every account on this connection" : `only ${chosen.map((kind) => kind.label.toLowerCase()).join(" and ")}`; };
-  const toggleKind = (link: LinkedLink, key: string) => setPicked((current) => { const set = new Set(current[link.id] || []); if (set.has(key)) set.delete(key); else set.add(key); return { ...current, [link.id]: [...set] }; });
+  const pickedIds = (link: LinkedLink) => { const all = pickableKinds(link).flatMap((kind) => kind.remoteIds); const chosen = (picked[link.id] || []).filter((id) => all.includes(id)); return !chosen.length || chosen.length === all.length ? [] : chosen; };
+  const pickedLabel = (link: LinkedLink) => {
+    const chosen = pickedIds(link);
+    if (!chosen.length) return "every account on this connection";
+    const whole = pickableKinds(link).filter((kind) => kind.remoteIds.every((id) => chosen.includes(id)));
+    return whole.length && whole.flatMap((kind) => kind.remoteIds).length === chosen.length ? `only ${whole.map((kind) => kind.label.toLowerCase()).join(" and ")}` : `only the ${chosen.length} account${chosen.length === 1 ? "" : "s"} you picked`;
+  };
+  const toggleAccount = (link: LinkedLink, remoteId: string) => setPicked((current) => { const set = new Set(pickedIds(link)); if (set.has(remoteId)) set.delete(remoteId); else set.add(remoteId); return { ...current, [link.id]: [...set] }; });
+  const toggleKind = (link: LinkedLink, remoteIds: string[]) => setPicked((current) => { const set = new Set(pickedIds(link)); const whole = remoteIds.every((id) => set.has(id)); remoteIds.forEach((id) => { if (whole) set.delete(id); else set.add(id); }); return { ...current, [link.id]: [...set] }; });
   const sync = async (link: LinkedLink, quiet = false, sinceDate = "", accountIds: string[] = []) => {
     if (busyId) return;
     setBusyId(link.id);
@@ -4223,12 +4231,17 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         <Pressable accessibilityLabel={`Unlink ${link.label}`} hitSlop={8} onPress={() => confirmRemove(link)}><Ionicons name="close" size={20} color={colors.coral} /></Pressable>
       </View>
       {link.provider === "simplefin" && Object.keys(link.mappings || {}).length ? <View>
-        {pickableKinds(link).length > 1 ? <View>
+        {pickableKinds(link).flatMap((kind) => kind.remoteIds).length > 1 ? <View>
           <Text style={styles.label}>Accounts (Sync now and Import history use this)</Text>
           <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
             <Pressable style={[styles.choice, !pickedIds(link).length && styles.choiceActive]} onPress={() => setPicked((current) => ({ ...current, [link.id]: [] }))}><Text style={[styles.choiceText, !pickedIds(link).length && styles.choiceTextActive]}>All accounts</Text></Pressable>
-            {pickableKinds(link).map((kind) => { const on = Boolean(pickedIds(link).length) && pickedKinds(link).some((item) => item.key === kind.key); return <Pressable key={kind.key} style={[styles.choice, on && styles.choiceActive]} onPress={() => toggleKind(link, kind.key)}><Text style={[styles.choiceText, on && styles.choiceTextActive]}>{kind.label} ({kind.remoteIds.length})</Text></Pressable>; })}
+            {pickableKinds(link).map((kind) => { const on = Boolean(pickedIds(link).length) && kind.remoteIds.every((id) => pickedIds(link).includes(id)); return <Pressable key={kind.key} style={[styles.choice, on && styles.choiceActive]} onPress={() => toggleKind(link, kind.remoteIds)}><Text style={[styles.choiceText, on && styles.choiceTextActive]}>{kind.label} ({kind.remoteIds.length})</Text></Pressable>; })}
+            <Pressable style={[styles.choice, showIndividual[link.id] && styles.choiceActive]} onPress={() => setShowIndividual((current) => ({ ...current, [link.id]: !current[link.id] }))}><Text style={[styles.choiceText, showIndividual[link.id] && styles.choiceTextActive]}>Pick individual accounts</Text></Pressable>
           </ScrollView>
+          {showIndividual[link.id] ? pickableKinds(link).map((kind) => <View key={kind.key}>
+            <Text style={styles.rowDetail}>{kind.label}</Text>
+            <View style={[styles.choiceRow, { flexWrap: "wrap" }]}>{kind.accounts.map((entry) => { const on = pickedIds(link).includes(entry.remoteId); return <Pressable key={entry.remoteId} style={[styles.choice, on && styles.choiceActive]} onPress={() => toggleAccount(link, entry.remoteId)}><Text style={[styles.choiceText, on && styles.choiceTextActive]}>{entry.name}</Text></Pressable>; })}</View>
+          </View>) : null}
         </View> : null}
         <Text style={styles.label}>Import older transactions from</Text>
         <View style={styles.actionRow}>
