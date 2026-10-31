@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -3136,6 +3136,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
 
   const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []);
   const bulkSkips = planBulkDuplicateSkips(state.transactionInboxDrafts || [], state.transactions);
+  const bulkLedgerPairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || []);
   const accountLabel = (id?: string) => accounts.find((account) => account.id === id)?.name || "Unknown account";
   const confirmBulkTransfers = () => {
     if (!bulkPairs.length) return;
@@ -3144,6 +3145,15 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     const more = bulkPairs.length > 6 ? `\n…and ${bulkPairs.length - 6} more` : "";
     Alert.alert(`Move ${bulkPairs.length} pair${bulkPairs.length === 1 ? "" : "s"} to Transfers?`, `${exactMoney(total, currency)} in all. Each pair becomes one transfer from the account the money left to the account it landed in, and both waiting rows are cleared. Nothing in the Ledger is touched.\n\n${list}${more}`, [{ text: "Cancel" }, {
       text: `Move ${bulkPairs.length}`, onPress: () => { const result = applyBulkTransfers(stateRef.current, () => uniqueId("transfer")); void onSave(result.state); setFeedback(`Moved ${result.moved} pair${result.moved === 1 ? "" : "s"} to Transfers.`); }
+    }]);
+  };
+  const confirmBulkLedgerTransfers = () => {
+    if (!bulkLedgerPairs.length) return;
+    const total = bulkLedgerPairs.reduce((sum, pair) => sum + Math.abs(Number(pair.out.amount)), 0);
+    const list = bulkLedgerPairs.slice(0, 6).map((pair) => `${pair.out.date}  ${exactMoney(Math.abs(Number(pair.out.amount)), currency)}  ${accountLabel(pair.out.accountId)} → ${accountLabel(pair.in.accountId)}  (${pair.ledgerRow.payee})`).join("\n");
+    const more = bulkLedgerPairs.length > 6 ? `\n…and ${bulkLedgerPairs.length - 6} more` : "";
+    Alert.alert(`Move ${bulkLedgerPairs.length} to Transfers?`, `${exactMoney(total, currency)} in all. Each is one transfer from the account the money left to the account it landed in. The waiting row is cleared and the matching Ledger entry is removed, because the transfer replaces both.\n\n${list}${more}`, [{ text: "Cancel" }, {
+      text: `Move ${bulkLedgerPairs.length}`, onPress: () => { api.allowNextShrink(); const result = applyBulkLedgerTransfers(stateRef.current, () => uniqueId("transfer")); void onSave(result.state); setFeedback(`Moved ${result.moved} to Transfers.`); }
     }]);
   };
   const confirmBulkSkips = () => {
@@ -3293,10 +3303,12 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
         <Pressable style={styles.secondarySmall} onPress={() => void onSave(removeCategoryRule(state, entry.keys))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Remove</Text></Pressable>
       </View>)}
     </Card> : null}
-    {bulkPairs.length || bulkSkips.length ? <Card>
+    {bulkPairs.length || bulkLedgerPairs.length || bulkSkips.length ? <Card>
       <Text style={styles.cardTitle}>Settle waiting rows</Text>
       {bulkPairs.length ? <><Text style={styles.muted}>{bulkPairs.length} pair{bulkPairs.length === 1 ? "" : "s"} of waiting rows move money between your own accounts (every month).</Text>
         <Pressable style={styles.secondaryButton} onPress={confirmBulkTransfers}><Text style={styles.secondaryButtonText}>Move {bulkPairs.length} pair{bulkPairs.length === 1 ? "" : "s"} to Transfers…</Text></Pressable></> : null}
+      {bulkLedgerPairs.length ? <><Text style={styles.muted}>{bulkLedgerPairs.length} waiting row{bulkLedgerPairs.length === 1 ? " is" : "s are"} the other half of a transfer already in your Ledger (every month).</Text>
+        <Pressable style={styles.secondaryButton} onPress={confirmBulkLedgerTransfers}><Text style={styles.secondaryButtonText}>Move {bulkLedgerPairs.length} to Transfers…</Text></Pressable></> : null}
       {bulkSkips.length ? <><Text style={styles.muted}>{bulkSkips.length} waiting row{bulkSkips.length === 1 ? " is" : "s are"} already recorded (every month).</Text>
         <Pressable style={styles.secondaryButton} onPress={confirmBulkSkips}><Text style={styles.secondaryButtonText}>Skip {bulkSkips.length} duplicate{bulkSkips.length === 1 ? "" : "s"}…</Text></Pressable></> : null}
     </Card> : null}

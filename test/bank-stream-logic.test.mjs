@@ -5,7 +5,7 @@ import {
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
   acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
-  planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips,
+  planBulkTransfers, planBulkDuplicateSkips, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
   payeeLearnKey, setPayeeRule, planCategoryRelearn, learnFromLineChange, categoryRuleEntries, removeCategoryRule
 } from "../src/bankStreamLogic.ts";
 
@@ -597,4 +597,24 @@ test("picking a Subcategory by hand on a waiting row teaches the rule and the pa
   assert.equal(result.ok, true);
   assert.deepEqual(result.state.transactionInboxDrafts.map((d) => [d.id, d.lineId]), [["a", "groceries"], ["b", "groceries"], ["c", ""]]);
   assert.equal(categorizationRuleForPayee(result.state.transactionCategorizationRules, "SAMPLE MARKT*Z9"), "groceries");
+});
+
+test("a waiting row whose other half is already in the Ledger moves to Transfers and takes that Ledger entry out, only when unambiguous", () => {
+  const accounts = [{ id: "card", type: "credit_card" }, { id: "card2", type: "credit_card" }, { id: "chk", type: "checking" }];
+  const row = (extra = {}) => ({ date: "2026-09-26", payee: "ELECTRONIC WITHDRAWAL", amount: 100, lineId: "", accountId: "chk", ...extra });
+  const waiting = bulkDraft("a", "AUTO PAYMENT", -100, "2026-09-24", "card");
+  const keep = { date: "2026-09-01", payee: "KEEP", amount: 5, lineId: "", accountId: "chk" };
+  const pairs = planBulkLedgerTransfers([waiting], [row(), keep], accounts);
+  assert.deepEqual([pairs.length, pairs[0].out.accountId, pairs[0].in.accountId], [1, "chk", "card"]);
+  const state = { ...bulkState([waiting], [row(), keep]), accounts };
+  const result = applyBulkLedgerTransfers(state, () => "t1");
+  assert.equal(result.moved, 1);
+  assert.deepEqual(result.state.transactions, [keep], "only the matching Ledger entry goes");
+  assert.deepEqual(result.state.transactionInboxDrafts, []);
+  assert.deepEqual([result.state.transfers[0].fromAccountId, result.state.transfers[0].toAccountId, result.state.transfers[0].amount], ["chk", "card", 100]);
+  assert.equal(planBulkLedgerTransfers([waiting], [row(), row({ date: "2026-09-25" })], accounts).length, 0, "two possible Ledger partners");
+  assert.equal(planBulkLedgerTransfers([waiting, bulkDraft("b", "AUTO PAYMENT", -100, "2026-09-26", "card2")], [row()], accounts).length, 0, "two waiting rows for one entry");
+  assert.equal(planBulkLedgerTransfers([waiting], [row({ splits: [{ lineId: "x", amount: 100 }] })], accounts).length, 0, "split entry");
+  assert.equal(planBulkLedgerTransfers([waiting], [row({ payee: "ZELLE TO SAM" })], accounts).length, 0, "person-to-person");
+  assert.equal(planBulkLedgerTransfers([waiting], [row({ accountId: "card2" })], accounts).length, 0, "card to card");
 });

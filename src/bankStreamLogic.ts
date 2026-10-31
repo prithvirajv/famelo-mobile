@@ -677,6 +677,30 @@ export function planBulkTransfers(drafts: InboxDraft[], accounts: Array<{ id: st
   return pairs;
 }
 
+export type LedgerTransferPair = TransferPair & { ledgerRow: Transaction; draft: InboxDraft };
+
+// A waiting row whose other half is already in the Ledger (a payment entered by hand or accepted earlier, its match still in Bank
+// stream). Moving the pair to Transfers takes the Ledger entry out, so it is only offered with a list to confirm, and only when it is
+// unambiguous: the waiting row has exactly one possible Ledger partner and that entry exactly one possible waiting row. Rows already
+// paired by planBulkTransfers (pass the remaining drafts), split rows, the excluded payees and card-to-card pairs are left out.
+export function planBulkLedgerTransfers(drafts: InboxDraft[], ledger: Transaction[], accounts: Array<{ id: string; type?: string }> = []): LedgerTransferPair[] {
+  const typeOf = (id?: string) => accounts.find((account) => account.id === id)?.type;
+  const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0 && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(draft.payee || "")));
+  const rows = (ledger || []).filter((row) => row.accountId && Number(row.amount) !== 0 && !(row.splits && row.splits.length) && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(row.payee || "")));
+  const candidates = (draft: InboxDraft) => rows.filter((row) => row.accountId !== draft.accountId && Number(row.amount) === -Number(draft.amount)
+    && !(typeOf(draft.accountId) === "credit_card" && typeOf(row.accountId) === "credit_card")
+    && absoluteDaysBetweenDateKeys(row.date || "", draft.date || "") <= DUPLICATE_TOLERANCE_DAYS);
+  const pairs: LedgerTransferPair[] = [];
+  open.forEach((draft) => {
+    const options = candidates(draft);
+    const row = options[0];
+    if (!row || options.length !== 1 || open.filter((other) => candidates(other).includes(row)).length !== 1) return;
+    const asDraft = row as unknown as InboxDraft;
+    pairs.push(Number(draft.amount) > 0 ? { out: draft, in: asDraft, ledgerRow: row, draft } : { out: asDraft, in: draft, ledgerRow: row, draft });
+  });
+  return pairs;
+}
+
 function payeesShareAWord(a: unknown, b: unknown): boolean {
   const words = (value: unknown) => new Set(String(value || "").toLowerCase().split(/[^a-z]+/).filter((word) => word.length >= 4));
   const left = words(a);
@@ -715,6 +739,31 @@ export function applyBulkTransfers(state: HouseholdState, createId: () => string
     ...state, transfers: [...transfers.reverse(), ...(state.transfers || [])], transactionInboxDone: done,
     transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((draft) => !gone.has(draft.id)),
     household: withActivity(state, `Moved ${pairs.length} waiting bank row pair${pairs.length === 1 ? "" : "s"} to Transfers`)
+  } };
+}
+
+// The waiting rows left once the two-waiting-rows pairs are taken out, so one row is never offered in two bulk moves.
+export function draftsAfterPairs(state: HouseholdState): InboxDraft[] {
+  const used = new Set<string | undefined>(planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []).flatMap((pair) => [pair.out.id, pair.in.id]));
+  return (state.transactionInboxDrafts || []).filter((draft) => !used.has(draft.id));
+}
+
+export function applyBulkLedgerTransfers(state: HouseholdState, createId: () => string): { state: HouseholdState; moved: number } {
+  const pairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || []);
+  if (!pairs.length) return { state, moved: 0 };
+  const goneRows = new Set<Transaction>(pairs.map((pair) => pair.ledgerRow));
+  const goneDrafts = new Set<string | undefined>(pairs.map((pair) => pair.draft.id));
+  const transfers = pairs.map((pair) => ({
+    id: createId(), date: pair.out.date || "", fromAccountId: pair.out.accountId || "", toAccountId: pair.in.accountId || "",
+    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim()
+  }));
+  let done = state.transactionInboxDone || [];
+  goneDrafts.forEach((id) => { if (id && !done.includes(id)) done = [...done, id]; });
+  return { moved: pairs.length, state: {
+    ...state, transfers: [...transfers.reverse(), ...(state.transfers || [])], transactionInboxDone: done,
+    transactions: state.transactions.filter((row) => !goneRows.has(row)),
+    transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((draft) => !goneDrafts.has(draft.id)),
+    household: withActivity(state, `Moved ${pairs.length} transfer${pairs.length === 1 ? "" : "s"} half-waiting in Bank stream to Transfers`)
   } };
 }
 
