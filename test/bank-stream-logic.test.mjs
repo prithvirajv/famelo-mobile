@@ -5,7 +5,7 @@ import {
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
   acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
-  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, repeatsRecordedTransfer, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
+  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, rowsCoveredByTransfers, transferSourceIds, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
   payeeLearnKey, setPayeeRule, planCategoryRelearn, learnFromLineChange, categoryRuleEntries, removeCategoryRule
 } from "../src/bankStreamLogic.ts";
 
@@ -349,7 +349,8 @@ test("moveDraftToTransfer builds a transfer in the right direction and clears th
   const state = baseState({ transactions: [ledgerCounterpart], transactionInboxDrafts: [{ id: "pay", payee: "Card payment", amount: 300, date: "2026-07-05", lineId: "", accountId: "chk" }] });
   const out = moveDraftToTransfer(state, "pay", "card", "  Card payment ", () => "t1");
   assert.equal(out.ok, true);
-  assert.deepEqual(out.state.transfers[0], { id: "t1", date: "2026-07-05", fromAccountId: "chk", toAccountId: "card", amount: 300, memo: "Card payment" });
+  assert.deepEqual({ ...out.state.transfers[0], sourceIds: undefined }, { id: "t1", date: "2026-07-05", fromAccountId: "chk", toAccountId: "card", amount: 300, memo: "Card payment", sourceIds: undefined });
+  assert.equal(out.state.transfers[0].sourceIds.length >= 1, true, "the rows behind the transfer are remembered");
   assert.deepEqual(out.state.transactions, [], "the offsetting ledger entry is cleared");
   assert.deepEqual(out.state.transactionInboxDrafts, []);
   assert.deepEqual(out.state.transactionInboxDone, ["pay"]);
@@ -359,7 +360,7 @@ test("moveDraftToTransfer builds a transfer in the right direction and clears th
   assert.equal(other.state.transactions.length, 1, "a counterpart on a different account than the one chosen is left alone");
   const draftCounterpart = baseState({ transactionInboxDrafts: [{ id: "in", payee: "Cash advance", amount: 300, date: "2026-07-05", lineId: "", accountId: "card" }, { id: "money-in", payee: "Deposit", amount: -300, date: "2026-07-05", lineId: "", accountId: "chk" }] });
   const incoming = moveDraftToTransfer(draftCounterpart, "money-in", "card", "", () => "t3");
-  assert.deepEqual(incoming.state.transfers[0], { id: "t3", date: "2026-07-05", fromAccountId: "card", toAccountId: "chk", amount: 300, memo: "Deposit" });
+  assert.deepEqual({ ...incoming.state.transfers[0], sourceIds: undefined }, { id: "t3", date: "2026-07-05", fromAccountId: "card", toAccountId: "chk", amount: 300, memo: "Deposit", sourceIds: undefined });
   assert.deepEqual(incoming.state.transactionInboxDrafts, []);
   assert.deepEqual(incoming.state.transactionInboxDone.sort(), ["in", "money-in"]);
 });
@@ -620,38 +621,47 @@ test("a waiting row whose other half is already in the Ledger moves to Transfers
 });
 
 // ---- Never record the same payment twice -------------------------------------------------------------------------------
-test("an identical transfer is found, and cleanup keeps the first of each identical group", () => {
-  const t = (id, date, fromAccountId, toAccountId, amount) => ({ id, date, fromAccountId, toAccountId, amount, memo: "" });
-  const list = [t("t1", "2026-10-09", "a", "b", 100), t("t2", "2026-10-09", "a", "b", 100), t("t3", "2026-10-09", "b", "a", 100)];
+test("cleanup keeps the first of identical transfers, but two that each came from their own pair of bank rows are both kept", () => {
+  const t = (id, fromAccountId, toAccountId, amount, sourceIds) => ({ id, date: "2026-10-09", fromAccountId, toAccountId, amount, memo: "", sourceIds });
+  const list = [t("t1", "a", "b", 100), t("t2", "a", "b", 100), t("t3", "b", "a", 100)];
   assert.ok(findDuplicateTransfer(list, { date: "2026-10-09", fromAccountId: "a", toAccountId: "b", amount: 100 }));
   assert.equal(findDuplicateTransfer(list, { date: "2026-10-10", fromAccountId: "a", toAccountId: "b", amount: 100 }), null);
   assert.deepEqual(planDuplicateTransferRemoval(list), [list[1]]);
+  const real = [t("r1", "a", "b", 500, ["o1", "i1"]), t("r2", "a", "b", 500, ["o2", "i2"])];
+  assert.deepEqual(planDuplicateTransferRemoval(real), [], "two real $500 payments");
+  assert.deepEqual(planDuplicateTransferRemoval([...real, t("r3", "a", "b", 500, ["o1", "i1"])]).map((x) => x.id), ["r3"]);
 });
 
-test("bulk pairs already in Transfers are held back, and two identical pairs in one batch make one transfer", () => {
+test("bulk planning follows the rows: one out + one in is one transfer, two of each are two, and each carries its own source ids", () => {
   const d = (id, amount, accountId) => ({ id, payee: "SAMPLE PAYMENT", amount, date: "2026-10-09", accountId });
-  const drafts = [d("o1", 100, "a"), d("i1", -100, "b"), d("o2", 100, "a"), d("i2", -100, "b")];
+  const drafts = [d("o1", 500, "a"), d("i1", -500, "b"), d("o2", 500, "a"), d("i2", -500, "b")];
   assert.equal(planBulkTransfers(drafts, []).length, 2);
-  assert.equal(planBulkTransfers(drafts, [], []).length, 1);
-  assert.equal(planBulkTransfers(drafts, [], [{ date: "2026-10-09", fromAccountId: "a", toAccountId: "b", amount: 100 }]).length, 0);
+  assert.equal(planBulkTransfers(drafts.slice(0, 2), []).length, 1);
+  const moved = applyBulkTransfers({ transactions: [], transactionInboxDrafts: drafts, transactionInboxDone: [], transfers: [], accounts: [], household: { activity: [] } }, (() => { let n = 0; return () => `t${++n}`; })());
+  assert.equal(moved.moved, 2);
+  assert.equal(moved.state.transfers.length, 2);
+  assert.deepEqual(planDuplicateTransferRemoval(moved.state.transfers), [], "two real payments are not flagged");
+  assert.deepEqual(transferSourceIds({ id: "x", externalId: "bank-1" }, { id: "y" }, null), ["bank-1", "y"]);
 });
 
-test("a statement row that is half of a recorded transfer is left out of an import, with a note", () => {
+test("a statement import: each recorded transfer covers one row per side, so a second real payment still comes in, with a note", () => {
   const transfers = [{ date: "2026-10-09", fromAccountId: "chk", toAccountId: "card", amount: 100 }];
-  assert.equal(repeatsRecordedTransfer({ date: "2026-10-09", amount: 100 }, "chk", transfers), true);
-  assert.equal(repeatsRecordedTransfer({ date: "2026-10-09", amount: -100 }, "chk", transfers), false);
+  const rows = [{ date: "2026-10-09", payee: "SAMPLE PAYMENT", amount: 100 }, { date: "2026-10-09", payee: "SAMPLE PAYMENT AGAIN", amount: 100 }, { date: "2026-10-08", payee: "SAMPLE BANK ROW", amount: 7, externalId: "bank-1" }];
+  assert.deepEqual(rowsCoveredByTransfers(rows, "chk", transfers), [rows[0]]);
+  assert.deepEqual(rowsCoveredByTransfers([{ date: "2026-10-09", amount: -100 }], "chk", transfers), [], "wrong direction for that account");
   const result = buildBankStreamDrafts({
-    rows: [{ date: "2026-10-09", payee: "SAMPLE PAYMENT", amount: 100 }, { date: "2026-10-09", payee: "SAMPLE COFFEE", amount: 5 }, { date: "2026-10-08", payee: "SAMPLE BANK ROW", amount: 7, externalId: "bank-1" }],
-    fileName: "Checking.csv", idPrefix: "csv-import", transactions: [], existingDrafts: [], accounts: [{ id: "chk", name: "Checking" }], rules: {}, createId: (prefix) => `${prefix}-${Math.random()}`,
+    rows, fileName: "Checking.csv", idPrefix: "csv-import", transactions: [], existingDrafts: [], accounts: [{ id: "chk", name: "Checking" }], rules: {}, createId: (prefix) => `${prefix}-${Math.random()}`,
     forcedAccountId: "chk", transfers, knownBankIds: ["bank-1"]
   });
-  assert.deepEqual(result.drafts.map((draft) => draft.payee), ["SAMPLE COFFEE"]);
-  assert.match(result.message, /Imported 1 transaction/);
+  assert.deepEqual(result.drafts.map((draft) => draft.payee), ["SAMPLE PAYMENT AGAIN"]);
   assert.match(result.message, /Left out 2 rows already recorded/);
 });
 
-test("transferRepeatOf spots a move that would repeat a recorded transfer", () => {
-  const state = { transactionInboxDrafts: [{ id: "d1", payee: "SAMPLE", amount: 100, date: "2026-10-09", accountId: "a" }], transfers: [{ date: "2026-10-09", fromAccountId: "a", toAccountId: "b", amount: 100 }] };
-  assert.equal(transferRepeatOf(state, "d1", "b"), true);
-  assert.equal(transferRepeatOf(state, "d1", "c"), false);
+test("transferRepeatOf only flags a row with no other half; a row whose other half is waiting is its own payment", () => {
+  const base = { transactions: [], transfers: [{ date: "2026-10-09", fromAccountId: "a", toAccountId: "b", amount: 100 }] };
+  const lone = { ...base, transactionInboxDrafts: [{ id: "d1", payee: "SAMPLE", amount: 100, date: "2026-10-09", accountId: "a" }] };
+  assert.equal(transferRepeatOf(lone, "d1", "b"), true);
+  assert.equal(transferRepeatOf(lone, "d1", "c"), false);
+  const paired = { ...base, transactionInboxDrafts: [...lone.transactionInboxDrafts, { id: "d2", payee: "SAMPLE IN", amount: -100, date: "2026-10-09", accountId: "b" }] };
+  assert.equal(transferRepeatOf(paired, "d1", "b"), false);
 });

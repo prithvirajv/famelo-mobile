@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: logic files cannot import each other's values (see the repo notes), so the few small
 // helpers it shares with other logic files (CSV splitting, closed-account rule, line snapshots) are repeated here.
-import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Transaction } from "./types";
+import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Transaction, Transfer } from "./types";
 
 // ---- small shared helpers (repeated copies, see header) ----------------------------------------------------------
 function parseDateKey(value: string): Date {
@@ -473,7 +473,8 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   const matchedAccount = input.forcedAccountId ? input.accounts.find((account) => account.id === input.forcedAccountId) || null : matchAccountByHints([input.accountHint, input.fileName], input.accounts);
   const alreadyKnown: Matchable[] = [...input.transactions, ...input.existingDrafts];
   const knownBankIds = new Set([...(input.knownBankIds || []), ...alreadyKnown.map((item) => item.externalId)].filter(Boolean));
-  const isRecorded = (row: ParsedBankRow) => Boolean((row.externalId && knownBankIds.has(row.externalId)) || repeatsRecordedTransfer(row, matchedAccount?.id, input.transfers));
+  const coveredRows = new Set<ParsedBankRow>(input.transfers ? rowsCoveredByTransfers(input.rows, matchedAccount?.id, input.transfers) : []);
+  const isRecorded = (row: ParsedBankRow) => Boolean((row.externalId && knownBankIds.has(row.externalId)) || coveredRows.has(row));
   const alreadyRecordedCount = input.transfers || input.knownBankIds ? input.rows.filter(isRecorded).length : 0;
   const rows = alreadyRecordedCount ? input.rows.filter((row) => !isRecorded(row)) : input.rows;
   const duplicateCount = rows.filter((row) => isDuplicateTransaction(row, alreadyKnown)).length;
@@ -494,7 +495,7 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
     });
   });
   const duplicateNote = duplicateCount ? ` ${duplicateCount} look${duplicateCount === 1 ? "s" : ""} like a duplicate of a transaction you already have — check before accepting.` : "";
-  const recordedNote = alreadyRecordedCount ? ` Left out ${alreadyRecordedCount} row${alreadyRecordedCount === 1 ? "" : "s"} already recorded (the same bank id, or part of a transfer in Transfers).` : "";
+  const recordedNote = alreadyRecordedCount ? ` Left out ${alreadyRecordedCount} row${alreadyRecordedCount === 1 ? "" : "s"} already recorded (the same bank id, or the row for a transfer already in Transfers).` : "";
   const message = `Imported ${rows.length} transaction${rows.length === 1 ? "" : "s"} from ${input.fileName}${matchedAccount ? ` — linked to ${matchedAccount.name}` : " — no matching account found, pick one per row below"}.${recordedNote}${duplicateNote}`;
   return { drafts: [...created, ...input.existingDrafts], matchedAccount, duplicateCount, message };
 }
@@ -631,13 +632,14 @@ export function moveDraftToTransfer(state: HouseholdState, draftId: string, coun
   if (!counterpartAccountId || counterpartAccountId === draft.accountId) return { ok: false, error: "Pick a different account." };
   const amount = Math.abs(Number(draft.amount));
   const movingOut = Number(draft.amount) > 0;
-  const transfer = {
+  const transfer: Transfer = {
     id: createId(), date: draft.date || "", fromAccountId: movingOut ? draft.accountId : counterpartAccountId,
     toAccountId: movingOut ? counterpartAccountId : draft.accountId, amount, memo: (memo || draft.payee || "").trim()
   };
   const others: Array<InboxDraft | Transaction> = [...state.transactions, ...(state.transactionInboxDrafts || []).filter((item) => item.id !== draft.id)];
   const counterpart = findTransferCandidate(draft, others);
   const clear = counterpart && counterpart.accountId === counterpartAccountId ? counterpart : null;
+  transfer.sourceIds = transferSourceIds(draft, clear as { id?: string; externalId?: string } | null);
   const clearedDraftId = clear && (state.transactionInboxDrafts || []).includes(clear as InboxDraft) ? (clear as InboxDraft).id : undefined;
   let done = withDone(state, draftId);
   if (clearedDraftId && !done.includes(clearedDraftId)) done = [...done, clearedDraftId];
@@ -656,10 +658,15 @@ export function moveDraftToTransfer(state: HouseholdState, draftId: string, coun
 
 export type TransferPair = { out: InboxDraft; in: InboxDraft };
 
-// Two transfers with the same date, the same from/to accounts and the same amount are almost certainly one payment recorded twice.
-// Used to ask before recording a second identical one, to hold back bulk pairs that are already recorded, to leave statement rows that
-// are half of a recorded transfer out of an import, and to offer removing the extra copies of ones that already slipped in.
-type TransferLike = { date?: string; fromAccountId?: string; toAccountId?: string; amount?: number | string };
+// Identical transfers (same date, from/to accounts, amount) are a hint, not proof - two real $500 payments on one day look the same.
+// What separates them is the bank rows behind each: one outgoing and one incoming row make one transfer, two of each make two. Transfers
+// made from rows remember them (sourceIds), so only copies with no distinct rows of their own are offered for removal, and a manual
+// entry identical to an existing transfer is asked about first.
+type TransferLike = { date?: string; fromAccountId?: string; toAccountId?: string; amount?: number | string; sourceIds?: string[] };
+
+export function transferSourceIds(...rows: Array<{ id?: string; externalId?: string } | null | undefined>): string[] {
+  return rows.map((row) => row && (row.externalId || row.id)).filter((id): id is string => Boolean(id));
+}
 
 export function transferKey(transfer: TransferLike): string {
   return [transfer.date || "", transfer.fromAccountId || "", transfer.toAccountId || "", Math.round(Math.abs(Number(transfer.amount) || 0) * 100)].join("|");
@@ -670,42 +677,52 @@ export function findDuplicateTransfer<T extends TransferLike>(transfers: T[] | u
   return (transfers || []).find((transfer) => transferKey(transfer) === key) || null;
 }
 
-// The extra copies: the first of each identical group stays, the rest are returned (the same objects, in list order).
+// The extra copies: identical transfers are copies unless each came from its own pair of bank rows (sourceIds). The first of each
+// group stays, the rest are returned (the same objects, in list order).
 export function planDuplicateTransferRemoval<T extends TransferLike>(transfers: T[] | undefined): T[] {
-  const seen = new Set<string>();
+  const kept = new Map<string, T[]>();
   const extras: T[] = [];
+  const distinct = (a: T, b: T) => (a.sourceIds || []).length > 0 && (b.sourceIds || []).length > 0 && !(a.sourceIds || []).some((id) => (b.sourceIds || []).includes(id));
   (transfers || []).forEach((transfer) => {
     const key = transferKey(transfer);
-    if (seen.has(key)) extras.push(transfer); else seen.add(key);
+    const group = kept.get(key) || [];
+    if (group.some((other) => !distinct(other, transfer))) extras.push(transfer); else kept.set(key, [...group, transfer]);
   });
   return extras;
 }
 
-// A statement row that is one half of a transfer already recorded: its account is the one the money left (a positive amount) or reached,
-// for the same amount, within the duplicate window of the transfer's date.
-export function repeatsRecordedTransfer(row: { date?: string; amount?: number | string }, accountId: string | undefined, transfers: TransferLike[] | undefined): boolean {
-  if (!accountId || !Number(row.amount)) return false;
-  const cents = Math.round(Math.abs(Number(row.amount)) * 100);
-  const leaving = Number(row.amount) > 0;
-  return (transfers || []).some((transfer) => Math.round(Math.abs(Number(transfer.amount) || 0) * 100) === cents
-    && (leaving ? transfer.fromAccountId === accountId : transfer.toAccountId === accountId)
-    && absoluteDaysBetweenDateKeys(transfer.date || "", row.date || "") <= DUPLICATE_TOLERANCE_DAYS);
-}
-
-function withoutRecordedTransfers<T extends { out: InboxDraft }>(pairs: Array<T & { in: InboxDraft }>, transfers: TransferLike[]): Array<T & { in: InboxDraft }> {
-  const seen = new Set(transfers.map(transferKey));
-  return pairs.filter((pair) => {
-    const key = transferKey({ date: pair.out.date, fromAccountId: pair.out.accountId, toAccountId: pair.in.accountId, amount: pair.out.amount });
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+// Statement rows that are halves of transfers already recorded. Counted, not just matched: each recorded transfer accounts for ONE row
+// leaving its from-account and ONE row reaching its to-account (same amount, within the duplicate window), so a file holding two real $500
+// payments on one day, against one recorded transfer, brings the second one in. Returns the rows to leave out.
+export function rowsCoveredByTransfers<R extends { date?: string; amount?: number | string }>(rows: R[], accountId: string | undefined, transfers: TransferLike[] | undefined): R[] {
+  if (!accountId) return [];
+  const usedOut = new Set<number>();
+  const usedIn = new Set<number>();
+  const covered: R[] = [];
+  rows.forEach((row) => {
+    if (!Number(row.amount)) return;
+    const cents = Math.round(Math.abs(Number(row.amount)) * 100);
+    const leaving = Number(row.amount) > 0;
+    const used = leaving ? usedOut : usedIn;
+    const index = (transfers || []).findIndex((transfer, position) => !used.has(position)
+      && Math.round(Math.abs(Number(transfer.amount) || 0) * 100) === cents
+      && (leaving ? transfer.fromAccountId === accountId : transfer.toAccountId === accountId)
+      && absoluteDaysBetweenDateKeys(transfer.date || "", row.date || "") <= DUPLICATE_TOLERANCE_DAYS);
+    if (index < 0) return;
+    used.add(index);
+    covered.push(row);
   });
+  return covered;
 }
 
-// Would moving this waiting row to Transfers (against the chosen account) repeat a transfer that is already recorded?
+// Would moving this waiting row to Transfers (against the chosen account) probably repeat a transfer that is already recorded? A row whose
+// other half is still waiting or in the Ledger is its own payment pair, so only a row with no other half counts.
 export function transferRepeatOf(state: HouseholdState, draftId: string, counterpartAccountId: string): boolean {
   const draft = (state.transactionInboxDrafts || []).find((item) => item.id === draftId);
   if (!draft || !draft.accountId || !counterpartAccountId) return false;
+  const others: Array<InboxDraft | Transaction> = [...state.transactions, ...(state.transactionInboxDrafts || []).filter((item) => item.id !== draft.id)];
+  const otherHalf = findTransferCandidate(draft, others);
+  if (otherHalf && otherHalf.accountId === counterpartAccountId) return false;
   const movingOut = Number(draft.amount) > 0;
   return Boolean(findDuplicateTransfer(state.transfers, { date: draft.date, fromAccountId: movingOut ? draft.accountId : counterpartAccountId, toAccountId: movingOut ? counterpartAccountId : draft.accountId, amount: Math.abs(Number(draft.amount)) }));
 }
@@ -716,7 +733,7 @@ export function transferRepeatOf(state: HouseholdState, draftId: string, counter
 // accounts (a card-to-card match is two unrelated purchases of the same amount). Those stay in Bank stream for a look.
 const BULK_TRANSFER_EXCLUDED_PAYEE = /zelle|venmo|cash\s?app|paypal|direct\s?dep|payroll/i;
 
-export function planBulkTransfers(drafts: InboxDraft[], accounts: Array<{ id: string; type?: string }> = [], transfers?: TransferLike[]): TransferPair[] {
+export function planBulkTransfers(drafts: InboxDraft[], accounts: Array<{ id: string; type?: string }> = []): TransferPair[] {
   const typeOf = (id?: string) => accounts.find((account) => account.id === id)?.type;
   const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0 && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(draft.payee || "")));
   const used = new Set<string | undefined>();
@@ -735,7 +752,7 @@ export function planBulkTransfers(drafts: InboxDraft[], accounts: Array<{ id: st
     used.add((best as InboxDraft).id);
     pairs.push({ out, in: best });
   });
-  return transfers ? withoutRecordedTransfers(pairs, transfers) : pairs;
+  return pairs;
 }
 
 export type LedgerTransferPair = TransferPair & { ledgerRow: Transaction; draft: InboxDraft };
@@ -744,7 +761,7 @@ export type LedgerTransferPair = TransferPair & { ledgerRow: Transaction; draft:
 // stream). Moving the pair to Transfers takes the Ledger entry out, so it is only offered with a list to confirm, and only when it is
 // unambiguous: the waiting row has exactly one possible Ledger partner and that entry exactly one possible waiting row. Rows already
 // paired by planBulkTransfers (pass the remaining drafts), split rows, the excluded payees and card-to-card pairs are left out.
-export function planBulkLedgerTransfers(drafts: InboxDraft[], ledger: Transaction[], accounts: Array<{ id: string; type?: string }> = [], transfers?: TransferLike[]): LedgerTransferPair[] {
+export function planBulkLedgerTransfers(drafts: InboxDraft[], ledger: Transaction[], accounts: Array<{ id: string; type?: string }> = []): LedgerTransferPair[] {
   const typeOf = (id?: string) => accounts.find((account) => account.id === id)?.type;
   const open = (drafts || []).filter((draft) => draft.accountId && !draft.isPending && Number(draft.amount) !== 0 && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(draft.payee || "")));
   const rows = (ledger || []).filter((row) => row.accountId && Number(row.amount) !== 0 && !(row.splits && row.splits.length) && !BULK_TRANSFER_EXCLUDED_PAYEE.test(String(row.payee || "")));
@@ -759,7 +776,7 @@ export function planBulkLedgerTransfers(drafts: InboxDraft[], ledger: Transactio
     const asDraft = row as unknown as InboxDraft;
     pairs.push(Number(draft.amount) > 0 ? { out: draft, in: asDraft, ledgerRow: row, draft } : { out: asDraft, in: draft, ledgerRow: row, draft });
   });
-  return transfers ? withoutRecordedTransfers(pairs, transfers) : pairs;
+  return pairs;
 }
 
 function payeesShareAWord(a: unknown, b: unknown): boolean {
@@ -787,12 +804,12 @@ export function planBulkDuplicateSkips(drafts: InboxDraft[], ledger: Transaction
 }
 
 export function applyBulkTransfers(state: HouseholdState, createId: () => string): { state: HouseholdState; moved: number } {
-  const pairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || [], state.transfers || []);
+  const pairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []);
   if (!pairs.length) return { state, moved: 0 };
   const gone = new Set<string | undefined>(pairs.flatMap((pair) => [pair.out.id, pair.in.id]));
   const transfers = pairs.map((pair) => ({
     id: createId(), date: pair.out.date || "", fromAccountId: pair.out.accountId || "", toAccountId: pair.in.accountId || "",
-    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim()
+    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim(), sourceIds: transferSourceIds(pair.out, pair.in)
   }));
   let done = state.transactionInboxDone || [];
   gone.forEach((id) => { if (id && !done.includes(id)) done = [...done, id]; });
@@ -805,18 +822,18 @@ export function applyBulkTransfers(state: HouseholdState, createId: () => string
 
 // The waiting rows left once the two-waiting-rows pairs are taken out, so one row is never offered in two bulk moves.
 export function draftsAfterPairs(state: HouseholdState): InboxDraft[] {
-  const used = new Set<string | undefined>(planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || [], state.transfers || []).flatMap((pair) => [pair.out.id, pair.in.id]));
+  const used = new Set<string | undefined>(planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []).flatMap((pair) => [pair.out.id, pair.in.id]));
   return (state.transactionInboxDrafts || []).filter((draft) => !used.has(draft.id));
 }
 
 export function applyBulkLedgerTransfers(state: HouseholdState, createId: () => string): { state: HouseholdState; moved: number } {
-  const pairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || [], state.transfers || []);
+  const pairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || []);
   if (!pairs.length) return { state, moved: 0 };
   const goneRows = new Set<Transaction>(pairs.map((pair) => pair.ledgerRow));
   const goneDrafts = new Set<string | undefined>(pairs.map((pair) => pair.draft.id));
   const transfers = pairs.map((pair) => ({
     id: createId(), date: pair.out.date || "", fromAccountId: pair.out.accountId || "", toAccountId: pair.in.accountId || "",
-    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim()
+    amount: Math.abs(Number(pair.out.amount)), memo: (pair.out.payee || "").trim(), sourceIds: transferSourceIds(pair.out, pair.in)
   }));
   let done = state.transactionInboxDone || [];
   goneDrafts.forEach((id) => { if (id && !done.includes(id)) done = [...done, id]; });

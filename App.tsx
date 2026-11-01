@@ -3134,9 +3134,9 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     } finally { if (timer) clearTimeout(timer); setAiWorking(false); }
   };
 
-  const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || [], state.transfers || []);
+  const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []);
   const bulkSkips = planBulkDuplicateSkips(state.transactionInboxDrafts || [], state.transactions);
-  const bulkLedgerPairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || [], state.transfers || []);
+  const bulkLedgerPairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || []);
   const accountLabel = (id?: string) => accounts.find((account) => account.id === id)?.name || "Unknown account";
   const confirmBulkTransfers = () => {
     if (!bulkPairs.length) return;

@@ -103,7 +103,7 @@ export type Account = {
   // The date the bank's data for this account runs through (the bank's own balance date), and when it was last pulled.
   syncedThrough?: string; lastSyncedAt?: string;
 };
-export type Transfer = { id?: string; fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string };
+export type Transfer = { id?: string; fromAccountId: string; toAccountId: string; amount: number; date: string; memo?: string; sourceIds?: string[] };
 export type PaycheckRecurrence = "once" | "bonus" | "weekly" | "biweekly" | "monthly";
 export type Paycheck = {
   id: string; date: string; name: string; amount: number; recurrence: PaycheckRecurrence;
