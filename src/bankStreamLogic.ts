@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: logic files cannot import each other's values (see the repo notes), so the few small
 // helpers it shares with other logic files (CSV splitting, closed-account rule, line snapshots) are repeated here.
-import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Transaction, Transfer } from "./types";
+import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Paycheck, Transaction, Transfer } from "./types";
 
 // ---- small shared helpers (repeated copies, see header) ----------------------------------------------------------
 function parseDateKey(value: string): Date {
@@ -1067,9 +1067,73 @@ export function adoptPostedRefunds(state: HouseholdState, draftIds: string[]): {
   return { state: adopted ? { ...state, transactionInboxDrafts: drafts } : state, adopted };
 }
 
+// ---- Learning a paycheck from a deposit the household removes (mirrors web planPaycheckLearning / applyPaycheckLearning) ----
+// A deposit that is really a paycheck already recorded as income (it would count twice) is deleted from the Ledger or skipped in Bank
+// stream. That is the household saying "this is my paycheck": the payer is remembered on the paycheck (depositPayeeKeys) so later
+// deposits from it are held instead of added, and when the deposit differs from the recorded amount the household is asked whether
+// the paycheck should follow it (a raise, new hours), so the income stays what really arrives.
+const PAYER_GENERIC_WORDS = new Set(["electronic", "deposit", "direct", "payroll", "payrol", "credit", "payment", "online", "from", "your", "with", "transfer", "bank", "ach", "salary", "paycheck", "pay", "wages", "deposits"]);
+const PAYCHECK_LOOKING_PAYEE = /payroll|direct\s?dep|electronic\s?dep|salary|paycheck|wages|\bpay\b|ach\s?credit/i;
+const SALARY_PAYEE_DENYLIST = /transfer|zelle|venmo|cash\s?app|paypal|refund|reversal|interest|dividend|reimburs|mobile deposit|check deposit|atm/i;
+const SALARY_MIN_AMOUNT = 100;
+
+function payerWords(text: unknown): string[] {
+  return String(text || "").toLowerCase().split(/[^a-z]+/).filter((word) => word.length >= 3 && !PAYER_GENERIC_WORDS.has(word));
+}
+
+// Who a deposit came from, as a stable key: the first two meaningful words of the payee ("home depot").
+export function depositPayerKey(payee: unknown): string {
+  return payerWords(payee).slice(0, 2).join(" ");
+}
+
+export type PaycheckLearningPlan = { paycheck: Paycheck; key: string; received: number; previous: number; differs: boolean };
+type DepositRow = { accountId?: string; payee?: string; amount?: number | string; date?: string };
+
+export function planPaycheckLearning(row: DepositRow | null | undefined, paychecks: Paycheck[] | undefined): PaycheckLearningPlan | null {
+  const amount = Number(row?.amount);
+  if (!row?.accountId || !(amount <= -SALARY_MIN_AMOUNT)) return null;
+  const payee = String(row.payee || "");
+  if (SALARY_PAYEE_DENYLIST.test(payee)) return null;
+  const key = depositPayerKey(payee);
+  const received = Math.round(-amount * 100) / 100;
+  const payeeWords = new Set(payerWords(payee));
+  const candidates = (paychecks || []).filter((paycheck) => {
+    if (!(Number(paycheck.amount) > 0)) return false;
+    const account = paycheck.depositAccountId || paycheck.autoDetected?.accountId || "";
+    if (account !== row.accountId) return false;
+    if (key && (paycheck.depositPayeeKeys || []).includes(key)) return true;
+    const nameWords = payerWords(String(paycheck.name || "").replace(/\(.*?\)/g, " "));
+    return PAYCHECK_LOOKING_PAYEE.test(payee) && nameWords.length > 0 && nameWords.every((word) => payeeWords.has(word));
+  }).sort((a, b) => Math.abs(Number(a.amount) - received) - Math.abs(Number(b.amount) - received));
+  const paycheck = candidates[0];
+  if (!paycheck) return null;
+  const previous = Number(paycheck.amount);
+  return { paycheck, key, received, previous, differs: Math.abs(received - previous) > previous * 0.005 };
+}
+
+// The payer is remembered; with updateAmount the paycheck takes the deposit's amount, as does the payday it is for (the occurrence nearest
+// the deposit date, within a week) and every later payday still at the old amount. Paydays already past keep what they were.
+export function applyPaycheckLearning(state: HouseholdState, plan: PaycheckLearningPlan, row: DepositRow, updateAmount: boolean): HouseholdState {
+  const { paycheck, key, received, previous } = plan;
+  const learned = key && !(paycheck.depositPayeeKeys || []).includes(key) ? [...(paycheck.depositPayeeKeys || []), key] : paycheck.depositPayeeKeys;
+  const update = updateAmount && plan.differs;
+  const rowDate = row.date || "";
+  const own = (state.paycheckOccurrences || []).filter((occurrence) => occurrence.seriesId === paycheck.id);
+  const nearest = update ? own.filter((occurrence) => absoluteDaysBetweenDateKeys(occurrence.date, rowDate) <= 7)
+    .sort((a, b) => absoluteDaysBetweenDateKeys(a.date, rowDate) - absoluteDaysBetweenDateKeys(b.date, rowDate))[0] : undefined;
+  const autoDetected = update && paycheck.autoDetected ? { ...paycheck.autoDetected, pendingAmount: undefined } : paycheck.autoDetected;
+  const paychecks = (state.paychecks || []).map((item) => item.id !== paycheck.id ? item : { ...item, depositPayeeKeys: learned, ...(update ? { amount: received, autoDetected } : {}) });
+  const paycheckOccurrences = update ? (state.paycheckOccurrences || []).map((occurrence) => occurrence.seriesId !== paycheck.id ? occurrence
+    : occurrence === nearest || (occurrence.date > rowDate && occurrence.amount === previous) ? { ...occurrence, amount: received } : occurrence) : state.paycheckOccurrences;
+  return {
+    ...state, paychecks, paycheckOccurrences,
+    household: update ? withActivity(state, `${paycheck.name}: income updated from $${previous.toFixed(2)} to $${received.toFixed(2)} to match your deposit`) : state.household
+  };
+}
+
 // A bank deposit (negative amount) that lines up with a recurring paycheck occurrence deposited to the same account: within 2% of the
-// amount and four days of the payday.
-export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "amount" | "date">, occurrences: Array<{ depositAccountId?: string; amount: number; date: string }> | undefined): boolean {
+// amount and four days of the payday - or, for a payer the household taught (see above), whatever the amount.
+export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "amount" | "date"> & { payee?: string }, occurrences: Array<{ depositAccountId?: string; amount: number; date: string; seriesId?: string }> | undefined, paychecks?: Paycheck[]): boolean {
   const amount = Number(draft.amount);
   if (!draft.accountId || !Number.isFinite(amount) || amount >= 0) return false;
   const received = -amount;
@@ -1079,7 +1143,10 @@ export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "a
     if (occurrence.depositAccountId !== draft.accountId) return false;
     const expected = Number(occurrence.amount);
     const day = Date.parse(`${String(occurrence.date || "").slice(0, 10)}T00:00:00Z`);
-    return expected > 0 && Number.isFinite(day) && Math.abs(received - expected) <= expected * 0.02 && Math.abs(day - when) <= 4 * 86400000;
+    if (!(expected > 0) || !Number.isFinite(day) || Math.abs(day - when) > 4 * 86400000) return false;
+    if (Math.abs(received - expected) <= expected * 0.02) return true;
+    const payer = depositPayerKey(draft.payee);
+    return Boolean(payer) && (paychecks || []).some((paycheck) => paycheck.id === occurrence.seriesId && (paycheck.depositPayeeKeys || []).includes(payer));
   });
 }
 
@@ -1106,7 +1173,7 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], 
       transferMatch: findTransferCandidate(draft, others),
       accountClosedForDate: !accountAllowsDate(account, draft.date || ""),
       bankFeed: true,
-      paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences)
+      paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences, current.paychecks)
     });
     if (!decision.accept) { reasons[decision.reason] = (reasons[decision.reason] || 0) + 1; continue; }
     if (decision.uncategorized) current = { ...current, transactionInboxDrafts: (current.transactionInboxDrafts || []).map((item) => item.id === id ? { ...item, lineId: "", lineSource: "" } : item) };

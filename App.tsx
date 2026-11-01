@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -97,6 +97,19 @@ function money(value: number, currency = "USD") {
 // exact cents - needed anywhere a user must match a precise split to a
 // total (bill-splitting), since rounded numbers can make a correct split
 // look "impossible" (same rounding bug already found and fixed on web).
+// A deposit being removed (deleted from the Ledger, or dismissed from Bank stream) that is really a recorded paycheck is the household saying
+// "this is my paycheck": the payer is remembered so later deposits from it are held, and when the deposit differs from the recorded amount the
+// household is asked whether the paycheck should follow it. `next` is the state with the row already removed; `save` stores the final state.
+function settleRemovedDeposit(next: HouseholdState, row: { accountId?: string; payee?: string; amount?: number | string; date?: string } | undefined, currency: string, save: (state: HouseholdState) => void) {
+  const plan = planPaycheckLearning(row, next.paychecks);
+  if (!row || !plan) return save(next);
+  if (!plan.differs) return save(applyPaycheckLearning(next, plan, row, false));
+  Alert.alert("Update your income?", `This looks like your ${plan.paycheck.name} paycheck. You have ${exactMoney(plan.previous, currency)} recorded as income, and this deposit was ${exactMoney(plan.received, currency)}. Update the paycheck so your income follows what you actually receive? Later deposits from this payer will be recognised as this paycheck instead of being added again.`, [
+    { text: `Keep ${exactMoney(plan.previous, currency)}`, onPress: () => save(applyPaycheckLearning(next, plan, row, false)) },
+    { text: `Update to ${exactMoney(plan.received, currency)}`, onPress: () => save(applyPaycheckLearning(next, plan, row, true)) }
+  ]);
+}
+
 function exactMoney(value: number, currency = "USD") {
   return new Intl.NumberFormat(undefined, { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0);
 }
@@ -1086,7 +1099,7 @@ function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdS
     if (!item) return;
     Alert.alert("Delete transaction?", `${item.payee} · ${money(Number(item.amount), currency)}`, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => {
       api.allowNextShrink();
-      void onSave({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) });
+      settleRemovedDeposit({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) }, item, currency, (next) => void onSave(next));
       if (editingTxIndex === index) resetTxForm();
     } }]);
   };
@@ -3400,7 +3413,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
           <Pressable style={styles.primaryButton} onPress={() => void apply(acceptDraft(state, id))}><Text style={styles.primaryButtonText}>✓ Accept</Text></Pressable>
           <Pressable style={styles.secondarySmall} onPress={() => setFriendSplitId(friendSplitId === id ? null : id)}><Text style={styles.secondaryButtonText}>👥 Split</Text></Pressable>
           <Pressable style={styles.secondarySmall} onPress={() => openTransfer(draft)}><Text style={styles.secondaryButtonText}>⇄ Transfer</Text></Pressable>
-          <Pressable style={styles.secondarySmall} onPress={() => void onSave(dismissDraft(state, id))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Dismiss</Text></Pressable>
+          <Pressable style={styles.secondarySmall} onPress={() => settleRemovedDeposit(dismissDraft(state, id), draft, currency, (next) => void onSave(next))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Dismiss</Text></Pressable>
         </View>
       </Card>;
     })}

@@ -5,7 +5,7 @@ import {
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
   acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
-  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, rowsCoveredByTransfers, transferSourceIds, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
+  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, planPaycheckLearning, applyPaycheckLearning, depositPayerKey, matchesRecordedPaycheck, findDuplicateTransfer, planDuplicateTransferRemoval, rowsCoveredByTransfers, transferSourceIds, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
   payeeLearnKey, setPayeeRule, planCategoryRelearn, learnFromLineChange, categoryRuleEntries, removeCategoryRule
 } from "../src/bankStreamLogic.ts";
 
@@ -664,4 +664,27 @@ test("transferRepeatOf only flags a row with no other half; a row whose other ha
   assert.equal(transferRepeatOf(lone, "d1", "c"), false);
   const paired = { ...base, transactionInboxDrafts: [...lone.transactionInboxDrafts, { id: "d2", payee: "SAMPLE IN", amount: -100, date: "2026-10-09", accountId: "b" }] };
   assert.equal(transferRepeatOf(paired, "d1", "b"), false);
+});
+
+// ---- Learning a paycheck from a deposit the household removes ---------------------------------------------------------------
+test("a removed deposit is matched to the recorded paycheck by payer, account and pay wording; the update moves this and later paydays only", () => {
+  const deposit = (amount, extra = {}) => ({ id: "d1", payee: "ELECTRONIC DEPOSIT - SAMPLE CORP MANAGPAYROLL 261002 SAMPLE PERSON", amount, date: "2026-10-01", accountId: "chk", ...extra });
+  const paychecks = [{ id: "p1", name: "Sample Corp", amount: 1500, recurrence: "biweekly", date: "2026-09-17", depositAccountId: "chk", assignedLineIds: [] }];
+  const occurrences = [["o0", "2026-09-17", 1500], ["o1", "2026-10-01", 1500], ["o2", "2026-10-15", 1500], ["o3", "2026-10-29", 900]].map(([id, date, amount]) => ({ id, seriesId: "p1", date, amount, depositAccountId: "chk" }));
+  const state = { household: { activity: [] }, paychecks, paycheckOccurrences: occurrences };
+  assert.equal(depositPayerKey(deposit(0).payee), "sample corp");
+  const plan = planPaycheckLearning(deposit(-3391.44), paychecks);
+  assert.equal(plan.differs, true);
+  assert.equal(plan.received, 3391.44);
+  for (const other of [deposit(-3391.44, { payee: "SAMPLE CORP REFUND" }), deposit(-3391.44, { accountId: "other" }), deposit(3391.44), deposit(-50), deposit(-3391.44, { payee: "ELECTRONIC DEPOSIT - OTHER EMPLOYER PAYROLL" })]) assert.equal(planPaycheckLearning(other, paychecks), null);
+  const updated = applyPaycheckLearning(state, plan, deposit(-3391.44), true);
+  assert.equal(updated.paychecks[0].amount, 3391.44);
+  assert.deepEqual(updated.paycheckOccurrences.map((o) => o.amount), [1500, 3391.44, 3391.44, 900]);
+  assert.deepEqual(updated.paychecks[0].depositPayeeKeys, ["sample corp"]);
+  const kept = applyPaycheckLearning(state, plan, deposit(-3391.44), false);
+  assert.equal(kept.paychecks[0].amount, 1500);
+  assert.deepEqual(kept.paychecks[0].depositPayeeKeys, ["sample corp"]);
+  const row = deposit(-3391.44, { date: "2026-10-15" });
+  assert.equal(matchesRecordedPaycheck(row, occurrences, paychecks), false, "not learned yet");
+  assert.equal(matchesRecordedPaycheck(row, kept.paycheckOccurrences, kept.paychecks), true, "learned payer, any amount");
 });

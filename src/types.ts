@@ -114,6 +114,8 @@ export type Paycheck = {
   // Set when the paycheck was recorded automatically from a steady salary in a linked account's deposits (see salaryLogic.ts); holds what was
   // folded into it so Undo can put it back.
   autoDetected?: { key: string; accountId: string; detectedAt: string; acknowledged: boolean; removed: Transaction[]; dismissed: InboxDraft[]; pendingAmount?: number };
+  // Payers (depositPayerKey) the household taught by removing one of their deposits as "this is my paycheck"; later deposits from them are held.
+  depositPayeeKeys?: string[];
 };
 // Materialized, individually editable/deletable real pay dates for a recurring paycheck - one row
 // per actual payday, generated on demand server/web-side (not part of the seeded default state, so
