@@ -102,11 +102,11 @@ export const api = {
   }),
   parseBankStatementPdf: (fileBase64: string) => request<{ rows: ParsedBankRow[]; accountHint: string }>("/api/bank-statement/parse-pdf", { method: "POST", body: JSON.stringify({ fileBase64 }) }),
   // AI fallbacks for a bank-stream row with no history match; each returns null when nothing is a confident match.
-  suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines }) }),
-  suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts }) }),
+  suggestTransactionSubcategory: (payee: string, lines: Array<{ id: string; label: string }>, examples: Array<{ payee: string; lineId: string; accountId: string }> = []) => request<{ lineId: string | null }>("/api/transactions/suggest-subcategory", { method: "POST", body: JSON.stringify({ payee, lines, examples }) }),
+  suggestTransactionAccount: (payee: string, accounts: Array<{ id: string; label: string }>, examples: Array<{ payee: string; accountId: string }> = []) => request<{ accountId: string | null }>("/api/transactions/suggest-account", { method: "POST", body: JSON.stringify({ payee, accounts, examples }) }),
   // One AI call for a whole chunk of imported rows; the server validates every id it returns (rows <= 60 per call).
-  suggestTransactionBatch: (rows: Array<{ id: string; payee: string; amount: number; date: string }>, lines: Array<{ id: string; label: string }>, accounts: Array<{ id: string; label: string }>, tags: string[] = []) =>
-    request<{ results: AiSuggestion[] }>("/api/transactions/suggest-batch", { method: "POST", body: JSON.stringify({ rows, lines, accounts, tags }) }),
+  suggestTransactionBatch: (rows: Array<{ id: string; payee: string; amount: number; date: string }>, lines: Array<{ id: string; label: string }>, accounts: Array<{ id: string; label: string }>, tags: string[] = [], examples: Array<{ payee: string; lineId: string; accountId: string }> = []) =>
+    request<{ results: AiSuggestion[] }>("/api/transactions/suggest-batch", { method: "POST", body: JSON.stringify({ rows, lines, accounts, tags, examples }) }),
   fxRates: () => request<{ base: string; rates: Record<string, number>; date: string }>("/api/fx-rates"),
   // Note sharing: a one-off email, a public no-login link, or a specific FamilyLoop login (all live-resolved by the server).
   shareNoteByEmail: (body: { to: string; title: string; body: string; message: string; noteId: string; checklist: Array<{ text: string; done: boolean }> }) =>

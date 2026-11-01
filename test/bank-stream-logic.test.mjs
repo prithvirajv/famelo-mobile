@@ -5,7 +5,7 @@ import {
   orderRefundMatch, refundFuzzyMatch, refundMatch, payeesFuzzyMatch, suggestSubcategoryFromHistory, payeeCategorizationConfidence, suggestAccountFromHistory,
   categorizationRuleForPayee, setCategorizationRule, displayDraftAmount, storedDraftAmount, buildBankStreamDrafts, reviewDrafts, pendingDraftCountsByAccount,
   acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer,
-  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, planPaycheckLearning, applyPaycheckLearning, depositPayerKey, matchesRecordedPaycheck, findDuplicateTransfer, planDuplicateTransferRemoval, rowsCoveredByTransfers, transferSourceIds, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
+  planBulkTransfers, planBulkDuplicateSkips, transferRepeatOf, learnedExamples, learnedAccountExamples, rememberRemovedRow, rowsAlreadyRemoved, removedRowSignature, learnFromBulkLineChange, planPaycheckLearning, applyPaycheckLearning, depositPayerKey, matchesRecordedPaycheck, findDuplicateTransfer, planDuplicateTransferRemoval, rowsCoveredByTransfers, transferSourceIds, applyBulkTransfers, applyBulkDuplicateSkips, planBulkLedgerTransfers, applyBulkLedgerTransfers,
   payeeLearnKey, setPayeeRule, planCategoryRelearn, learnFromLineChange, categoryRuleEntries, removeCategoryRule
 } from "../src/bankStreamLogic.ts";
 
@@ -687,4 +687,57 @@ test("a removed deposit is matched to the recorded paycheck by payer, account an
   const row = deposit(-3391.44, { date: "2026-10-15" });
   assert.equal(matchesRecordedPaycheck(row, occurrences, paychecks), false, "not learned yet");
   assert.equal(matchesRecordedPaycheck(row, kept.paycheckOccurrences, kept.paychecks), true, "learned payer, any amount");
+});
+
+// ---- Learning from deletions and bulk category changes ------------------------------------------------------------------------
+test("a dismissed or deleted row is remembered, and a re-imported file leaves it out - one row per removal", () => {
+  const row = (payee, amount, date = "2026-10-03") => ({ payee, amount, date });
+  assert.equal(removedRowSignature(row("SAMPLE CAFE", 4.5)), removedRowSignature(row("sample cafe", 4.5)));
+  assert.notEqual(removedRowSignature(row("SAMPLE CAFE", 4.5)), removedRowSignature(row("SAMPLE CAFE", -4.5)));
+  assert.equal(removedRowSignature(row("", 4.5)), "");
+  const state = { household: { activity: [] }, transactionInboxDrafts: [{ id: "d1", payee: "SAMPLE CAFE", amount: 4.5, date: "2026-10-03" }], transactionInboxDone: [] };
+  const dismissed = dismissDraft(state, "d1");
+  assert.equal(dismissed.removedRowSignatures.length, 1);
+  const deleted = rememberRemovedRow(dismissed, row("SAMPLE SHOP", 20));
+  assert.equal(deleted.removedRowSignatures.length, 2);
+  const first = row("SAMPLE CAFE", 4.5), second = row("SAMPLE CAFE", 4.5), shop = row("SAMPLE SHOP", 20);
+  assert.deepEqual(rowsAlreadyRemoved([first, second, shop], deleted.removedRowSignatures), [first, shop]);
+  const result = buildBankStreamDrafts({
+    rows: [first, second], fileName: "Checking.csv", idPrefix: "csv-import", transactions: [], existingDrafts: [], accounts: [{ id: "chk", name: "Checking" }], rules: {},
+    createId: (prefix) => `${prefix}-${Math.random()}`, forcedAccountId: "chk", removedSignatures: deleted.removedRowSignatures
+  });
+  assert.equal(result.drafts.length, 1, "the second identical purchase still comes in");
+  assert.match(result.message, /Left out 1 row you deleted or skipped before/);
+});
+
+test("a bulk category change learns every payee in the selection once", () => {
+  const state = {
+    household: { activity: [] },
+    transactions: [
+      { date: "2026-10-01", payee: "SAMPLE MARKET", amount: 10, lineId: "groc" }, { date: "2026-10-02", payee: "SAMPLE MARKET", amount: 12, lineId: "groc" },
+      { date: "2026-10-03", payee: "SAMPLE DINER", amount: 8, lineId: "groc" }
+    ],
+    transactionInboxDrafts: [{ id: "w1", payee: "SAMPLE MARKET", amount: 9, date: "2026-10-04", lineId: "" }]
+  };
+  const learned = learnFromBulkLineChange(state, [0, 1, 2]);
+  assert.equal(learned.payees, 2);
+  assert.equal(learned.waiting, 1);
+  assert.equal(learned.state.transactionInboxDrafts[0].lineId, "groc");
+  assert.equal(Object.keys(learned.state.transactionCategorizationRules).length >= 2, true);
+});
+
+test("the AI is told what the household already decided: rules first, then recent categorized rows, one per payee, only ids that still exist", () => {
+  const state = {
+    transactionCategorizationRules: { "sample market": "groc", "samplemarket": "groc" }, transactionCategorizationRuleLabels: { "sample market": "SAMPLE MARKET", "samplemarket": "SAMPLE MARKET" },
+    transactions: [
+      { date: "2026-09-01", payee: "SAMPLE MARKET", amount: 10, lineId: "other", accountId: "chk" },
+      { date: "2026-10-02", payee: "SAMPLE GAS", amount: 30, lineId: "fuel", accountId: "card" },
+      { date: "2026-10-03", payee: "SAMPLE GONE", amount: 5, lineId: "deleted-line", accountId: "chk" },
+      { date: "2026-10-04", payee: "SAMPLE SPLIT", amount: 5, lineId: "", splits: [{ lineId: "groc", amount: 5 }] },
+      { date: "2026-10-05", payee: "", amount: 5, lineId: "groc" }
+    ]
+  };
+  const examples = learnedExamples(state, ["groc", "fuel", "other"], ["chk", "card"]);
+  assert.deepEqual(examples.map((example) => [example.payee, example.lineId, example.accountId]), [["SAMPLE MARKET", "groc", "chk"], ["SAMPLE GAS", "fuel", "card"]], "the rule wins over the older ledger row; unknown lines, splits and blank payees are left out");
+  assert.deepEqual(learnedAccountExamples(state, ["chk"]).map((example) => example.payee), ["SAMPLE GONE", "SAMPLE MARKET"]);
 });

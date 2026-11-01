@@ -395,6 +395,24 @@ export function learnFromLineChange(state: HouseholdState, ledgerIndex: number):
   return { state: next, others: planCategoryRelearn(next.transactions, ledgerIndex, transaction.lineId), waiting };
 }
 
+// Learns every payee among the given ledger rows (a bulk category change): each becomes a rule for its row's Subcategory and its waiting
+// Bank stream rows follow it. Returns how many payees were learned and how many waiting rows changed.
+export function learnFromBulkLineChange(state: HouseholdState, ledgerIndices: number[]): { state: HouseholdState; payees: number; waiting: number } {
+  let next = state;
+  let waiting = 0;
+  const seen = new Set<string>();
+  ledgerIndices.forEach((index) => {
+    const transaction = next.transactions[index];
+    const payee = String(transaction?.payee || "").trim();
+    if (!transaction || !transaction.lineId || !payee || seen.has(payee.toLowerCase())) return;
+    seen.add(payee.toLowerCase());
+    const learned = learnFromLineChange(next, index);
+    next = learned.state;
+    waiting += learned.waiting;
+  });
+  return { state: next, payees: seen.size, waiting };
+}
+
 export type CategorizationConfidence = { lineId: string; confidence: number; sampleSize: number };
 
 // A real computed confidence (never a fabricated score): the share of this payee's past categorized transactions that
@@ -461,7 +479,7 @@ export type BuildDraftsInput = {
   // A linked-account feed already knows which Wealth account its rows belong to; skips the filename/content-hint guess.
   forcedAccountId?: string;
   // For a statement file: rows with a bank id already seen, or that are half of a transfer already in Transfers, are left out.
-  transfers?: TransferLike[]; knownBankIds?: string[];
+  transfers?: TransferLike[]; knownBankIds?: string[]; removedSignatures?: string[];
 };
 export type BuildDraftsResult = { drafts: InboxDraft[]; matchedAccount: Account | null; duplicateCount: number; message: string };
 
@@ -476,7 +494,10 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   const coveredRows = new Set<ParsedBankRow>(input.transfers ? rowsCoveredByTransfers(input.rows, matchedAccount?.id, input.transfers) : []);
   const isRecorded = (row: ParsedBankRow) => Boolean((row.externalId && knownBankIds.has(row.externalId)) || coveredRows.has(row));
   const alreadyRecordedCount = input.transfers || input.knownBankIds ? input.rows.filter(isRecorded).length : 0;
-  const rows = alreadyRecordedCount ? input.rows.filter((row) => !isRecorded(row)) : input.rows;
+  // A row deleted or skipped before is not brought back by importing the same statement again.
+  const removedBefore = new Set<ParsedBankRow>(input.removedSignatures ? rowsAlreadyRemoved(input.rows, input.removedSignatures) : []);
+  const removedBeforeCount = input.rows.filter((row) => !isRecorded(row) && removedBefore.has(row)).length;
+  const rows = alreadyRecordedCount || removedBeforeCount ? input.rows.filter((row) => !isRecorded(row) && !removedBefore.has(row)) : input.rows;
   const duplicateCount = rows.filter((row) => isDuplicateTransaction(row, alreadyKnown)).length;
   const refundPool: Matchable[] = [...alreadyKnown, ...rows];
   const created: InboxDraft[] = [];
@@ -496,7 +517,8 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   });
   const duplicateNote = duplicateCount ? ` ${duplicateCount} look${duplicateCount === 1 ? "s" : ""} like a duplicate of a transaction you already have — check before accepting.` : "";
   const recordedNote = alreadyRecordedCount ? ` Left out ${alreadyRecordedCount} row${alreadyRecordedCount === 1 ? "" : "s"} already recorded (the same bank id, or the row for a transfer already in Transfers).` : "";
-  const message = `Imported ${rows.length} transaction${rows.length === 1 ? "" : "s"} from ${input.fileName}${matchedAccount ? ` — linked to ${matchedAccount.name}` : " — no matching account found, pick one per row below"}.${recordedNote}${duplicateNote}`;
+  const removedNote = removedBeforeCount ? ` Left out ${removedBeforeCount} row${removedBeforeCount === 1 ? "" : "s"} you deleted or skipped before.` : "";
+  const message = `Imported ${rows.length} transaction${rows.length === 1 ? "" : "s"} from ${input.fileName}${matchedAccount ? ` — linked to ${matchedAccount.name}` : " — no matching account found, pick one per row below"}.${recordedNote}${removedNote}${duplicateNote}`;
   return { drafts: [...created, ...input.existingDrafts], matchedAccount, duplicateCount, message };
 }
 
@@ -576,11 +598,11 @@ export function acceptDraft(state: HouseholdState, draftId: string, memo = ""): 
 
 export function dismissDraft(state: HouseholdState, draftId: string): HouseholdState {
   const draft = (state.transactionInboxDrafts || []).find((item) => item.id === draftId);
-  return {
+  return rememberRemovedRow({
     ...state, transactionInboxDone: withDone(state, draftId),
     transactionInboxDrafts: (state.transactionInboxDrafts || []).filter((item) => item.id !== draftId),
     household: withActivity(state, `Dismissed bank stream item: ${draft?.payee || draftId}`)
-  };
+  }, draft);
 }
 
 export type DraftPatch = { payee?: string; date?: string; amount?: number; lineId?: string; accountId?: string; tags?: string[] };
@@ -1065,6 +1087,79 @@ export function adoptPostedRefunds(state: HouseholdState, draftIds: string[]): {
     return next;
   });
   return { state: adopted ? { ...state, transactionInboxDrafts: drafts } : state, adopted };
+}
+
+// ---- What the AI is told about the household's own decisions (mirrors web learnedExamples / learnedAccountExamples) ----
+// Every AI request carries what the household has already decided - its "always categorize this way" rules first, then its recent
+// categorized ledger rows (payee, Subcategory and account as finally left, so every manual change, bulk change and correction is in
+// there) - and the server tells the model to follow it for the same or a similar payee. One entry per payee, rules winning over history.
+const LEARNED_EXAMPLE_LIMIT = 60;
+export type LearnedExample = { payee: string; lineId: string; accountId: string };
+
+export function learnedExamples(state: HouseholdState, validLineIds?: string[], validAccountIds?: string[]): LearnedExample[] {
+  const lineOk = validLineIds ? new Set(validLineIds) : null;
+  const accountOk = validAccountIds ? new Set(validAccountIds) : null;
+  const byPayee = new Map<string, LearnedExample>();
+  const add = (payee: string | undefined, lineId: string | undefined, accountId: string | undefined) => {
+    const text = String(payee || "").trim().replace(/\s+/g, " ").slice(0, 60);
+    const key = normalizeForPayeeMatch(text);
+    if (!key || !lineId || (lineOk && !lineOk.has(lineId))) return;
+    const account = accountId && (!accountOk || accountOk.has(accountId)) ? accountId : "";
+    const known = byPayee.get(key);
+    if (known) { if (!known.accountId && account) known.accountId = account; return; }
+    byPayee.set(key, { payee: text, lineId, accountId: account });
+  };
+  const rules = state.transactionCategorizationRules || {};
+  const labels = state.transactionCategorizationRuleLabels || {};
+  Object.keys(labels).forEach((key) => { if (rules[key]) add(labels[key], rules[key], ""); });
+  [...state.transactions].filter((row) => row.lineId && row.payee && !(row.splits && row.splits.length))
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))
+    .forEach((row) => add(row.payee, row.lineId, row.accountId));
+  return [...byPayee.values()].slice(0, LEARNED_EXAMPLE_LIMIT);
+}
+
+export function learnedAccountExamples(state: HouseholdState, validAccountIds?: string[]): Array<{ payee: string; accountId: string }> {
+  const accountOk = validAccountIds ? new Set(validAccountIds) : null;
+  const byPayee = new Map<string, { payee: string; accountId: string }>();
+  [...state.transactions].filter((row) => row.accountId && row.payee && (!accountOk || accountOk.has(row.accountId)))
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))
+    .forEach((row) => {
+      const key = normalizeForPayeeMatch(row.payee);
+      if (key && !byPayee.has(key)) byPayee.set(key, { payee: String(row.payee).trim().replace(/\s+/g, " ").slice(0, 60), accountId: row.accountId as string });
+    });
+  return [...byPayee.values()].slice(0, LEARNED_EXAMPLE_LIMIT);
+}
+
+// ---- Remembering rows the household removed (mirrors web rememberRemovedRow / rowsAlreadyRemoved) ----
+// A row deleted from the Ledger or skipped in Bank stream was removed on purpose. A statement file has no bank id to recognise it by, so
+// re-importing it would bring it straight back; the row's date, amount, direction and payee are remembered and the same row is left out
+// of later imports, one row per removal (a second identical purchase the same day still comes in).
+const REMOVED_ROW_LIMIT = 3000;
+
+export function removedRowSignature(row: { payee?: string; amount?: number | string; date?: string } | null | undefined): string {
+  const amount = Number(row?.amount);
+  const cents = Math.round(Math.abs(amount) * 100);
+  const payee = normalizeForPayeeMatch(row?.payee);
+  const date = String(row?.date || "").slice(0, 10);
+  return cents && payee && date ? `${date}|${cents}|${amount < 0 ? "in" : "out"}|${payee}` : "";
+}
+
+export function rememberRemovedRow(state: HouseholdState, row: { payee?: string; amount?: number | string; date?: string } | null | undefined): HouseholdState {
+  const signature = removedRowSignature(row);
+  return signature ? { ...state, removedRowSignatures: [...(state.removedRowSignatures || []), signature].slice(-REMOVED_ROW_LIMIT) } : state;
+}
+
+export function rowsAlreadyRemoved<R extends { payee?: string; amount?: number | string; date?: string }>(rows: R[], signatures: string[] | undefined): R[] {
+  const remaining = new Map<string, number>();
+  (signatures || []).forEach((signature) => remaining.set(signature, (remaining.get(signature) || 0) + 1));
+  const covered: R[] = [];
+  rows.forEach((row) => {
+    const signature = removedRowSignature(row);
+    if (!signature || !((remaining.get(signature) || 0) > 0)) return;
+    remaining.set(signature, (remaining.get(signature) || 0) - 1);
+    covered.push(row);
+  });
+  return covered;
 }
 
 // ---- Learning a paycheck from a deposit the household removes (mirrors web planPaycheckLearning / applyPaycheckLearning) ----

@@ -181,6 +181,8 @@ export type HouseholdState = {
   // { normalized payee: lineId } - "always categorize this payee this way".
   transactionCategorizationRules?: Record<string, string>;
   transactionCategorizationRuleLabels?: Record<string, string>;
+  // Date/amount/direction/payee of rows deleted from the Ledger or skipped in Bank stream, so importing the same statement again leaves them out.
+  removedRowSignatures?: string[];
 };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };

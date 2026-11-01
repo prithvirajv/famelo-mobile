@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, rememberRemovedRow, learnFromBulkLineChange, learnedExamples, learnedAccountExamples, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -1099,7 +1099,7 @@ function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdS
     if (!item) return;
     Alert.alert("Delete transaction?", `${item.payee} · ${money(Number(item.amount), currency)}`, [{ text: "Cancel" }, { text: "Delete", style: "destructive", onPress: () => {
       api.allowNextShrink();
-      settleRemovedDeposit({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) }, item, currency, (next) => void onSave(next));
+      settleRemovedDeposit(rememberRemovedRow({ ...state, transactions: state.transactions.filter((_, itemIndex) => itemIndex !== index) }, item), item, currency, (next) => void onSave(next));
       if (editingTxIndex === index) resetTxForm();
     } }]);
   };
@@ -1114,7 +1114,10 @@ function Budget({ state, members, onSave, onOpenPaychecks }: { state: HouseholdS
   const applyBulkLine = async () => {
     if (!bulkLineId || !selectedTx.length) return;
     const result = applyLineToTransactions(state, selectedTx, bulkLineId);
-    if (result.applied) await onSave(result.state);
+    // Every payee in the selection is learned (one rule per payee), like a single category change.
+    const learned = result.applied ? learnFromBulkLineChange(result.state, selectedTx) : null;
+    if (result.applied) await onSave(learned ? learned.state : result.state);
+    if (learned?.payees && !result.skippedSplit) Alert.alert("Learned", `${learned.payees} payee${learned.payees === 1 ? "" : "s"} will go to this Subcategory from now on${learned.waiting ? ` (${learned.waiting} waiting row${learned.waiting === 1 ? "" : "s"} updated)` : ""}. You can change this under Category rules.`);
     endSelect();
     if (result.skippedSplit) Alert.alert("Some rows were skipped", `${result.skippedSplit} split transaction${result.skippedSplit === 1 ? " was" : "s were"} left alone - a split has its own categories (edit it with the scissors button).`);
   };
@@ -3039,7 +3042,7 @@ async function runAiImport(getState: () => HouseholdState, onSave: (next: Househ
         setStatus(`${lead} AI is categorizing rows ${start + 1}-${start + chunk.length} of ${needAi.length} (${added} added to the ledger so far)...`);
         try {
           const { results } = await Promise.race([
-            api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions, knownTags),
+            api.suggestTransactionBatch(chunk.map((draft) => ({ id: draft.id as string, payee: draft.payee || "", amount: Number(draft.amount) || 0, date: draft.date || "" })), lineOptions, accountOptions, knownTags, learnedExamples(getState(), lineOptions.map((line) => line.id), accountOptions.map((account) => account.id))),
             new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("the AI took too long to answer")), 45000))
           ]);
           const applied = applyAiSuggestions(getState(), results);
@@ -3201,7 +3204,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       const result = buildBankStreamDrafts({
         rows: rows.slice(0, 2000), fileName: asset.name, accountHint, idPrefix: isPdf ? "pdf-import" : "csv-import", transactions: state.transactions,
         existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId,
-        transfers: state.transfers || [], knownBankIds: state.linkedImportedIds || []
+        transfers: state.transfers || [], knownBankIds: state.linkedImportedIds || [], removedSignatures: state.removedRowSignatures || []
       });
       const importedState = { ...state, transactionInboxDrafts: result.drafts };
       if (exceedsStateLimit(importedState)) {
@@ -3250,7 +3253,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const suggestLine = async (draftId: string, payee: string) => {
     setAiBusyId(draftId);
     try {
-      const { lineId } = await api.suggestTransactionSubcategory(payee, lines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` })));
+      const { lineId } = await api.suggestTransactionSubcategory(payee, lines.map((line) => ({ id: line.id, label: `${line.category} - ${line.name}` })), learnedExamples(state, lines.map((line) => line.id), []));
       if (!lineId) Alert.alert("No confident match", "The AI couldn't confidently pick a subcategory for this payee - choose one below.");
       else await apply(updateDraft(state, draftId, { lineId }));
     } catch (cause) { Alert.alert("Couldn't get a suggestion", cause instanceof Error ? cause.message : "Unknown error"); }
@@ -3259,7 +3262,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
   const suggestAccount = async (draftId: string, payee: string) => {
     setAiBusyId(draftId);
     try {
-      const { accountId } = await api.suggestTransactionAccount(payee, accounts.filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: `${account.name} (${account.type})` })));
+      const { accountId } = await api.suggestTransactionAccount(payee, accounts.filter((account) => !account.closedAt).map((account) => ({ id: account.id, label: `${account.name} (${account.type})` })), learnedAccountExamples(state, accounts.filter((account) => !account.closedAt).map((account) => account.id)));
       if (!accountId) Alert.alert("No confident match", "The AI couldn't confidently pick an account for this payee - choose one below.");
       else await apply(updateDraft(state, draftId, { accountId }));
     } catch (cause) { Alert.alert("Couldn't get a suggestion", cause instanceof Error ? cause.message : "Unknown error"); }
