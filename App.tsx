@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -3134,9 +3134,9 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     } finally { if (timer) clearTimeout(timer); setAiWorking(false); }
   };
 
-  const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || []);
+  const bulkPairs = planBulkTransfers(state.transactionInboxDrafts || [], state.accounts || [], state.transfers || []);
   const bulkSkips = planBulkDuplicateSkips(state.transactionInboxDrafts || [], state.transactions);
-  const bulkLedgerPairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || []);
+  const bulkLedgerPairs = planBulkLedgerTransfers(draftsAfterPairs(state), state.transactions, state.accounts || [], state.transfers || []);
   const accountLabel = (id?: string) => accounts.find((account) => account.id === id)?.name || "Unknown account";
   const confirmBulkTransfers = () => {
     if (!bulkPairs.length) return;
@@ -3187,7 +3187,8 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       }
       const result = buildBankStreamDrafts({
         rows: rows.slice(0, 2000), fileName: asset.name, accountHint, idPrefix: isPdf ? "pdf-import" : "csv-import", transactions: state.transactions,
-        existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId
+        existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId,
+        transfers: state.transfers || [], knownBankIds: state.linkedImportedIds || []
       });
       const importedState = { ...state, transactionInboxDrafts: result.drafts };
       if (exceedsStateLimit(importedState)) {
@@ -3258,8 +3259,16 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     setTransferAccountId(draft.transferMatch?.accountId || "");
   };
   const confirmTransfer = async (draft: DraftReview) => {
-    api.allowNextShrink();
-    if (await apply(moveDraftToTransfer(state, draft.id || "", transferAccountId, draft.payee || "", () => uniqueId("transfer")))) setTransferDraftId(null);
+    const record = async () => {
+      api.allowNextShrink();
+      if (await apply(moveDraftToTransfer(state, draft.id || "", transferAccountId, draft.payee || "", () => uniqueId("transfer")))) setTransferDraftId(null);
+    };
+    // The same payment recorded twice would count the money twice in both accounts.
+    if (transferRepeatOf(state, draft.id || "", transferAccountId)) {
+      Alert.alert("Already in Transfers", "A transfer with the same date, accounts and amount is already recorded. If this row is that same payment, cancel and skip it instead. Record a second one only if it was a separate payment.", [{ text: "Cancel" }, { text: "Record another", onPress: () => void record() }]);
+      return;
+    }
+    await record();
   };
 
   const pills = (draft: DraftReview): Array<{ label: string; tone: "info" | "warn" | "plain" }> => {
@@ -4433,8 +4442,22 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     if (!/^\d{4}-\d{2}-\d{2}$/.test(transferDate)) return Alert.alert("Invalid date", "Use the format YYYY-MM-DD.");
     const closed = [transferFrom, transferTo].map((id) => accounts.find((account) => account.id === id)).find((account) => !accountAllowsDate(account, transferDate));
     if (closed) return Alert.alert("Account is closed", `${closed.name} is closed — pick a date on or before its close date, or choose a different account.`);
-    await onSave({ ...state, transfers: [transfer, ...transfers] });
-    setTransferAmount(""); setTransferMemo("");
+    const save = async () => { await onSave({ ...state, transfers: [transfer, ...transfers] }); setTransferAmount(""); setTransferMemo(""); };
+    if (findDuplicateTransfer(transfers, transfer)) {
+      Alert.alert("Already in Transfers", "A transfer with the same date, accounts and amount is already recorded. Record a second one only if it was a separate payment.", [{ text: "Cancel" }, { text: "Record another", onPress: () => void save() }]);
+      return;
+    }
+    await save();
+  };
+
+  const duplicateTransfers = planDuplicateTransferRemoval(transfers);
+  const removeDuplicateTransfers = () => {
+    if (!duplicateTransfers.length) return;
+    const list = duplicateTransfers.slice(0, 6).map((transfer) => `${transfer.date}  ${money(transfer.amount, currency)}  ${accountLabel(transfer.fromAccountId)} → ${accountLabel(transfer.toAccountId)}`).join("\n");
+    const more = duplicateTransfers.length > 6 ? `\n…and ${duplicateTransfers.length - 6} more` : "";
+    Alert.alert(`Remove ${duplicateTransfers.length} extra cop${duplicateTransfers.length === 1 ? "y" : "ies"}?`, `One transfer of each stays. Keep both only if you really made the same payment twice.\n\n${list}${more}`, [{ text: "Cancel" }, {
+      text: `Remove ${duplicateTransfers.length}`, style: "destructive", onPress: () => { const gone = new Set(duplicateTransfers); void onSave({ ...state, transfers: transfers.filter((transfer) => !gone.has(transfer)) }); }
+    }]);
   };
 
   const deleteTransfer = (index: number) => {
@@ -4637,6 +4660,10 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
         <TextInput style={styles.input} value={transferMemo} onChangeText={setTransferMemo} placeholder="Memo (e.g. Credit card payment)" />
         <Pressable style={styles.secondarySmall} onPress={() => void submitTransfer()}><Text style={styles.secondaryButtonText}>Record transfer</Text></Pressable>
       </> : <Text style={styles.muted}>Add at least two accounts to record a transfer, like paying a credit card from checking.</Text>}
+      {duplicateTransfers.length ? <>
+        <Text style={styles.muted}>{duplicateTransfers.length} transfer{duplicateTransfers.length === 1 ? " looks" : "s look"} recorded twice (same date, accounts and amount).</Text>
+        <Pressable style={styles.secondarySmall} onPress={removeDuplicateTransfers}><Text style={styles.secondaryButtonText}>Remove {duplicateTransfers.length} extra{duplicateTransfers.length === 1 ? "" : "s"}…</Text></Pressable>
+      </> : null}
       {transfers.length ? <>
         <Pressable style={[styles.secondarySmall, { marginTop: 10 }]} onPress={() => setShowTransferHistory((prev) => !prev)}><Text style={styles.secondaryButtonText}>{showTransferHistory ? "Hide" : "Show"} transfer history ({transfers.length})</Text></Pressable>
         {showTransferHistory ? transfersNewestFirst(transfers).map(({ transfer, index }) => <View key={transfer.id || index} style={styles.row}>
