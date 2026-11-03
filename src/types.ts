@@ -185,7 +185,13 @@ export type HouseholdState = {
   transactionCategorizationRuleLabels?: Record<string, string>;
   // Date/amount/direction/payee of rows deleted from the Ledger or skipped in Bank stream, so importing the same statement again leaves them out.
   removedRowSignatures?: string[];
+  // Why rows were removed, kept as rules for the payee (see removalRules in bankStreamLogic.ts), and the reasons the household typed itself.
+  removalRules?: RemovalRule[];
+  removalReasons?: string[];
 };
+
+// A payee's rule from a removed row: next time a row like it arrives it is held in Bank stream ("hold") or left out ("skip").
+export type RemovalRule = { id: string; keys: string[]; direction: "in" | "out"; reason: string; effect: "hold" | "skip"; payee: string; count: number; at: string };
 
 export type JournalPhoto = { id: string; dataUrl: string; createdAt: string };
 export type JournalEntry = {

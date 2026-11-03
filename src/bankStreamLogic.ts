@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: logic files cannot import each other's values (see the repo notes), so the few small
 // helpers it shares with other logic files (CSV splitting, closed-account rule, line snapshots) are repeated here.
-import type { Account, AccountType, HouseholdState, InboxDraft, Iou, IouDirection, Paycheck, Transaction, Transfer } from "./types";
+import type { Account, AccountType, HouseholdState, InboxDraft, Iou, IouDirection, Paycheck, RemovalRule, Transaction, Transfer } from "./types";
 
 // ---- small shared helpers (repeated copies, see header) ----------------------------------------------------------
 function parseDateKey(value: string): Date {
@@ -479,7 +479,7 @@ export type BuildDraftsInput = {
   // A linked-account feed already knows which Wealth account its rows belong to; skips the filename/content-hint guess.
   forcedAccountId?: string;
   // For a statement file: rows with a bank id already seen, or that are half of a transfer already in Transfers, are left out.
-  transfers?: TransferLike[]; knownBankIds?: string[]; removedSignatures?: string[];
+  transfers?: TransferLike[]; knownBankIds?: string[]; removedSignatures?: string[]; removalRules?: RemovalRule[];
 };
 export type BuildDraftsResult = { drafts: InboxDraft[]; matchedAccount: Account | null; duplicateCount: number; message: string };
 
@@ -497,7 +497,10 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   // A row deleted or skipped before is not brought back by importing the same statement again.
   const removedBefore = new Set<ParsedBankRow>(input.removedSignatures ? rowsAlreadyRemoved(input.rows, input.removedSignatures) : []);
   const removedBeforeCount = input.rows.filter((row) => !isRecorded(row) && removedBefore.has(row)).length;
-  const rows = alreadyRecordedCount || removedBeforeCount ? input.rows.filter((row) => !isRecorded(row) && !removedBefore.has(row)) : input.rows;
+  const keptRows = alreadyRecordedCount || removedBeforeCount ? input.rows.filter((row) => !isRecorded(row) && !removedBefore.has(row)) : input.rows;
+  // Rows like ones the household removed and said to leave out are not brought in.
+  const skippedByRule = new Set<ParsedBankRow>(rowsSkippedByRemovalRules(keptRows, input.removalRules));
+  const rows = skippedByRule.size ? keptRows.filter((row) => !skippedByRule.has(row)) : keptRows;
   const duplicateCount = rows.filter((row) => isDuplicateTransaction(row, alreadyKnown)).length;
   const refundPool: Matchable[] = [...alreadyKnown, ...rows];
   const created: InboxDraft[] = [];
@@ -518,7 +521,8 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
   const duplicateNote = duplicateCount ? ` ${duplicateCount} look${duplicateCount === 1 ? "s" : ""} like a duplicate of a transaction you already have — check before accepting.` : "";
   const recordedNote = alreadyRecordedCount ? ` Left out ${alreadyRecordedCount} row${alreadyRecordedCount === 1 ? "" : "s"} already recorded (the same bank id, or the row for a transfer already in Transfers).` : "";
   const removedNote = removedBeforeCount ? ` Left out ${removedBeforeCount} row${removedBeforeCount === 1 ? "" : "s"} you deleted or skipped before.` : "";
-  const message = `Imported ${rows.length} transaction${rows.length === 1 ? "" : "s"} from ${input.fileName}${matchedAccount ? ` — linked to ${matchedAccount.name}` : " — no matching account found, pick one per row below"}.${recordedNote}${removedNote}${duplicateNote}`;
+  const ruleNote = skippedByRule.size ? ` Left out ${skippedByRule.size} row${skippedByRule.size === 1 ? "" : "s"} you told FamilyLoop to skip.` : "";
+  const message = `Imported ${rows.length} transaction${rows.length === 1 ? "" : "s"} from ${input.fileName}${matchedAccount ? ` — linked to ${matchedAccount.name}` : " — no matching account found, pick one per row below"}.${recordedNote}${removedNote}${ruleNote}${duplicateNote}`;
   return { drafts: [...created, ...input.existingDrafts], matchedAccount, duplicateCount, message };
 }
 
@@ -526,9 +530,11 @@ export function buildBankStreamDrafts(input: BuildDraftsInput): BuildDraftsResul
 export type DraftReview = InboxDraft & {
   possibleDuplicate: boolean; refundMatch: InboxDraft | Transaction | null; transferMatch: InboxDraft | Transaction | null;
   categorizationConfidence: CategorizationConfidence | null; categorizationRuleLineId: string;
+  // The rule from a similar row the household removed before (shown as "Removed before: reason").
+  removalRule: RemovalRule | null;
 };
 
-type ReviewState = Pick<HouseholdState, "transactions" | "transactionInboxDrafts" | "transactionInboxDone" | "transactionCategorizationRules">;
+type ReviewState = Pick<HouseholdState, "transactions" | "transactionInboxDrafts" | "transactionInboxDone" | "transactionCategorizationRules"> & { removalRules?: RemovalRule[] };
 
 // Match results are recomputed live and never trusted from storage: a row imported before a matching fix shipped (or
 // before the transaction it now matches existed) must not stay stuck showing a stale answer.
@@ -543,7 +549,8 @@ export function reviewDrafts(state: ReviewState): DraftReview[] {
       refundMatch: refundMatch(draft, others),
       transferMatch: findTransferCandidate(draft, others),
       categorizationConfidence: draft.lineId ? payeeCategorizationConfidence(draft.payee || "", state.transactions) : null,
-      categorizationRuleLineId: categorizationRuleForPayee(state.transactionCategorizationRules, draft.payee || "")
+      categorizationRuleLineId: categorizationRuleForPayee(state.transactionCategorizationRules, draft.payee || ""),
+      removalRule: lookupRemovalRule(state.removalRules, draft)
     };
   });
 }
@@ -1031,7 +1038,7 @@ export function applyAiSuggestions(state: HouseholdState, results: AiSuggestion[
   return { state: filled ? { ...state, transactionInboxDrafts: drafts } : state, filled };
 }
 
-export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; refundMatchPosted?: boolean; transferMatch: unknown; accountClosedForDate: boolean; bankFeed?: boolean; paycheckMatch?: boolean };
+export type AutoAcceptContext = { accountsExist: boolean; possibleDuplicate: boolean; refundMatch: unknown; refundMatchPosted?: boolean; transferMatch: unknown; removalRule?: RemovalRule | null; accountClosedForDate: boolean; bankFeed?: boolean; paycheckMatch?: boolean };
 
 // Whether an imported row can go into the ledger without a human look - deliberately conservative (see web's autoAcceptDecision). A row
 // from a linked bank feed (context.bankFeed) is the bank's own record, so card payments/deposits go in too - except a deposit that matches
@@ -1046,6 +1053,8 @@ export function autoAcceptDecision(draft: InboxDraft, context: AutoAcceptContext
   // A row that matches the purchase it reverses is a refund, not money moving between accounts, so the transfer look-alike check does not hold it
   // (the refund check above already decided whether it may post).
   if (context.transferMatch && !context.refundMatch) return { accept: false, reason: "possible transfer" };
+  // The household removed rows like this before and said why: it is never posted on its own, whatever the reason was.
+  if (context.removalRule && !context.refundMatch) return { accept: false, reason: `removed before: ${context.removalRule.reason}` };
   if (context.paycheckMatch) return { accept: false, reason: "matches a recorded paycheck" };
   if (!context.bankFeed && (draft.isPayment || draft.isDeposit)) return { accept: false, reason: "payment or deposit" };
   if (draft.isPending) return { accept: false, reason: "still pending" };
@@ -1228,6 +1237,115 @@ export function applyPaycheckLearning(state: HouseholdState, plan: PaycheckLearn
   };
 }
 
+// ---- Learning why a row was removed (mirrors web's removal rules) ----
+// Removing a Ledger row or skipping a Bank stream row asks why. The answer is kept as a rule for that payee (and direction, money in or out):
+// next time a row like it arrives it is held in Bank stream with the reason shown ("hold", never posted on its own) or left out ("skip").
+// The reason is free text; the ones the household typed are remembered and offered again. "It's my salary" teaches a paycheck instead.
+const REMOVAL_RULE_LIMIT = 300;
+const REMOVAL_CUSTOM_REASON_LIMIT = 8;
+export const REMOVAL_REASONS: Array<{ id: string; label: string; effect: "hold" | "skip" | "none" }> = [
+  { id: "transfer", label: "It's a transfer between my accounts", effect: "hold" },
+  { id: "duplicate", label: "It's a duplicate of another row", effect: "none" },
+  { id: "untracked", label: "I don't want this tracked", effect: "skip" }
+];
+
+type RemovalRow = { payee?: string; amount?: number | string; date?: string; accountId?: string };
+
+function removalDirection(row: RemovalRow | null | undefined): "in" | "out" {
+  return Number(row?.amount) < 0 ? "in" : "out";
+}
+
+export function removalRuleKeys(payee: unknown): string[] {
+  return [...new Set([normalizeForPayeeMatch(payee), payeeLearnKey(payee)].filter(Boolean))];
+}
+
+// The rule for a row (same payee by its exact or looser key, same direction), or null.
+export function lookupRemovalRule(rules: RemovalRule[] | undefined, row: RemovalRow | null | undefined): RemovalRule | null {
+  const keys = removalRuleKeys(row?.payee);
+  if (!keys.length) return null;
+  const direction = removalDirection(row);
+  return (rules || []).find((rule) => rule.direction === direction && (rule.keys || []).some((key) => keys.includes(key))) || null;
+}
+
+// Records (or updates) the rule. effect is "hold" or "skip"; anything else records nothing.
+export function setRemovalRule(state: HouseholdState, row: RemovalRow, input: { reason: string; effect: string }, todayKey: string): HouseholdState {
+  const text = String(input.reason || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  const keys = removalRuleKeys(row.payee);
+  if (!text || !keys.length || (input.effect !== "hold" && input.effect !== "skip")) return state;
+  const effect = input.effect;
+  const direction = removalDirection(row);
+  const rules = state.removalRules || [];
+  const existing = lookupRemovalRule(rules, row);
+  const activity = `Learned from removing ${row.payee}: rows like it are ${effect === "skip" ? "left out" : "held for a look"} (${text})`;
+  if (existing) {
+    const updated: RemovalRule = { ...existing, keys: [...new Set([...(existing.keys || []), ...keys])], reason: text, effect, count: (existing.count || 1) + 1, at: todayKey };
+    return { ...state, removalRules: rules.map((rule) => rule === existing ? updated : rule), household: withActivity(state, activity) };
+  }
+  const rule: RemovalRule = { id: `${direction}|${keys[0]}`, keys, direction, reason: text, effect, payee: String(row.payee || "").trim().replace(/\s+/g, " ").slice(0, 60), count: 1, at: todayKey };
+  return { ...state, removalRules: [rule, ...rules].slice(0, REMOVAL_RULE_LIMIT), household: withActivity(state, activity) };
+}
+
+export function removeRemovalRule(state: HouseholdState, id: string): HouseholdState {
+  return { ...state, removalRules: (state.removalRules || []).filter((rule) => rule.id !== id) };
+}
+
+// A reason the household typed itself, kept (newest first, a few) so it can be picked again instead of retyped.
+export function rememberRemovalReason(state: HouseholdState, label: string): HouseholdState {
+  const text = String(label || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  if (!text || REMOVAL_REASONS.some((reason) => reason.label.toLowerCase() === text.toLowerCase())) return state;
+  return { ...state, removalReasons: [text, ...(state.removalReasons || []).filter((item) => item.toLowerCase() !== text.toLowerCase())].slice(0, REMOVAL_CUSTOM_REASON_LIMIT) };
+}
+
+// Rows a "skip" rule says to leave out of an import or sync.
+export function rowsSkippedByRemovalRules<R extends RemovalRow>(rows: R[], rules: RemovalRule[] | undefined): R[] {
+  return (rows || []).filter((row) => lookupRemovalRule(rules, row)?.effect === "skip");
+}
+
+// Whether a removed row could be the household's salary: a deposit of $100 or more that is not a transfer, P2P payment, refund and so on.
+export function depositWorthAsking(row: RemovalRow | null | undefined, transactions: Transaction[]): boolean {
+  const amount = Number(row?.amount);
+  if (!row || !(amount <= -SALARY_MIN_AMOUNT) || SALARY_PAYEE_DENYLIST.test(String(row.payee || ""))) return false;
+  return !refundMatch({ ...row, payee: row.payee, amount, date: row.date } as Matchable, transactions as Matchable[]);
+}
+
+// "It's my salary" on an existing paycheck: the payer is remembered on it (and the account it deposits to, when it had none) and, with
+// updateAmount, the income follows the deposit. planSalaryLearning is what the app shows before asking about the amount.
+export function planSalaryLearning(state: HouseholdState, row: RemovalRow, paycheckId: string): PaycheckLearningPlan | null {
+  const paycheck = (state.paychecks || []).find((item) => item.id === paycheckId);
+  if (!paycheck) return null;
+  const received = Math.round(Math.abs(Number(row.amount)) * 100) / 100;
+  const previous = Number(paycheck.amount);
+  return { paycheck, key: depositPayerKey(row.payee), received, previous, differs: Math.abs(received - previous) > previous * 0.005 };
+}
+
+export function learnSalaryFromRemovedDeposit(state: HouseholdState, row: RemovalRow, paycheckId: string, updateAmount: boolean): HouseholdState {
+  const plan = planSalaryLearning(state, row, paycheckId);
+  if (!plan) return state;
+  const withAccount: HouseholdState = !plan.paycheck.depositAccountId && row.accountId
+    ? { ...state, paychecks: (state.paychecks || []).map((item) => item.id === paycheckId ? { ...item, depositAccountId: row.accountId } : item) } : state;
+  const fresh = planSalaryLearning(withAccount, row, paycheckId) as PaycheckLearningPlan;
+  return applyPaycheckLearning(withAccount, fresh, row as DepositRow, updateAmount);
+}
+
+function nextPayday(dateKey: string, recurrence: "weekly" | "biweekly" | "monthly"): string {
+  const [year, month, day] = dateKey.split("-").map(Number) as [number, number, number];
+  if (recurrence === "monthly") {
+    const target = new Date(Date.UTC(year, month, 1));
+    const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    return `${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+  }
+  return new Date(Date.UTC(year, month - 1, day + (recurrence === "weekly" ? 7 : 14))).toISOString().slice(0, 10);
+}
+
+// "It's my salary" with no paycheck yet: the deposit starts one, from the next payday so the removed deposit is not counted twice.
+export function startPaycheckFromRemovedDeposit(state: HouseholdState, row: RemovalRow, recurrence: "weekly" | "biweekly" | "monthly", createId: (seed: string) => string): HouseholdState {
+  const received = Math.round(Math.abs(Number(row.amount)) * 100) / 100;
+  const name = String(row.payee || "").replace(/\d{3,}/g, " ").replace(/[#*_/\\-]+\s*$/g, "").replace(/\s+/g, " ").trim().slice(0, 60) || "Salary";
+  const key = depositPayerKey(row.payee);
+  const paycheck: Paycheck = { id: createId("paycheck"), name, date: nextPayday(row.date || "", recurrence), amount: received, recurrence, assignedLineIds: [], depositAccountId: row.accountId || "", depositPayeeKeys: key ? [key] : [] };
+  return { ...state, paychecks: [...(state.paychecks || []), paycheck], household: withActivity(state, `Income added from a deposit you removed: ${name}, $${received.toFixed(2)} ${recurrence}`) };
+}
+
 // A bank deposit (negative amount) that lines up with a recurring paycheck occurrence deposited to the same account: within 2% of the
 // amount and four days of the payday - or, for a payer the household taught (see above), whatever the amount.
 export function matchesRecordedPaycheck(draft: Pick<InboxDraft, "accountId" | "amount" | "date"> & { payee?: string }, occurrences: Array<{ depositAccountId?: string; amount: number; date: string; seriesId?: string }> | undefined, paychecks?: Paycheck[]): boolean {
@@ -1268,6 +1386,7 @@ export function autoAcceptSafeDrafts(state: HouseholdState, draftIds: string[], 
       refundMatch: returnOf,
       refundMatchPosted: returnOfPosted,
       transferMatch: findTransferCandidate(draft, others),
+      removalRule: lookupRemovalRule(current.removalRules, draft),
       accountClosedForDate: !accountAllowsDate(account, draft.date || ""),
       bankFeed: true,
       paycheckMatch: matchesRecordedPaycheck(draft, current.paycheckOccurrences, current.paychecks)

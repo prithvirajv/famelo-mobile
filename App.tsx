@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { guessAccountType, parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, rememberRemovedRow, learnFromBulkLineChange, learnedExamples, learnedAccountExamples, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { guessAccountType, parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, rememberRemovedRow, REMOVAL_REASONS, removalRuleKeys, setRemovalRule, removeRemovalRule, rememberRemovalReason, depositWorthAsking, planSalaryLearning, learnSalaryFromRemovedDeposit, startPaycheckFromRemovedDeposit, learnFromBulkLineChange, learnedExamples, learnedAccountExamples, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -97,12 +97,22 @@ function money(value: number, currency = "USD") {
 // exact cents - needed anywhere a user must match a precise split to a
 // total (bill-splitting), since rounded numbers can make a correct split
 // look "impossible" (same rounding bug already found and fixed on web).
+// Set by AppContent so a removal anywhere (Ledger delete, Bank stream dismiss) can open the "why did you remove this" sheet.
+type RemovalRequest = { row: { accountId?: string; payee?: string; amount?: number | string; date?: string }; next: HouseholdState };
+let requestRemovalReason: ((request: RemovalRequest) => void) | null = null;
+
 // A deposit being removed (deleted from the Ledger, or dismissed from Bank stream) that is really a recorded paycheck is the household saying
 // "this is my paycheck": the payer is remembered so later deposits from it are held, and when the deposit differs from the recorded amount the
 // household is asked whether the paycheck should follow it. `next` is the state with the row already removed; `save` stores the final state.
 function settleRemovedDeposit(next: HouseholdState, row: { accountId?: string; payee?: string; amount?: number | string; date?: string } | undefined, currency: string, save: (state: HouseholdState) => void) {
   const plan = planPaycheckLearning(row, next.paychecks);
-  if (!row || !plan) return save(next);
+  if (!row) return save(next);
+  // A row that is not a recorded paycheck: it is removed now, and the household is asked why so FamilyLoop can learn from the answer.
+  if (!plan) {
+    save(next);
+    if (requestRemovalReason && removalRuleKeys(row.payee).length) requestRemovalReason({ row, next });
+    return;
+  }
   if (!plan.differs) return save(applyPaycheckLearning(next, plan, row, false));
   Alert.alert("Update your income?", `This looks like your ${plan.paycheck.name} paycheck. You have ${exactMoney(plan.previous, currency)} recorded as income, and this deposit was ${exactMoney(plan.received, currency)}. Update the paycheck so your income follows what you actually receive? Later deposits from this payer will be recognised as this paycheck instead of being added again.`, [
     { text: `Keep ${exactMoney(plan.previous, currency)}`, onPress: () => save(applyPaycheckLearning(next, plan, row, false)) },
@@ -120,6 +130,8 @@ function mobileAssetValue(asset: NonNullable<HouseholdState["goals"]>["netWorth"
 
 function AppContent() {
   const insets = useSafeAreaInsets();
+  const [removalRequest, setRemovalRequest] = useState<RemovalRequest | null>(null);
+  useEffect(() => { requestRemovalReason = setRemovalRequest; return () => { requestRemovalReason = null; }; }, []);
   const [user, setUser] = useState<User | null>(null);
   const [households, setHouseholds] = useState<Household[]>([]);
   const [state, setState] = useState<HouseholdState | null>(null);
@@ -286,6 +298,7 @@ function AppContent() {
         else if (target === "wealth" || target === "sharing") setSubScreen(target);
         else { setSubScreen(null); setTab(target); }
       }} />
+    <RemovalReasonModal request={removalRequest} paychecks={state.paychecks || []} transactions={state.transactions} customReasons={state.removalReasons || []} currency={state.household.currency} onSave={save} onClose={() => setRemovalRequest(null)} />
     {state ? <AssistantSheet state={state} onSave={save} bottomOffset={Math.max(insets.bottom, 8) + 64 + 12} /> : null}
     <View style={[styles.tabBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
       {tabs.map((item) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: tab === item.id }} style={styles.tab} onPress={() => setTab(item.id)}>
@@ -570,6 +583,90 @@ function GlobalSearchModal({ visible, state, onClose, onPick }: { visible: boole
           </Pressable>)}
       </ScrollView>
     </SafeAreaView>
+  </Modal>;
+}
+
+// "Why did you remove this?": asked after a Ledger row is deleted or a Bank stream row is dismissed (one that is not already a recorded
+// paycheck). The answer is free: a built-in reason, one typed earlier, or new words. "It's my salary" teaches a paycheck; any other reason becomes
+// a rule for the payee (rules in bankStreamLogic.ts) - the next row like it is held in Bank stream with the reason shown, or left out.
+function RemovalReasonModal({ request, paychecks, transactions, customReasons, currency, onSave, onClose }: { request: RemovalRequest | null; paychecks: Paycheck[]; transactions: HouseholdState["transactions"]; customReasons: string[]; currency: string; onSave: (next: HouseholdState) => Promise<void>; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [otherText, setOtherText] = useState("");
+  const [effect, setEffect] = useState<"hold" | "skip" | "none">("hold");
+  const [paycheckId, setPaycheckId] = useState("new");
+  const [recurrence, setRecurrence] = useState<"weekly" | "biweekly" | "monthly">("biweekly");
+  useEffect(() => { setReason(""); setOtherText(""); setEffect("hold"); setRecurrence("biweekly"); }, [request]);
+  const row = request?.row;
+  const received = Math.round(Math.abs(Number(row?.amount)) * 100) / 100;
+  const salary = Boolean(request && depositWorthAsking(row, transactions));
+  const candidates = [...paychecks].filter((paycheck) => Number(paycheck.amount) > 0).sort((a, b) => Math.abs(Number(a.amount) - received) - Math.abs(Number(b.amount) - received));
+  useEffect(() => { setPaycheckId(candidates[0]?.id || "new"); }, [request]);
+  if (!request || !row) return null;
+  const pick = (value: string) => {
+    setReason(value);
+    const builtIn = REMOVAL_REASONS.find((item) => `built:${item.id}` === value);
+    setEffect(builtIn ? builtIn.effect : "hold");
+  };
+  const options: Array<{ value: string; label: string }> = [
+    ...(salary ? [{ value: "salary", label: "It's my salary or a paycheck" }] : []),
+    ...REMOVAL_REASONS.map((item) => ({ value: `built:${item.id}`, label: item.label })),
+    ...customReasons.map((label) => ({ value: `custom:${label}`, label })),
+    { value: "other", label: "Something else…" }
+  ];
+  const canSave = Boolean(reason) && (reason !== "other" || otherText.trim().length > 0);
+  const finish = async () => {
+    const base = request.next;
+    onClose();
+    if (reason === "salary") {
+      if (paycheckId === "new") { await onSave(startPaycheckFromRemovedDeposit(base, row, recurrence, uniqueId)); return; }
+      const plan = planSalaryLearning(base, row, paycheckId);
+      if (plan?.differs) {
+        setTimeout(() => Alert.alert("Update your income?", `You have ${exactMoney(plan.previous, currency)} recorded as income for ${plan.paycheck.name}, and this deposit was ${exactMoney(plan.received, currency)}. Update the paycheck so your income follows what you actually receive? Later deposits from this payer will be recognised as this paycheck instead of being added again.`, [
+          { text: `Keep ${exactMoney(plan.previous, currency)}`, onPress: () => void onSave(learnSalaryFromRemovedDeposit(base, row, paycheckId, false)) },
+          { text: `Update to ${exactMoney(plan.received, currency)}`, onPress: () => void onSave(learnSalaryFromRemovedDeposit(base, row, paycheckId, true)) }
+        ]), 350);
+      } else await onSave(learnSalaryFromRemovedDeposit(base, row, paycheckId, false));
+      return;
+    }
+    const builtIn = REMOVAL_REASONS.find((item) => `built:${item.id}` === reason);
+    const label = builtIn ? builtIn.label : reason.startsWith("custom:") ? reason.slice(7) : otherText.trim();
+    const remembered = builtIn ? base : rememberRemovalReason(base, label);
+    await onSave(setRemovalRule(remembered, row, { reason: label, effect }, localDateKey()));
+  };
+  return <Modal visible transparent animationType="fade" onRequestClose={onClose}>
+    <View style={styles.onboardingBackdrop}>
+      <ScrollView style={{ maxHeight: "92%" }} contentContainerStyle={styles.onboardingCard} keyboardShouldPersistTaps="handled">
+        <Text style={styles.title}>Why did you remove this?</Text>
+        <Text style={styles.muted}>{row.payee} · {Number(row.amount) < 0 ? "deposit of " : ""}{exactMoney(received, currency)} · {row.date}</Text>
+        {options.map((option) => <Pressable key={option.value} accessibilityRole="radio" accessibilityState={{ selected: reason === option.value }} style={[styles.choice, reason === option.value && styles.choiceActive]} onPress={() => pick(option.value)}>
+          <Text style={[styles.choiceText, reason === option.value && styles.choiceTextActive]}>{option.label}</Text>
+        </Pressable>)}
+        {reason === "other" ? <TextInput style={styles.input} value={otherText} onChangeText={setOtherText} maxLength={80} placeholder="Say why, in your own words" autoFocus /> : null}
+        {reason === "salary" ? <>
+          <Text style={styles.label}>Which paycheck</Text>
+          <View style={styles.choiceRow}>
+            {candidates.map((paycheck) => <Pressable key={paycheck.id} style={[styles.choice, paycheckId === paycheck.id && styles.choiceActive]} onPress={() => setPaycheckId(paycheck.id)}><Text style={[styles.choiceText, paycheckId === paycheck.id && styles.choiceTextActive]}>{paycheck.name} ({exactMoney(Number(paycheck.amount), currency)})</Text></Pressable>)}
+            <Pressable style={[styles.choice, paycheckId === "new" && styles.choiceActive]} onPress={() => setPaycheckId("new")}><Text style={[styles.choiceText, paycheckId === "new" && styles.choiceTextActive]}>A new paycheck from this deposit</Text></Pressable>
+          </View>
+          {paycheckId === "new" ? <>
+            <Text style={styles.label}>How often is it paid</Text>
+            <View style={styles.choiceRow}>
+              {(["biweekly", "weekly", "monthly"] as const).map((value) => <Pressable key={value} style={[styles.choice, recurrence === value && styles.choiceActive]} onPress={() => setRecurrence(value)}><Text style={[styles.choiceText, recurrence === value && styles.choiceTextActive]}>{value === "biweekly" ? "Every two weeks" : value === "weekly" ? "Weekly" : "Monthly"}</Text></Pressable>)}
+            </View>
+          </> : null}
+        </> : null}
+        {reason && reason !== "salary" ? <>
+          <Text style={styles.label}>Next time a row like this arrives</Text>
+          <View style={styles.choiceRow}>
+            {([["hold", "Hold it in Bank stream"], ["skip", "Leave it out"], ["none", "Do nothing special"]] as const).map(([value, label]) => <Pressable key={value} style={[styles.choice, effect === value && styles.choiceActive]} onPress={() => setEffect(value)}><Text style={[styles.choiceText, effect === value && styles.choiceTextActive]}>{label}</Text></Pressable>)}
+          </View>
+        </> : null}
+        <View style={styles.onboardingActions}>
+          <Pressable style={[styles.secondaryButton, styles.onboardingAction]} onPress={onClose}><Text style={styles.secondaryButtonText}>Skip</Text></Pressable>
+          <Pressable style={[styles.primaryButton, styles.onboardingAction, !canSave && { opacity: 0.4 }]} disabled={!canSave} onPress={() => void finish()}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
+        </View>
+      </ScrollView>
+    </View>
   </Modal>;
 }
 
@@ -3204,7 +3301,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       const result = buildBankStreamDrafts({
         rows: rows.slice(0, 2000), fileName: asset.name, accountHint, idPrefix: isPdf ? "pdf-import" : "csv-import", transactions: state.transactions,
         existingDrafts: state.transactionInboxDrafts || [], accounts, rules: state.transactionCategorizationRules, createId: uniqueId,
-        transfers: state.transfers || [], knownBankIds: state.linkedImportedIds || [], removedSignatures: state.removedRowSignatures || []
+        transfers: state.transfers || [], knownBankIds: state.linkedImportedIds || [], removedSignatures: state.removedRowSignatures || [], removalRules: state.removalRules || []
       });
       const importedState = { ...state, transactionInboxDrafts: result.drafts };
       if (exceedsStateLimit(importedState)) {
@@ -3301,7 +3398,8 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
     if (draft.accountHistoryMatch) result.push({ label: "Account from history", tone: "info" });
     if (draft.possibleDuplicate) result.push({ label: "Possible duplicate", tone: "warn" });
     if (draft.refundMatch) result.push({ label: `Refund match (${money(Number(draft.refundMatch.amount), currency)} on ${draft.refundMatch.date})`, tone: "info" });
-    if (draft.transferMatch) result.push({ label: `Possible transfer (${accounts.find((account) => account.id === draft.transferMatch?.accountId)?.name || "other account"}, ${money(Math.abs(Number(draft.transferMatch.amount)), currency)})`, tone: "info" });
+    if (draft.removalRule) result.push({ label: `Removed before: ${draft.removalRule.reason}`, tone: "warn" });
+    if (draft.transferMatch && !draft.refundMatch) result.push({ label: `Possible transfer (${accounts.find((account) => account.id === draft.transferMatch?.accountId)?.name || "other account"}, ${money(Math.abs(Number(draft.transferMatch.amount)), currency)})`, tone: "info" });
     return result;
   };
 
@@ -3326,6 +3424,17 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
           <Text style={styles.rowDetail}>{(() => { const line = (state.budget.categories || []).flatMap((category) => category.lines.map((item) => ({ ...item, category: category.name }))).find((item) => item.id === entry.lineId); return line ? `${line.category} - ${line.name}` : "A Subcategory that no longer exists"; })()}</Text>
         </View>
         <Pressable style={styles.secondarySmall} onPress={() => void onSave(removeCategoryRule(state, entry.keys))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Remove</Text></Pressable>
+      </View>)}
+    </Card> : null}
+    {(state.removalRules || []).length ? <Card>
+      <Text style={styles.cardTitle}>Rows you removed</Text>
+      <Text style={styles.muted}>When you remove a row you say why, and FamilyLoop remembers it for that payee. Remove a rule to go back to treating those rows normally.</Text>
+      {(state.removalRules || []).map((rule) => <View key={rule.id} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{rule.payee}</Text>
+          <Text style={styles.rowDetail}>{rule.direction === "in" ? "Money in" : "Money out"} · {rule.reason} · {rule.effect === "skip" ? "left out automatically" : "held in Bank stream"}{rule.count > 1 ? ` · removed ${rule.count} times` : ""}</Text>
+        </View>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave(removeRemovalRule(state, rule.id))}><Text style={[styles.secondaryButtonText, { color: colors.coral }]}>Remove</Text></Pressable>
       </View>)}
     </Card> : null}
     {bulkPairs.length || bulkLedgerPairs.length || bulkSkips.length ? <Card>
@@ -4075,7 +4184,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         byAccount.forEach((rows, accountId) => {
           const built = buildBankStreamDrafts({
             rows: rows.map((row) => ({ date: row.date, payee: row.payee, amount: row.amount, externalId: row.externalId })), fileName: link.label, idPrefix: "linked-import",
-            transactions: working.transactions, existingDrafts: working.transactionInboxDrafts || [], accounts: working.accounts || [], rules: working.transactionCategorizationRules, createId: uniqueId, forcedAccountId: accountId
+            transactions: working.transactions, existingDrafts: working.transactionInboxDrafts || [], accounts: working.accounts || [], rules: working.transactionCategorizationRules, createId: uniqueId, forcedAccountId: accountId, removalRules: working.removalRules || []
           });
           const existing = new Set((working.transactionInboxDrafts || []).map((draft) => draft.id));
           built.drafts.forEach((draft) => { if (draft.id && !existing.has(draft.id)) newDraftIds.push(draft.id); });
