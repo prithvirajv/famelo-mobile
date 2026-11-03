@@ -181,3 +181,12 @@ test("linked rows with different bank ids are not duplicates of each other; the 
   assert.equal(isDuplicateTransaction({ externalId: "sf:a:1", amount: 10, date: "2026-10-12" }, [yesterday]), true);
   assert.equal(isDuplicateTransaction({ externalId: "sf:a:2", amount: 10, date: "2026-10-10" }, [{ amount: 10, date: "2026-10-10" }]), true);
 });
+
+test("a refund that nets against a posted purchase is not held as a possible transfer, but a plain look-alike still is", () => {
+  const refund = { lineId: "shopping", accountId: "card", amount: -25, lineSource: "refund" };
+  const ctx = { accountsExist: true, possibleDuplicate: false, accountClosedForDate: false, bankFeed: true };
+  const purchase = { lineId: "shopping", accountId: "card", amount: 25 };
+  assert.equal(autoAcceptDecision(refund, { ...ctx, refundMatch: purchase, refundMatchPosted: true, transferMatch: { accountId: "checking" } }).accept, true);
+  assert.equal(autoAcceptDecision(refund, { ...ctx, refundMatch: { ...purchase, lineId: "other" }, refundMatchPosted: true, transferMatch: { accountId: "checking" } }).reason, "refund");
+  assert.equal(autoAcceptDecision({ ...refund, lineSource: "history" }, { ...ctx, refundMatch: null, transferMatch: { accountId: "checking" } }).reason, "possible transfer");
+});
