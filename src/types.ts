@@ -62,7 +62,7 @@ export type PlannedMeal = { month?: string; week?: number; day: string; slot?: s
 export type WealthAsset = {
   id?: string; name: string; value: number; assetClass?: "other" | "cash" | "property" | "retirement" | "stock";
   symbol?: string; shares?: number; price?: number; costBasis?: number;
-  groupId?: string; groupName?: string; holdingType?: "stock" | "fund";
+  groupId?: string; groupName?: string; holdingType?: "stock" | "fund" | "cash";
   // Set on holdings/cash created by a SnapTrade link: "<linkId>:<remoteAccountId>" (+ ":cash"), so a sync updates them in place.
   linkedTo?: string;
 };

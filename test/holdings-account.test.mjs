@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountBalance, accountCashBalance, accountNetWorthValue, accountsWithBalances, computeNetWorthAtDate } from "../src/wealthLogic.ts";
+import { accountBalance, accountCashBalance, accountNetWorthValue, accountsWithBalances, computeNetWorthAtDate, updateHolding, assetClassLabelForHoldings } from "../src/wealthLogic.ts";
 import { reconcileMappedBalances } from "../src/linkedAccountsLogic.ts";
 
 const TODAY = "2026-11-02";
@@ -33,4 +33,12 @@ test("a bank sync of an account that holds investments matches holdings plus cas
   assert.equal(accountBalance("inv", ctx(next), TODAY), 1000);
   assert.equal(next.accounts.find((account) => account.id === "inv").openingBalance, 0);
   assert.equal(next.goals.netWorth.assets.filter((item) => item.linkedTo).length, 1);
+});
+
+test("a holding switched to Cash keeps its dollar value and drops the symbol, shares, cost and price; a group of only cash is labelled Cash", () => {
+  const cash = updateHolding({ ...fund("mm", 250), symbol: "ABC", costBasis: 10, shares: 5, price: 50 }, "holdingType", "cash");
+  assert.deepEqual([cash.holdingType, cash.symbol, cash.shares, cash.price, cash.value, cash.costBasis, cash.name], ["cash", "", 1, 250, 250, 0, "College 529 - Cash"]);
+  assert.equal(assetClassLabelForHoldings([cash]), "Cash");
+  assert.equal(assetClassLabelForHoldings([cash, fund("growth", 100)]), "Mixed");
+  assert.equal(updateHolding(cash, "holdingType", "fund").holdingType, "fund");
 });

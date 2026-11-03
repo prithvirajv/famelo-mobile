@@ -3962,8 +3962,8 @@ function HoldingsEditor({ state, groupId, currency, quoteFeedback, refreshingIds
           <Pressable style={styles.planStepperButton} onPress={() => removeRow(item.id)} accessibilityLabel={`Remove ${item.symbol || "this holding"}`}><Ionicons name="trash-outline" size={18} color={colors.coral} /></Pressable>
         </View>
         <View style={styles.choiceRow}>
-          {(["stock", "fund"] as const).map((type) => <Pressable key={type} style={[styles.choice, (item.holdingType || "stock") === type && styles.choiceActive]} onPress={() => commit(item.id, "holdingType", type)}>
-            <Text style={[styles.choiceText, (item.holdingType || "stock") === type && styles.choiceTextActive]}>{type === "stock" ? "Stock" : "Mutual fund"}</Text>
+          {(["stock", "fund", "cash"] as const).map((type) => <Pressable key={type} style={[styles.choice, (item.holdingType || "stock") === type && styles.choiceActive]} onPress={() => commit(item.id, "holdingType", type)}>
+            <Text style={[styles.choiceText, (item.holdingType || "stock") === type && styles.choiceTextActive]}>{type === "stock" ? "Stock" : type === "fund" ? "Mutual fund" : "Cash"}</Text>
           </Pressable>)}
         </View>
         <View style={styles.actionRow}>

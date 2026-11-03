@@ -34,9 +34,10 @@ export function groupStockHoldings(assets: WealthAsset[]): StockHoldingGroup[] {
 
 // A grouped holding card shows one label for the whole group ("Stocks",
 // "Mutual Funds", or "Mixed") instead of a per-holding asset-class field.
-export function assetClassLabelForHoldings(items: WealthAsset[]): "Stocks" | "Mutual Funds" | "Mixed" {
+export function assetClassLabelForHoldings(items: WealthAsset[]): "Stocks" | "Mutual Funds" | "Cash" | "Mixed" {
   const types = new Set(items.map((item) => item.holdingType || "stock"));
   if (types.size > 1) return "Mixed";
+  if (types.has("cash")) return "Cash";
   return types.has("fund") ? "Mutual Funds" : "Stocks";
 }
 
@@ -354,7 +355,15 @@ export function updateHolding(asset: WealthAsset, field: HoldingField, raw: stri
     next = { ...next, symbol, name: account ? `${account} - ${symbol}`.replace(/ - $/, "") : symbol };
     return next;
   }
-  if (field === "holdingType") return { ...next, holdingType: raw === "fund" ? "fund" : "stock" };
+  if (field === "holdingType") {
+    if (raw === "cash") {
+      // A cash holding (money held as cash inside the account) is just a dollar amount: it keeps its value and drops the symbol, shares, cost and price.
+      const amount = assetValue(asset);
+      const account = (asset.groupName || "").trim();
+      return { ...next, holdingType: "cash", symbol: "", shares: 1, price: amount, value: amount, costBasis: 0, name: account ? `${account} - Cash` : "Cash" };
+    }
+    return { ...next, holdingType: raw === "fund" ? "fund" : "stock" };
+  }
   if (field === "shares") {
     const shares = nonNegative(raw);
     if (costMode === "total") {
