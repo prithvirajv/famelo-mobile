@@ -3893,8 +3893,8 @@ function Reports({ state, onBack }: { state: HouseholdState; onBack: () => void 
   </Page>;
 }
 
-const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", credit_card: "Credit card", other: "Other" };
-const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "other", "credit_card"];
+const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = { checking: "Checking", savings: "Savings", cash: "Cash", investment: "Investment", credit_card: "Credit card", other: "Other" };
+const ACCOUNT_TYPE_ORDER: AccountType[] = ["checking", "savings", "cash", "investment", "other", "credit_card"];
 
 // Edits one stock/retirement holdings account (a "group"): its name, class, and every holding in it. Every
 // change is saved immediately through the whole-state save (no staged draft), like web's Manage holdings
@@ -4020,7 +4020,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
   // accounts, so ticking a whole group costs the same as ticking one.
   const [picked, setPicked] = useState<Record<string, string[]>>({});
   const [showIndividual, setShowIndividual] = useState<Record<string, boolean>>({});
-  const ACCOUNT_KINDS: Array<[string, string]> = [["checking", "Checking accounts"], ["savings", "Savings accounts"], ["credit_card", "Credit cards"], ["cash", "Cash accounts"], ["other", "Other accounts"]];
+  const ACCOUNT_KINDS: Array<[string, string]> = [["checking", "Checking accounts"], ["savings", "Savings accounts"], ["credit_card", "Credit cards"], ["cash", "Cash accounts"], ["investment", "Investment accounts"], ["other", "Other accounts"]];
   const pickableKinds = (link: LinkedLink) => {
     const byKind = new Map<string, Array<{ remoteId: string; name: string }>>();
     Object.entries(link.mappings || {}).forEach(([remoteId, mapping]) => {

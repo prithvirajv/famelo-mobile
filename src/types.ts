@@ -91,7 +91,7 @@ export type Iou = {
   accountId: string; settled: boolean; settledDate: string; receiptDocumentId?: string;
 };
 export type Friend = { id: string; name: string; email: string; invitedAt: string };
-export type AccountType = "checking" | "savings" | "cash" | "credit_card" | "other";
+export type AccountType = "checking" | "savings" | "cash" | "investment" | "credit_card" | "other";
 export type Account = {
   id: string; name: string; type: AccountType; openingBalance: number;
   netWorthAssetId: string; netWorthLiabilityId: string; createdAt: string;
