@@ -4084,7 +4084,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         working = { ...working, linkedImportedIds: rememberLinkedImportedIds(working.linkedImportedIds, posted.map((row) => row.externalId)) };
         working = updateAccountsSyncedFrom(working, link.mappings, payload.coverage, [...working.transactions, ...(working.transactionInboxDrafts || [])], localDateKey());
         working = markAccountsSynced(working, link.mappings, payload.accounts, localDateKey(), new Date().toISOString());
-        const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0);
+        const reconciled = reconcileMappedBalances(working, link.mappings, payload.accounts, (st, accountId) => accountsWithBalances(st, localDateKey()).find((account) => account.id === accountId)?.balance || 0, { linkId: link.id, createId: uniqueId });
         working = reconciled.state;
         // Accounts mapped to a holdings group: match the group's total to the bank balance (holdings keep their own detail).
         let groupsMatched = 0;

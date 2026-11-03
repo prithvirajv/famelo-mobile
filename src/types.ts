@@ -95,6 +95,8 @@ export type AccountType = "checking" | "savings" | "cash" | "investment" | "cred
 export type Account = {
   id: string; name: string; type: AccountType; openingBalance: number;
   netWorthAssetId: string; netWorthLiabilityId: string; createdAt: string;
+  // An Investment account that holds its own stocks/funds: the id of the holdings group inside it. Its balance is the holdings plus its cash.
+  holdingsGroupId?: string;
   // A closed account still allows backdated entries (on/before closedAt) but blocks any new
   // transaction/paycheck-deposit/transfer dated after it - see accountAllowsDate in the web app.
   closedAt?: string;

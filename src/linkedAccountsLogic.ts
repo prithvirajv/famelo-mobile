@@ -189,9 +189,25 @@ export function reconcileOpeningBalance(account: Pick<Account, "type" | "opening
 // Reconciles every mapped account to the balances in a sync payload; currentBalanceOf must return the account's derived balance now. The ledger
 // alone is matched to the bank (so the balance shown is the bank's); a Bank stream row posted later hands its amount back through the
 // opening balance (acceptDraft in bankStreamLogic), which keeps it there.
-export function reconcileMappedBalances(state: HouseholdState, mappings: Record<string, LinkedMapping>, remote: RemoteAccount[], currentBalanceOf: (state: HouseholdState, accountId: string) => number): { state: HouseholdState; updated: number } {
+export function reconcileMappedBalances(state: HouseholdState, mappings: Record<string, LinkedMapping>, remote: RemoteAccount[], currentBalanceOf: (state: HouseholdState, accountId: string) => number, holdings?: { linkId: string; createId: (seed: string) => string }): { state: HouseholdState; updated: number } {
   let updated = 0;
+  // An account that holds investments (holdingsGroupId) is matched through the balance-adjustment line inside its holdings: holdings plus the
+  // account's cash equal the bank's balance, and the opening balance (the cash) is left alone. Mirrors web's apply.
+  let assets = state.goals?.netWorth?.assets || [];
+  let assetsChanged = false;
+  (state.accounts || []).forEach((account) => {
+    if (!account.holdingsGroupId || !holdings) return;
+    const entry = remote.find((item) => mappings[item.remoteId]?.accountId === account.id);
+    if (!entry || entry.balance === null) return;
+    const held = assets.filter((item) => (item.assetClass === "stock" || item.assetClass === "retirement") && (item.groupId || item.id) === account.holdingsGroupId).reduce((sum, item) => sum + assetValueOf(item), 0);
+    const cash = currentBalanceOf(state, account.id) - held;
+    const result = applyBalanceToHoldingsGroup(assets, { linkId: holdings.linkId, remoteId: entry.remoteId, groupId: account.holdingsGroupId, groupName: account.name, balance: Number(entry.balance) - cash }, holdings.createId);
+    assets = result.assets;
+    assetsChanged = true;
+    if (result.adjustment) updated += 1;
+  });
   const accounts = (state.accounts || []).map((account) => {
+    if (account.holdingsGroupId && holdings) return account;
     const entry = remote.find((item) => mappings[item.remoteId]?.accountId === account.id);
     if (!entry || entry.balance === null) return account;
     const opening = reconcileOpeningBalance(account, currentBalanceOf(state, account.id), entry.balance);
@@ -199,7 +215,8 @@ export function reconcileMappedBalances(state: HouseholdState, mappings: Record<
     updated += 1;
     return { ...account, openingBalance: opening };
   });
-  return { state: updated ? { ...state, accounts } : state, updated };
+  const withAssets = assetsChanged ? { ...state, accounts, goals: { ...state.goals, netWorth: { liabilities: [], ...state.goals?.netWorth, assets } } } : { ...state, accounts };
+  return { state: updated || assetsChanged ? withAssets : state, updated };
 }
 
 export function assetValueOf(asset: WealthAsset): number {

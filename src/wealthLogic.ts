@@ -125,6 +125,8 @@ export function paycheckOccurrencesSince(paycheck: Paycheck, referenceDateKey: s
 export type AccountBalanceContext = {
   accounts: Account[]; transactions: Transaction[]; paychecks: Paycheck[];
   paycheckOccurrences: PaycheckOccurrence[]; transfers: Transfer[]; ious: Iou[];
+  // The net worth asset lines; needed so an account that holds investments (holdingsGroupId) can add what it holds.
+  assets?: WealthAsset[];
 };
 
 // The core balance-reconstruction function - an account's balance is never
@@ -133,7 +135,9 @@ export type AccountBalanceContext = {
 // historical trends). Ported verbatim from the web app; see the inline
 // comments below for the two easiest-to-get-backwards parts: the liability
 // vs. cash formula, and the IOU direction/settlement asymmetry.
-export function accountBalance(accountId: string, context: AccountBalanceContext, referenceDateKey: string): number {
+// The account's own money: opening balance plus its ledger, deposits and transfers. For an account that holds investments (holdingsGroupId) this
+// is only the uninvested cash.
+export function accountCashBalance(accountId: string, context: AccountBalanceContext, referenceDateKey: string): number {
   const { accounts, transactions, paychecks, paycheckOccurrences, transfers, ious } = context;
   const account = accounts.find((item) => item.id === accountId);
   if (!account) return 0;
@@ -185,7 +189,29 @@ export function accountBalance(accountId: string, context: AccountBalanceContext
   return opening + deposits - purchases - transfersOut + transfersIn + iouCashFlow;
 }
 
-export function accountsWithBalances(state: HouseholdState, referenceDateKey: string): Array<Account & { balance: number }> {
+// Current market value of a holdings group (the stocks/funds sharing a groupId), including any bank "balance adjustment" line in it.
+export function holdingsGroupTotal(assets: WealthAsset[] | undefined, groupId: string | undefined): number {
+  if (!groupId) return 0;
+  return (assets || []).filter((item) => isHoldingAssetClass(item.assetClass) && (item.groupId || item.id) === groupId).reduce((sum, item) => sum + assetValue(item), 0);
+}
+
+// An account that holds investments is worth what it holds plus its cash: a contribution lands as cash and raises the total, and buying shares
+// moves cash into holdings without changing it. Mirrors web's accountBalance.
+export function accountBalance(accountId: string, context: AccountBalanceContext, referenceDateKey: string): number {
+  const cash = accountCashBalance(accountId, context, referenceDateKey);
+  const account = context.accounts.find((item) => item.id === accountId);
+  if (!account || !account.holdingsGroupId || account.type === "credit_card") return cash;
+  return cash + holdingsGroupTotal(context.assets, account.holdingsGroupId);
+}
+
+// What the account's own net worth line is worth: only its cash when it holds investments (those are net worth lines of their own).
+export function accountNetWorthValue(accountId: string, context: AccountBalanceContext, referenceDateKey: string): number {
+  const account = context.accounts.find((item) => item.id === accountId);
+  if (account && account.holdingsGroupId && account.type !== "credit_card") return accountCashBalance(accountId, context, referenceDateKey);
+  return accountBalance(accountId, context, referenceDateKey);
+}
+
+export function accountsWithBalances(state: HouseholdState, referenceDateKey: string): Array<Account & { balance: number; cashBalance: number }> {
   const accounts = state.accounts || [];
   const context: AccountBalanceContext = {
     accounts,
@@ -193,9 +219,10 @@ export function accountsWithBalances(state: HouseholdState, referenceDateKey: st
     paychecks: state.paychecks || [],
     paycheckOccurrences: state.paycheckOccurrences || [],
     transfers: state.transfers || [],
-    ious: state.ious || []
+    ious: state.ious || [],
+    assets: state.goals?.netWorth?.assets || []
   };
-  return accounts.map((account) => ({ ...account, balance: accountBalance(account.id, context, referenceDateKey) }));
+  return accounts.map((account) => ({ ...account, balance: accountBalance(account.id, context, referenceDateKey), cashBalance: accountNetWorthValue(account.id, context, referenceDateKey) }));
 }
 
 export function monthEndDateKey(monthKey: string): string {
@@ -231,13 +258,14 @@ export function computeNetWorthAtDate(state: HouseholdState, referenceDateKey: s
     paychecks: state.paychecks || [],
     paycheckOccurrences: state.paycheckOccurrences || [],
     transfers: state.transfers || [],
-    ious: state.ious || []
+    ious: state.ious || [],
+    assets: state.goals?.netWorth?.assets || []
   };
   const assets = state.goals?.netWorth?.assets || [];
   const liabilities = state.goals?.netWorth?.liabilities || [];
   const assetTotal = assets.reduce((sum, asset) => {
     const linkedAccount = context.accounts.find((account) => account.netWorthAssetId === asset.id);
-    return sum + (linkedAccount ? accountBalance(linkedAccount.id, context, referenceDateKey) : assetValue(asset));
+    return sum + (linkedAccount ? accountNetWorthValue(linkedAccount.id, context, referenceDateKey) : assetValue(asset));
   }, 0);
   const liabilityTotal = liabilities.reduce((sum, liability) => {
     const linkedAccount = context.accounts.find((account) => account.netWorthLiabilityId === liability.id);

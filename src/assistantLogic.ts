@@ -34,7 +34,7 @@ export function assistantContext(state: HouseholdState, deps: Pick<AssistantDeps
 }
 
 export type AssistantFactsDeps = {
-  accountsWithBalances: (state: HouseholdState, referenceDateKey: string) => Array<Account & { balance: number }>;
+  accountsWithBalances: (state: HouseholdState, referenceDateKey: string) => Array<Account & { balance: number; cashBalance?: number }>;
   assetValue: (asset: WealthAsset) => number;
   groupStockHoldings: (assets: WealthAsset[]) => Group[];
   isHoldingAssetClass: (assetClass?: string) => boolean;
@@ -50,7 +50,7 @@ export function assistantFacts(state: HouseholdState, todayKey: string, money: (
   const assets = assetsOf(state);
   const liabilities = state.goals?.netWorth?.liabilities || [];
   const debts = state.goals?.debts || [];
-  const linkedBalance = (field: "netWorthAssetId" | "netWorthLiabilityId", id: string | undefined) => { const account = accounts.find((item) => item[field] === id && id); return account ? account.balance : null; };
+  const linkedBalance = (field: "netWorthAssetId" | "netWorthLiabilityId", id: string | undefined) => { const account = accounts.find((item) => item[field] === id && id); return account ? (field === "netWorthAssetId" ? account.cashBalance ?? account.balance : account.balance) : null; };
   const valueOf = (asset: WealthAsset) => { const linked = linkedBalance("netWorthAssetId", asset.id); return linked === null ? deps.assetValue(asset) : linked; };
   const liabilityOf = (liability: { id?: string; value?: number }) => { const linked = linkedBalance("netWorthLiabilityId", liability.id); return linked === null ? Number(liability.value || 0) : linked; };
   const lines: string[] = [`Today is ${todayKey}. Money is in ${state.household?.currency || "USD"}.`];
