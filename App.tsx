@@ -40,7 +40,7 @@ import type { AssistantAction } from "./src/assistantLogic";
 import { ANNUAL_EVENT_LABELS, ANNUAL_EVENT_TYPES, REMIND_BEFORE_OPTIONS, annualEventDisplayTitle, annualWishedKeys, buildAnnualEvent, nextPendingAnnualOccurrence, toggleAnnualWished, updateAnnualEvent, advanceRecurringReminder, buildCalendarCsv, buildCalendarIcs, buildPhotoReminderEvent, calendarDraftToItem, icsEventsToCalendarDrafts, parseCalendarCsv, parseIcsText, resolveImportAssignees, sanitizeCalendarDrafts, directionsUrl, matchesOwnerFilter, homeActionItems, homeWeekStrip, toggleReminderCompletion, choreCadenceLabels, choreCompletedKeys, completionKeyFor, currentChoreOccurrenceDate, effectiveAssignees, isChoreOccurrenceComplete, isReminderComplete, isValidClockTime, normalizeReminderPhotoDraft, reminderTiming, repairChoreCompletion, toggleChoreCompletion } from "./src/calendarLogic";
 import {
   isHoldingAssetClass, assetValue, computeTrailingMonthKeys, computeNetWorthAtDate, computeNetWorthTrend,
-  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss
+  accountsWithBalances, debtPayoffProgressPercent, applyDebtPayment, accountAllowsDate, buildTransfer, transfersNewestFirst, convertCurrency, displayCurrencyOptions, assetAllocationBreakdown, updateHolding, costDisplayValue, applyQuote, adoptHoldingGroup, newHoldingRow, newHoldingGroup, renameHoldingGroup, changeHoldingGroupClass, purgeBlankHoldings, removeHoldingGroup, formatRelativeTime, holdingsInGroup, groupStockHoldings, assetClassLabelForHoldings, holdingGainLoss, groupGainLoss, holdingsGroupTotal, startTrackingHoldings, stopTrackingHoldings, addHoldingToAccount
 } from "./src/wealthLogic";
 import type { CostEntryMode, HoldingField } from "./src/wealthLogic";
 import { ensurePaycheckOccurrencesGenerated, budgetIncomeFromPaychecks, paycheckIncomeForMonth, validatePaycheckPatch, updatePaycheck, setOccurrenceDate, assignBillToPaycheck, removeAssignedLine, paycheckAssignedAmount, paycheckMonthlyIncome, paycheckActiveInMonth } from "./src/paychecksLogic";
@@ -4328,7 +4328,9 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
   const netWorthAssets = state.goals?.netWorth?.assets || [];
   const netWorthLiabilities = state.goals?.netWorth?.liabilities || [];
   const plainAssets = netWorthAssets.filter((asset) => !isHoldingAssetClass(asset.assetClass));
-  const holdingGroups = groupStockHoldings(netWorthAssets);
+  const accountGroupIds = new Set(accounts.map((account) => account.holdingsGroupId).filter(Boolean) as string[]);
+  // Holdings inside an Investment account are shown and edited from that account's row, not listed again under Stock & fund holdings.
+  const holdingGroups = groupStockHoldings(netWorthAssets).filter((group) => !accountGroupIds.has(group.groupId));
 
   const currentMonth = state.budget.month;
   const trendMonths = computeTrailingMonthKeys(currentMonth, 6);
@@ -4357,6 +4359,27 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     Alert.alert("Close this account?", "New transactions after today will be blocked, but you can still backdate entries.", [{ text: "Cancel" }, {
       text: "Close", onPress: () => void onSave({ ...state, accounts: accounts.map((account) => account.id === accountId ? { ...account, closedAt: today() } : account) })
     }]);
+  };
+
+  // Track holdings: an Investment account's balance becomes what it holds plus its cash (see startTrackingHoldings in wealthLogic).
+  const trackHoldings = async (accountId: string) => {
+    const next = startTrackingHoldings(state, accountId, today(), uniqueId);
+    if (next === state) return;
+    await onSave(next);
+    const groupId = next.accounts.find((account) => account.id === accountId)?.holdingsGroupId;
+    if (groupId) setEditingGroupId(groupId);
+  };
+  const stopTracking = (account: Account) => {
+    const invested = holdingsGroupTotal(netWorthAssets, account.holdingsGroupId);
+    Alert.alert(`Stop tracking holdings for ${account.name}?`, `Its ${money(invested, currency)} of holdings are removed and counted as part of the account's balance again, so its balance and your net worth stay the same.`, [{ text: "Cancel" }, {
+      text: "Stop tracking", style: "destructive", onPress: () => { setEditingGroupId(null); void onSave(stopTrackingHoldings(state, account.id)); }
+    }]);
+  };
+  const editAccountHoldings = async (account: Account) => {
+    const groupId = account.holdingsGroupId;
+    if (!groupId) return;
+    if (!holdingsInGroup(netWorthAssets, groupId).length) await onSave(addHoldingToAccount(state, account.id, uniqueId));
+    await openHoldingsEditor(groupId);
   };
 
   const reopenAccount = (accountId: string) => void onSave({ ...state, accounts: accounts.map((account) => account.id === accountId ? { ...account, closedAt: "" } : account) });
@@ -4432,6 +4455,11 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
     setQuoteFeedback((prev) => ({ ...prev, ...feedback }));
     setRefreshingIds((prev) => prev.filter((id) => !withSymbol.some((asset) => asset.id === id)));
   };
+  const editingAccountGroup = !!editingGroupId && accountGroupIds.has(editingGroupId);
+  // For an account's holdings the editor opens right under the Accounts card, where the button was pressed, instead of far down the page.
+  const holdingsEditor = editingGroupId ? <HoldingsEditor state={state} groupId={editingGroupId} currency={currency} quoteFeedback={quoteFeedback} refreshingIds={refreshingIds}
+    onSave={onSave} onRefreshHolding={(assetId) => void refreshQuotes([assetId], { report: true })}
+    onRefreshGroup={(groupId) => void refreshQuotes(groupAssetIds(groupId), { stampGroupId: groupId, report: true })} onClose={() => setEditingGroupId(null)} /> : null;
   const groupAssetIds = (groupId: string) => holdingsInGroup(stateRef.current.goals?.netWorth?.assets || [], groupId).map((asset) => asset.id as string).filter(Boolean);
 
   const openHoldingsEditor = async (groupId: string) => {
@@ -4645,7 +4673,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       {accountsByType.length
         ? accountsByType.map((group) => <View key={group.type}>
             <Text style={[styles.label, { marginTop: 10 }]}>{ACCOUNT_TYPE_LABELS[group.type]}</Text>
-            {group.items.map((account) => <View key={account.id} style={styles.row}>
+            {group.items.map((account) => <React.Fragment key={account.id}><View style={styles.row}>
               <View style={styles.rowCopy}>
                 <Text style={styles.rowTitle}>{account.name}{account.closedAt ? " (closed)" : ""}</Text>
                 <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}{account.syncedFrom ? ` · Bank sync from ${account.syncedFrom}` : ""}{account.syncedThrough ? ` · through ${account.syncedThrough}${account.syncedThrough < localDateKey(new Date(Date.now() - 2 * 86400000)) ? " (behind)" : ""}` : ""}</Text>
@@ -4653,7 +4681,17 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
               <Text style={[styles.rowValue, account.type === "credit_card" && account.balance > 0 && { color: colors.coral }]}>{money(account.balance, currency)}</Text>
               {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : <Pressable style={styles.planStepperButton} accessibilityLabel={`Reopen ${account.name}`} onPress={() => reopenAccount(account.id)}><Ionicons name="lock-open-outline" size={18} color={colors.muted} /></Pressable>}
               <Pressable style={styles.planStepperButton} onPress={() => deleteAccount(account.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
-            </View>)}
+            </View>
+            {account.holdingsGroupId ? <View style={styles.accountHoldingsBlock}>
+              <Text style={styles.rowDetail}>Holds {money(holdingsGroupTotal(netWorthAssets, account.holdingsGroupId), currency)}{Math.abs(account.balance - holdingsGroupTotal(netWorthAssets, account.holdingsGroupId)) >= 0.005 ? ` + ${money(account.balance - holdingsGroupTotal(netWorthAssets, account.holdingsGroupId), currency)} cash` : ""}</Text>
+              <View style={styles.actionRow}>
+                <Pressable style={styles.secondarySmall} onPress={() => void editAccountHoldings(account)}><Text style={styles.secondaryButtonText}>Edit holdings</Text></Pressable>
+                <Pressable style={styles.secondarySmall} onPress={() => stopTracking(account)}><Text style={styles.secondaryButtonText}>Stop tracking holdings</Text></Pressable>
+              </View>
+            </View> : account.type === "investment" && !account.closedAt ? <View style={styles.accountHoldingsBlock}>
+              <Pressable style={styles.secondarySmall} onPress={() => void trackHoldings(account.id)}><Text style={styles.secondaryButtonText}>Track holdings</Text></Pressable>
+            </View> : null}
+            </React.Fragment>)}
           </View>)
         : <Text style={styles.muted}>No accounts yet</Text>}
       <Text style={[styles.label, { marginTop: 14 }]}>Add account</Text>
@@ -4667,6 +4705,8 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       <TextInput style={styles.input} value={newAccountOpening} onChangeText={setNewAccountOpening} placeholder="0.00" keyboardType="decimal-pad" />
       <Pressable style={styles.secondarySmall} onPress={() => void submitAddAccount()}><Text style={styles.secondaryButtonText}>Add account</Text></Pressable>
     </Card>
+
+    {editingAccountGroup ? holdingsEditor : null}
 
     <Card>
       <Text style={styles.cardTitle}>Transfers</Text>
@@ -4777,9 +4817,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       <Pressable style={styles.secondarySmall} onPress={() => void submitAddFund()}><Text style={styles.secondaryButtonText}>Add goal</Text></Pressable>
     </Card>
 
-    {editingGroupId ? <HoldingsEditor state={state} groupId={editingGroupId} currency={currency} quoteFeedback={quoteFeedback} refreshingIds={refreshingIds}
-      onSave={onSave} onRefreshHolding={(assetId) => void refreshQuotes([assetId], { report: true })}
-      onRefreshGroup={(groupId) => void refreshQuotes(groupAssetIds(groupId), { stampGroupId: groupId, report: true })} onClose={() => setEditingGroupId(null)} /> : <Card>
+    {editingGroupId && !editingAccountGroup ? holdingsEditor : <Card>
       <Text style={styles.cardTitle}>Stock &amp; fund holdings</Text>
       {holdingGroups.length ? holdingGroups.map((group) => {
         const groupTotal = group.items.reduce((sum, item) => sum + assetValue(item), 0);
@@ -5148,7 +5186,7 @@ const styles = StyleSheet.create({
   journalPhotoRow: { marginTop: 10 }, journalPhoto: { width: 72, height: 72, borderRadius: 8, marginRight: 8 },
   multilineInput: { height: 90, textAlignVertical: "top", paddingTop: 12 },
   householdRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border }, dangerButton: { alignItems: "center", padding: 15, borderRadius: 8, backgroundColor: "#fff0f0", borderWidth: 1, borderColor: "#ffd6d6" }, dangerText: { color: colors.coral, fontWeight: "800" },
-  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, primarySmall: { flex: 1, minHeight: 44, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", borderRadius: 7, backgroundColor: colors.green }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
+  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 8 }, choice: { paddingHorizontal: 12, paddingVertical: 9, borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }, choiceActive: { backgroundColor: colors.green, borderColor: colors.green }, choiceText: { color: colors.text, fontWeight: "700" }, choiceTextActive: { color: "white" }, recipeChoice: { padding: 11, borderWidth: 1, borderColor: colors.border, borderRadius: 7, marginTop: 7 }, actionRow: { flexDirection: "row", gap: 8, marginBottom: 8 }, accountHoldingsBlock: { paddingBottom: 8, gap: 6 }, secondarySmall: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, primarySmall: { flex: 1, minHeight: 44, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", borderRadius: 7, backgroundColor: colors.green }, successText: { color: colors.green, fontWeight: "700", marginVertical: 7 },
   dayNavRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 8 }, dayNavLabel: { flex: 1, alignItems: "center" }, planStepperButton: { minHeight: 44, minWidth: 52, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 7 }, planTaskBlock: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border }, subtaskList: { marginLeft: 8, marginBottom: 8 },
   documentsBreadcrumbRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", paddingVertical: 6 }, documentsBreadcrumbItem: { flexDirection: "row", alignItems: "center" }, documentsBreadcrumbText: { color: colors.muted, fontWeight: "700" }, documentsBreadcrumbActive: { color: colors.text },
   assistantFab: { position: "absolute", right: 16, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.green, borderRadius: 24, paddingVertical: 10, paddingHorizontal: 16, elevation: 4, shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 6, shadowOffset: { width: 0, height: 2 } },

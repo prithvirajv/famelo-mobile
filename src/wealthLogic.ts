@@ -499,3 +499,45 @@ export function assetAllocationBreakdown(assets: WealthAsset[]): AllocationSegme
     .map((key) => ({ key, label: labels[key], value: groups[key], percent: total ? Math.round((groups[key] / total) * 100) : 0 }))
     .sort((a, b) => b.value - a.value);
 }
+
+const roundCents = (value: number): number => Math.round(value * 100) / 100;
+
+// ---- Investment accounts that hold their own stocks and funds (account.holdingsGroupId) ----
+// Mirrors web's Track holdings. Turning it on moves the account's current balance into one placeholder holding ("Balance before holdings", or
+// "New holding" when the balance is zero) for the person to replace with the real funds, and starts the cash at zero, so the balance and net
+// worth do not move. Turning it off drops the holdings and hands their value back to the opening balance, again leaving the balance as it was.
+export function startTrackingHoldings(state: HouseholdState, accountId: string, referenceDateKey: string, createId: (seed: string) => string): HouseholdState {
+  const account = (state.accounts || []).find((item) => item.id === accountId);
+  if (!account || account.holdingsGroupId || account.type === "credit_card" || !state.goals) return state;
+  const netWorth = state.goals.netWorth || { assets: [], liabilities: [] };
+  const balance = accountBalance(account.id, { accounts: state.accounts || [], transactions: state.transactions || [], paychecks: state.paychecks || [], paycheckOccurrences: state.paycheckOccurrences || [], transfers: state.transfers || [], ious: state.ious || [], assets: netWorth.assets }, referenceDateKey);
+  const invested = Math.max(0, roundCents(balance));
+  const groupId = createId(`${account.name}-holdings`);
+  const assets: WealthAsset[] = [...netWorth.assets, { id: createId(`${account.name}-holding`), name: invested > 0 ? "Balance before holdings" : "New holding", value: invested, assetClass: "stock", symbol: "", shares: 1, price: invested, costBasis: 0, holdingType: "fund", groupId, groupName: account.name }];
+  // The account's own net worth line now carries only its cash; an account that never had one (made on mobile) gets one so the cash still counts.
+  let netWorthAssetId = account.netWorthAssetId;
+  if (!netWorthAssetId) {
+    netWorthAssetId = createId(account.name);
+    assets.push({ id: netWorthAssetId, name: account.name, value: 0, assetClass: "cash" });
+  }
+  const accounts = (state.accounts || []).map((item) => item.id === accountId ? { ...item, holdingsGroupId: groupId, netWorthAssetId, openingBalance: roundCents(Number(item.openingBalance || 0) - invested) } : item);
+  return { ...state, accounts, goals: { ...state.goals, netWorth: { ...netWorth, assets } } };
+}
+
+export function stopTrackingHoldings(state: HouseholdState, accountId: string): HouseholdState {
+  const account = (state.accounts || []).find((item) => item.id === accountId);
+  if (!account || !account.holdingsGroupId || !state.goals?.netWorth) return state;
+  const groupId = account.holdingsGroupId;
+  const invested = holdingsGroupTotal(state.goals.netWorth.assets, groupId);
+  const assets = removeHoldingGroup(state.goals.netWorth.assets, groupId);
+  const accounts = (state.accounts || []).map((item) => item.id === accountId ? { ...item, holdingsGroupId: "", openingBalance: roundCents(Number(item.openingBalance || 0) + invested) } : item);
+  return { ...state, accounts, goals: { ...state.goals, netWorth: { ...state.goals.netWorth, assets } } };
+}
+
+// A tracked account whose holdings were all deleted has no group left to open; this puts one blank holding back in it.
+export function addHoldingToAccount(state: HouseholdState, accountId: string, createId: (seed: string) => string): HouseholdState {
+  const account = (state.accounts || []).find((item) => item.id === accountId);
+  if (!account || !account.holdingsGroupId || !state.goals?.netWorth) return state;
+  const holding: WealthAsset = { id: createId(`${account.name}-holding`), name: "New holding", value: 0, assetClass: "stock", symbol: "", shares: 1, price: 0, costBasis: 0, holdingType: "fund", groupId: account.holdingsGroupId, groupName: account.name };
+  return { ...state, goals: { ...state.goals, netWorth: { ...state.goals.netWorth, assets: [...state.goals.netWorth.assets, holding] } } };
+}
