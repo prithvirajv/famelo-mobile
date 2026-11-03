@@ -61,7 +61,7 @@ import type { AutoContributeChoice } from "./src/goalsLogic";
 import { visibleNotes, allLabels, toggleLabel, setNoteReminder, setNoteBill, trashNote, restoreNote, purgeExpiredTrash, duplicateNote, editChecklistText, deleteChecklistItem, toggleIndent, moveChecklistItem as moveNoteItem, bucketChecklistItems } from "./src/notesLogic";
 import type { NotesView } from "./src/notesLogic";
 import { noteLinkedImages, imageContentType, photoFileName } from "./src/notePhotosLogic";
-import { parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, rememberRemovedRow, learnFromBulkLineChange, learnedExamples, learnedAccountExamples, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
+import { guessAccountType, parseBankCsvTransactions, buildBankStreamDrafts, previewTransactionCleanup, applyTransactionCleanup, removedTransactionsCsv, cleanupSummary, draftsNeedingAi, applyAiSuggestions, autoAcceptSafeDrafts, adoptPostedRefunds, importSummary, AI_IMPORT_CHUNK_SIZE, reviewDrafts, pendingDraftCountsByAccount, acceptDraft, dismissDraft, updateDraft, clearDraftsForAccount, moveDraftToTransfer, learnFromLineChange, setPayeeRule, categoryRuleEntries, removeCategoryRule, splitRecordWithFriends, exceedsStateLimit, setCategorizationRule, displayDraftAmount, storedDraftAmount, setAccountForUnlinkedDrafts, clearHistorySuggestions, sortDrafts, planBulkTransfers, planBulkLedgerTransfers, draftsAfterPairs, planBulkDuplicateSkips, transferRepeatOf, findDuplicateTransfer, planDuplicateTransferRemoval, planPaycheckLearning, applyPaycheckLearning, rememberRemovedRow, learnFromBulkLineChange, learnedExamples, learnedAccountExamples, applyBulkTransfers, applyBulkLedgerTransfers, applyBulkDuplicateSkips } from "./src/bankStreamLogic";
 import type { DraftReview, DraftSortField, FriendShare, IouSource, ParsedBankRow, SplitWithFriendsOptions } from "./src/bankStreamLogic";
 import type { LedgerSortField, RecurringRepeat } from "./src/budgetLogic";
 import { addCategory, addLine, updateLine, budgetDeletionImpact, deleteBudgetLines, allBudgetLines, lineSnapshot, makeTransaction, transactionAssignmentLabel, addTagsDeduped, removeTag, tagSuggestions, setTransactionTags, splitEditorInitialRows, splitRemaining, canSaveSplit, applySplit, removeSplit, applyLineToTransactions, sortLedgerEntries, filterCategoriesByOwner, ensureRecurringExpensesPosted, addRecurringExpense, updateRecurringExpense, deleteRecurringExpense, RECURRING_REPEAT_LABELS } from "./src/budgetLogic";
@@ -4002,7 +4002,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
   const [feedback, setFeedback] = useState("");
   const [busyId, setBusyId] = useState("");
   const [token, setToken] = useState(""); const [label, setLabel] = useState("");
-  const [mapping, setMapping] = useState<{ linkId: string; remote: RemoteAccount[]; choices: Record<string, string> } | null>(null);
+  const [mapping, setMapping] = useState<{ linkId: string; remote: RemoteAccount[]; choices: Record<string, string>; types?: Record<string, AccountType> } | null>(null);
   const [picking, setPicking] = useState<string | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -4204,9 +4204,8 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         const group = groupStockHoldings(working.goals?.netWorth?.assets || []).find((item) => item.groupId === choice.slice(6));
         if (group) mappings[remote.remoteId] = { groupId: group.groupId, groupName: group.groupName };
       } else if (choice === "new") {
-        const isCard = remote.balance !== null && remote.balance < 0;
         const name = remote.orgName ? `${remote.orgName} ${remote.name}` : remote.name;
-        const account: Account = { id: uniqueId(name), name, type: isCard ? "credit_card" : "checking", openingBalance: 0, netWorthAssetId: "", netWorthLiabilityId: "", createdAt: localDateKey() };
+        const account: Account = { id: uniqueId(name), name, type: newTypeFor(remote), openingBalance: 0, netWorthAssetId: "", netWorthLiabilityId: "", createdAt: localDateKey() };
         working = { ...working, accounts: [...(working.accounts || []), account] };
         mappings[remote.remoteId] = { accountId: account.id };
       } else {
@@ -4244,6 +4243,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
       // A loan the bank reports can drive a debt: its remaining balance follows what the bank says is owed.
       ...(state.goals?.debts || []).filter((debt) => debt.id).map((debt) => ({ label: `${debt.name} (loan, match amount owed)`, onPress: () => set(`debt:${debt.id}`) }))];
   };
+  const newTypeFor = (remote: RemoteAccount): AccountType => mapping?.types?.[remote.remoteId] || guessAccountType(remote);
   const choiceLabel = (remote: RemoteAccount): string => {
     const choice = mapping?.choices[remote.remoteId] || "skip";
     if (choice === "skip") return activeLink?.provider === "snaptrade" ? "Don't track" : "Don't import";
@@ -4299,6 +4299,10 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
         <Text style={styles.rowDetail}>{remote.orgName}{remote.balance !== null ? ` · ${money(remote.balance, state.household.currency)}` : ""}</Text>
         <Pressable style={styles.secondarySmall} onPress={() => setPicking(picking === remote.remoteId ? null : remote.remoteId)}><Text style={styles.secondaryButtonText}>{choiceLabel(remote)}</Text></Pressable>
         {picking === remote.remoteId ? <OptionList title="Send this account to" options={optionsFor(remote)} onClose={() => setPicking(null)} /> : null}
+        {activeLink.provider !== "snaptrade" && mapping.choices[remote.remoteId] === "new" ? <>
+          <Pressable style={styles.secondarySmall} onPress={() => setPicking(picking === `type:${remote.remoteId}` ? null : `type:${remote.remoteId}`)}><Text style={styles.secondaryButtonText}>Type: {ACCOUNT_TYPE_LABELS[newTypeFor(remote)]}</Text></Pressable>
+          {picking === `type:${remote.remoteId}` ? <OptionList title="Type of the new account" options={ACCOUNT_TYPE_ORDER.map((type) => ({ label: ACCOUNT_TYPE_LABELS[type], onPress: () => setMapping((prev) => prev ? { ...prev, types: { ...(prev.types || {}), [remote.remoteId]: type } } : prev) }))} onClose={() => setPicking(null)} /> : null}
+        </> : null}
       </View>) : <Text style={styles.muted}>No accounts found yet.{activeLink.provider === "snaptrade" ? " Finish connecting in the browser, then choose accounts again." : ""}</Text>}
       <View style={styles.actionRow}>
         <Pressable style={[styles.primaryButton, { flex: 1, marginTop: 0 }]} onPress={() => void saveMapping()}><Text style={styles.primaryButtonText}>Save and sync</Text></Pressable>
@@ -4354,6 +4358,8 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
       text: "Close", onPress: () => void onSave({ ...state, accounts: accounts.map((account) => account.id === accountId ? { ...account, closedAt: today() } : account) })
     }]);
   };
+
+  const reopenAccount = (accountId: string) => void onSave({ ...state, accounts: accounts.map((account) => account.id === accountId ? { ...account, closedAt: "" } : account) });
 
   const deleteAccount = (accountId: string) => {
     Alert.alert("Delete this account?", "This cannot be undone. Its linked net worth entry (if any) will be removed too.", [{ text: "Cancel" }, {
@@ -4645,7 +4651,7 @@ function Wealth({ state, onSave, onBack }: { state: HouseholdState; onSave: (nex
                 <Text style={styles.rowDetail}>{account.closedAt ? `Closed ${account.closedAt}` : `Since ${account.createdAt}`}{account.syncedFrom ? ` · Bank sync from ${account.syncedFrom}` : ""}{account.syncedThrough ? ` · through ${account.syncedThrough}${account.syncedThrough < localDateKey(new Date(Date.now() - 2 * 86400000)) ? " (behind)" : ""}` : ""}</Text>
               </View>
               <Text style={[styles.rowValue, account.type === "credit_card" && account.balance > 0 && { color: colors.coral }]}>{money(account.balance, currency)}</Text>
-              {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : null}
+              {!account.closedAt ? <Pressable style={styles.planStepperButton} onPress={() => closeAccount(account.id)}><Ionicons name="lock-closed-outline" size={18} color={colors.muted} /></Pressable> : <Pressable style={styles.planStepperButton} accessibilityLabel={`Reopen ${account.name}`} onPress={() => reopenAccount(account.id)}><Ionicons name="lock-open-outline" size={18} color={colors.muted} /></Pressable>}
               <Pressable style={styles.planStepperButton} onPress={() => deleteAccount(account.id)}><Ionicons name="close" size={18} color={colors.coral} /></Pressable>
             </View>)}
           </View>)

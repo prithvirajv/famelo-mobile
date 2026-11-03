@@ -8,7 +8,7 @@
 //
 // Self-contained on purpose: logic files cannot import each other's values (see the repo notes), so the few small
 // helpers it shares with other logic files (CSV splitting, closed-account rule, line snapshots) are repeated here.
-import type { Account, HouseholdState, InboxDraft, Iou, IouDirection, Paycheck, Transaction, Transfer } from "./types";
+import type { Account, AccountType, HouseholdState, InboxDraft, Iou, IouDirection, Paycheck, Transaction, Transfer } from "./types";
 
 // ---- small shared helpers (repeated copies, see header) ----------------------------------------------------------
 function parseDateKey(value: string): Date {
@@ -1324,4 +1324,25 @@ export function removedTransactionsCsv(preview: CleanupPreview, accountNameOf: (
 
 export function cleanupSummary(removedLedger: number, removedStream: number): string {
   return `Removed ${removedLedger} ledger transaction${removedLedger === 1 ? "" : "s"} and ${removedStream} Bank stream row${removedStream === 1 ? "" : "s"}.`;
+}
+
+// SimpleFIN reports no account type - only a name, the institution and a balance - so a newly linked account's Type is guessed from those
+// words. It only pre-fills the picker in "Where should each account go?"; the person can correct it before the account is created.
+// Explicit words win over the institution (a "Schwab Savings" is savings), and a negative balance is the last hint for a card.
+// Kept identical to guessAccountType in web's lib/shared-logic.js.
+const GUESS_INVESTMENT_WORDS = /\b(brokerage|ira|roth|rollover|retirement|investments?|investing|stocks?)\b|\b(401\s?\(?k|403\s?\(?b|457|529)/;
+const GUESS_SAVINGS_WORDS = /\b(savings|money market|mma)\b/;
+const GUESS_CHECKING_WORDS = /\b(checking|chequing|everyday|spending)\b/;
+const GUESS_CARD_WORDS = /\b(credit|cards?|visa|mastercard|amex|american express|discover|quicksilver|savor|venture|sapphire|freedom|rewards)\b/;
+const GUESS_INVESTMENT_INSTITUTIONS = /\b(vanguard|fidelity|schwab|e\*?trade|robinhood|betterment|wealthfront|merrill|tiaa|empower|t\.? rowe|interactive brokers)\b/;
+
+export function guessAccountType({ name = "", orgName = "", balance = null }: { name?: string; orgName?: string; balance?: number | null } = {}): AccountType {
+  const text = `${orgName || ""} ${name || ""}`.toLowerCase();
+  if (GUESS_INVESTMENT_WORDS.test(text)) return "investment";
+  if (GUESS_SAVINGS_WORDS.test(text)) return "savings";
+  if (GUESS_CHECKING_WORDS.test(text)) return "checking";
+  if (GUESS_CARD_WORDS.test(text)) return "credit_card";
+  if (GUESS_INVESTMENT_INSTITUTIONS.test(text)) return "investment";
+  if (balance !== null && balance !== undefined && Number(balance) < 0) return "credit_card";
+  return "checking";
 }
