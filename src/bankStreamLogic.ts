@@ -89,6 +89,8 @@ export function normalizeCsvDate(value: unknown): string {
 
 // Real header text from real issuers' exports: "Posting Date" (Chase), "Post Date"/"Trans. Date" (Discover).
 const CSV_DATE_HEADERS = ["date", "transaction date", "posted date", "trans date", "posting date", "post date", "trans. date"];
+// A file with both a transaction date and a post date uses the posted one: it is the date a linked bank reports for the same charge.
+const CSV_POST_DATE_HEADERS = ["post date", "posted date", "posting date"];
 const CSV_PAYEE_HEADERS = ["description", "payee", "merchant", "name"];
 const CSV_AMOUNT_HEADERS = ["amount"];
 const CSV_DEBIT_HEADERS = ["debit"];
@@ -133,7 +135,11 @@ export function parseBankCsvTransactions(text: string): ParsedBankRow[] {
   if (headerIndex === -1) return parseHeaderlessWellsFargoCsv(rows);
   const header = (rows[headerIndex] as string[]).map((cell) => String(cell || "").trim().toLowerCase());
   const indexIn = (names: string[]) => header.findIndex((cell) => names.includes(cell));
-  const dateIndex = indexIn(CSV_DATE_HEADERS);
+  const firstDateIndex = indexIn(CSV_DATE_HEADERS);
+  const postDateIndex = indexIn(CSV_POST_DATE_HEADERS);
+  const hasOtherDateColumn = header.some((name, index) => CSV_DATE_HEADERS.includes(name) && index !== postDateIndex);
+  const dateIndex = postDateIndex !== -1 && hasOtherDateColumn ? postDateIndex : firstDateIndex;
+  const fallbackDateIndex = dateIndex !== firstDateIndex ? firstDateIndex : -1;
   const payeeIndex = indexIn(CSV_PAYEE_HEADERS);
   const amountIndex = indexIn(CSV_AMOUNT_HEADERS);
   const debitIndex = indexIn(CSV_DEBIT_HEADERS);
@@ -160,7 +166,7 @@ export function parseBankCsvTransactions(text: string): ParsedBankRow[] {
 
   const results: ParsedBankRow[] = [];
   dataRows.forEach((row) => {
-    const date = normalizeCsvDate(cell(row, dateIndex));
+    const date = normalizeCsvDate(cell(row, dateIndex)) || (fallbackDateIndex !== -1 ? normalizeCsvDate(cell(row, fallbackDateIndex)) : "");
     const payee = String(cell(row, payeeIndex)).trim();
     let amount = NaN;
     let isDeposit = false;

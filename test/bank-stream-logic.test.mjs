@@ -99,7 +99,9 @@ test("real issuers' header spellings (Posting Date, Trans. Date) are recognized"
   const chase = ["Details,Posting Date,Description,Amount,Type,Balance", "DEBIT,06/12/2026,SAMPLE COFFEE SHOP,-4.75,DEBIT_CARD,1200.00", "CREDIT,06/09/2026,SAMPLE PAYROLL,1500.00,ACH_CREDIT,1266.85"].join("\n");
   assert.deepEqual(parseBankCsvTransactions(chase), [{ date: "2026-06-12", payee: "SAMPLE COFFEE SHOP", amount: 4.75 }, { date: "2026-06-09", payee: "SAMPLE PAYROLL", amount: -1500, isDeposit: true }]);
   const discover = ["Trans. Date,Post Date,Description,Amount,Category", "06/12/2026,06/13/2026,SAMPLE RESTAURANT,25.40,Restaurants", "06/09/2026,06/10/2026,SAMPLE PAYMENT - THANK YOU,-400.00,Payments"].join("\n");
-  assert.deepEqual(parseBankCsvTransactions(discover), [{ date: "2026-06-12", payee: "SAMPLE RESTAURANT", amount: 25.4 }, { date: "2026-06-09", payee: "SAMPLE PAYMENT - THANK YOU", amount: -400, isPayment: true }]);
+  assert.deepEqual(parseBankCsvTransactions(discover), [{ date: "2026-06-13", payee: "SAMPLE RESTAURANT", amount: 25.4 }, { date: "2026-06-10", payee: "SAMPLE PAYMENT - THANK YOU", amount: -400, isPayment: true }], "both a transaction date and a post date: the post date is used");
+  const chaseCard = ["Transaction Date,Post Date,Description,Category,Type,Amount,Memo", "11/15/2026,11/17/2026,SAMPLE PEST CONTROL,Home,Sale,-26.66,", "11/20/2026,,SAMPLE NO POST DATE,Home,Sale,-5.00,"].join("\n");
+  assert.deepEqual(parseBankCsvTransactions(chaseCard).map((row) => row.date), ["2026-11-17", "2026-11-20"], "a row without a post date keeps its transaction date");
 });
 
 test("a headerless 5-column export is recognized by structure, and a lookalike that isn't a date/amount file returns nothing", () => {
