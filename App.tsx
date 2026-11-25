@@ -50,8 +50,9 @@ import { JOURNAL_MOODS, JOURNAL_MOOD_EMOJI, JOURNAL_MOOD_COLOR, JOURNAL_MAX_PHOT
 import { homeNoteReminders, homeRecentActivity, billAndGoalReminders, dismissBudgetReminder, homeBriefingFacts, budgetPlanSuggestions, applyPlanSuggestion } from "./src/homeLogic";
 import { applyDetectedSalaries, keepDetectedSalary, undoDetectedSalary, detectedSalaryNotices, salaryRecurrenceLabel } from "./src/salaryLogic";
 import type { HomeBriefing } from "./src/homeLogic";
-import { linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom, markAccountsSynced, bankSyncFacts, bankSyncProblems } from "./src/linkedAccountsLogic";
+import { householdSizeInfo, linkedStatusText, linkNeedsAutoSync, selectNewLinkedTransactions, rememberLinkedImportedIds, knownLinkedIds, reconcileMappedBalances, mergeBrokeragePositions, applyBalanceToHoldingsGroup, matchDebtToBankBalance, simplefinSummary, newAccountsNotice, isNewRemoteAccount, waitingBanner, historyImportFits, isRealDateKey, historyGapDialogText, historyGapMonths, addHistoryGapNotices, updateAccountsSyncedFrom, markAccountsSynced, bankSyncFacts, bankSyncProblems } from "./src/linkedAccountsLogic";
 import type { LinkedLink, LinkedMapping, LinkedOverview, RemoteAccount } from "./src/linkedAccountsLogic";
+import { foundRepayments, applyPayback, statementGaps, monthRunsLabel, stuckPendingAccounts, bankSyncOkText, householdSizeBreakdown } from "./src/paybackLogic";
 import { saveRecipe, deleteRecipe, validateRecipe, recipesFilteredSorted, plannedRecipeIds, planMealSlot, clearMealSlot, mealInSlot, mealNutritionTotals, groceryListByAisle } from "./src/mealsLogic";
 import type { RecipeFilter, RecipeSort } from "./src/mealsLogic";
 import { sortDecisions, createDecision, updateDecision, addDecisionItem, editDecisionItem, removeDecisionItem, moveDecisionItem, markDecided, reopenDecision, canAttachToDecision, addDecisionAttachment, removeDecisionAttachment, attachmentDocumentIds } from "./src/decisionsLogic";
@@ -854,9 +855,30 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
   useEffect(() => { void loadBriefing(false); }, [loadBriefing]);
   // What needs attention about the bank sync (a bank that needs signing in again, a run that did not finish, data that is days old).
   const [syncProblems, setSyncProblems] = useState<Array<{ title: string; detail: string }>>([]);
+  const [syncOk, setSyncOk] = useState("");
+  // Deposits already in the ledger that clearly repay one charge, months with nothing recorded on an account that is in use, and how full the saved data is.
+  const found = useMemo(() => foundRepayments(state.transactions, today) as Array<{ charge: HouseholdState["transactions"][number]; rows: HouseholdState["transactions"]; total: number; share: number }>, [state.transactions, today]);
+  const gaps = useMemo(() => statementGaps({ accounts: state.accounts, transactions: state.transactions, drafts: state.transactionInboxDrafts, notices: state.historyGapNotices, ignored: (state as { statementGapIgnored?: string[] }).statementGapIgnored, today }) as Array<{ accountId: string; accountName: string; months: string[] }>, [state.accounts, state.transactions, state.transactionInboxDrafts, state.historyGapNotices, today]);
+  const size = useMemo(() => householdSizeInfo(state), [state]);
+  const linkFound = (which: number | "all") => {
+    const next: HouseholdState = JSON.parse(JSON.stringify(state));
+    const groups = (foundRepayments(next.transactions, today) as Array<{ charge: HouseholdState["transactions"][number]; rows: HouseholdState["transactions"] }>).filter((group) => which === "all" || next.transactions.indexOf(group.charge) === which);
+    let linked = 0;
+    groups.forEach((group) => { const result = applyPayback(group.charge, group.rows); if (result.ok) { linked += result.linked; group.rows.forEach((row) => Object.assign(row, lineSnapshot(next, row.lineId || ""))); } });
+    if (linked) void onSave(next);
+  };
   useEffect(() => {
     let live = true;
-    void api.linkedAccounts().then((overview) => { if (live) setSyncProblems(bankSyncProblems(overview.links || [], state.accounts || [], today, (key) => new Date(`${key}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }))); }).catch(() => { if (live) setSyncProblems([]); });
+    void api.linkedAccounts().then((overview) => {
+      if (!live) return;
+      const links = overview.links || [];
+      const stuck = stuckPendingAccounts(state.accounts || [], today).map((item: { name: string; count: number; oldest: string }) => ({ title: item.name, detail: `${item.count} charge${item.count === 1 ? "" : "s"} the bank still lists as pending, the oldest from ${new Date(`${item.oldest}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}. Banks normally post within a day or three, so the bank's feed is probably behind; they load by themselves once it posts.` }));
+      const problems = [...bankSyncProblems(links, state.accounts || [], today, (key) => new Date(`${key}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })), ...stuck];
+      setSyncProblems(problems);
+      const ids = new Set(links.flatMap((link) => Object.values(link.mappings || {}).map((mapping) => mapping?.accountId).filter(Boolean)));
+      const pending = (state.accounts || []).filter((account) => ids.has(account.id)).reduce((sum, account) => sum + (Array.isArray((account as unknown as { pendingRows?: unknown[] }).pendingRows) ? (account as unknown as { pendingRows: unknown[] }).pendingRows.length : 0), 0);
+      setSyncOk(problems.length ? "" : bankSyncOkText(links, pending, (iso: string) => new Date(iso).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })));
+    }).catch(() => { if (live) { setSyncProblems([]); setSyncOk(""); } });
     return () => { live = false; };
   }, [state.accounts, today]);
   // Once when Home opens: record any salary the deposits show and open the current month, saving only if something changed.
@@ -922,6 +944,35 @@ function Home({ state, user, privateData, onSave, onSavePlans, onGoTab, onOpenPa
           <Text style={styles.rowTitle}>{problem.title}</Text>
           <Text style={styles.rowDetail}>{problem.detail}</Text>
         </View>
+      </View>)}
+    </Card> : null}
+    {syncOk ? <Text style={styles.muted}>✓ {syncOk}</Text> : null}
+    {size.level !== "ok" ? <Card>
+      <Text style={[styles.cardTitle, { color: colors.coral }]}>Your household data is {size.level === "full" ? "nearly full" : "getting full"}</Text>
+      <Text style={styles.muted}>It uses {size.label} ({size.pct}%). When it is full, new bank transactions cannot be added. Biggest: {(householdSizeBreakdown(state) as Array<{ label: string; pct: number }>).slice(0, 3).map((entry) => `${entry.label} ${entry.pct}%`).join(", ")}. Clean up old transactions in Bank stream, or remove rows and attachments you no longer need.</Text>
+    </Card> : null}
+    {found.length ? <Card>
+      <Text style={styles.cardTitle}>Repayments I found</Text>
+      <Text style={styles.muted}>These deposits in your ledger each name one charge they fit. Linking files them under that charge's budget line, so it shows only your share.</Text>
+      {found.map((group) => <View key={`${(group.charge as { id?: string }).id || group.charge.date}-${group.charge.payee}`} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{group.charge.payee} · {group.charge.date}</Text>
+          <Text style={styles.rowDetail}>{group.rows.length} deposit{group.rows.length === 1 ? "" : "s"} ({exactMoney(group.total)}) → your share would be {exactMoney(group.share)}</Text>
+        </View>
+        <Pressable style={styles.secondarySmall} onPress={() => linkFound(state.transactions.indexOf(group.charge))}><Text style={styles.secondaryButtonText}>Link</Text></Pressable>
+      </View>)}
+      {found.length > 1 ? <Pressable style={styles.primaryButton} onPress={() => linkFound("all")}><Text style={styles.primaryButtonText}>Link all</Text></Pressable> : null}
+    </Card> : null}
+    {gaps.length ? <Card>
+      <Text style={styles.cardTitle}>Statements to import</Text>
+      <Text style={styles.muted}>These accounts have activity around the months below but nothing recorded in them. The list clears as the months fill in.</Text>
+      {gaps.map((gap) => <View key={gap.accountId} style={styles.row}>
+        <View style={styles.rowCopy}>
+          <Text style={styles.rowTitle}>{gap.accountName}</Text>
+          <Text style={styles.rowDetail}>{monthRunsLabel(gap.months)}</Text>
+        </View>
+        <Pressable style={styles.secondarySmall} onPress={() => onGoTab("budget")}><Text style={styles.secondaryButtonText}>Import</Text></Pressable>
+        <Pressable style={styles.secondarySmall} onPress={() => void onSave({ ...state, statementGapIgnored: [...((state as { statementGapIgnored?: string[] }).statementGapIgnored || []), ...gap.months.map((month) => `${gap.accountId}|${month}`)] } as HouseholdState)}><Text style={styles.secondaryButtonText}>Idle</Text></Pressable>
       </View>)}
     </Card> : null}
     {(state.historyGapNotices || []).length ? <Card>
