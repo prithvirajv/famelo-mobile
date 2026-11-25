@@ -4174,7 +4174,8 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
   }, []);
   useEffect(() => { void reload(); }, [reload]);
 
-  const [historyFrom, setHistoryFrom] = useState(`${new Date().getFullYear()}-01-01`);
+  // Optional "from" date beside Sync now: empty = what is new since each account's last sync; a date = also fetch older transactions from then.
+  const [historyFrom, setHistoryFrom] = useState("");
   // Which accounts Sync now and Import history work on: a whole kind (all checking accounts, all credit cards, ...) or any individual accounts
   // under it. link id -> ticked remote account ids; none ticked, or every one ticked, means every account. SimpleFIN counts requests, not
   // accounts, so ticking a whole group costs the same as ticking one.
@@ -4296,9 +4297,12 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overview]);
 
-  const importHistory = (link: LinkedLink) => {
-    if (!isRealDateKey(historyFrom.trim())) return Alert.alert("Pick a date", "Enter the day to import from as YYYY-MM-DD.");
-    Alert.alert("Import history?", `Fetch every transaction from ${historyFrom.trim()} onward for ${pickedLabel(link)}. New rows go to Bank stream (AI categorization and safe auto-add apply), and rows you removed earlier come back.`, [{ text: "Cancel" }, { text: "Import", onPress: () => void sync(link, false, historyFrom.trim(), pickedIds(link)) }]);
+  // Sync now with no date is the ordinary sync; with a date it is a history import from then (it asks first, and the date clears).
+  const syncOrImport = (link: LinkedLink) => {
+    const from = historyFrom.trim();
+    if (!from) return void sync(link, false, "", pickedIds(link));
+    if (!isRealDateKey(from)) return Alert.alert("Pick a date", "Enter the day to import from as YYYY-MM-DD, or clear it to sync what is new.");
+    Alert.alert("Import from a date?", `Fetch every transaction from ${from} onward for ${pickedLabel(link)}. New rows go to Bank stream (AI categorization and safe auto-add apply), and rows you removed earlier come back.`, [{ text: "Cancel" }, { text: "Import", onPress: () => { setHistoryFrom(""); void sync(link, false, from, pickedIds(link)); } }]);
   };
 
   const openMapping = async (link: LinkedLink) => {
@@ -4422,14 +4426,14 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
       <Text style={styles.rowDetail}>{link.provider === "snaptrade" ? "Brokerage (SnapTrade)" : "Bank (SimpleFIN)"} · {linkedStatusText(link, (iso) => new Date(iso).toLocaleString())}</Text>
       {newAccountsNotice(link) ? <Text style={[styles.rowDetail, { color: colors.gold, fontWeight: "700" }]}>{newAccountsNotice(link)}</Text> : null}
       <View style={styles.actionRow}>
-        <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => void sync(link, false, "", pickedIds(link))}><Text style={styles.secondaryButtonText}>{busyId === link.id ? "Working..." : "Sync now"}</Text></Pressable>
+        <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => syncOrImport(link)}><Text style={styles.secondaryButtonText}>{busyId === link.id ? "Working..." : isRealDateKey(historyFrom.trim()) ? `Sync from ${historyFrom.trim()}` : "Sync now"}</Text></Pressable>
         <Pressable style={newAccountsNotice(link) ? styles.primarySmall : styles.secondarySmall} onPress={() => void openMapping(link)}><Text style={newAccountsNotice(link) ? styles.primaryButtonText : styles.secondaryButtonText}>Choose accounts</Text></Pressable>
         {link.provider === "snaptrade" ? <Pressable style={styles.secondarySmall} onPress={() => void addBrokerage(link)}><Text style={styles.secondaryButtonText}>Add brokerage</Text></Pressable> : null}
         <Pressable accessibilityLabel={`Unlink ${link.label}`} hitSlop={8} onPress={() => confirmRemove(link)}><Ionicons name="close" size={20} color={colors.coral} /></Pressable>
       </View>
       {link.provider === "simplefin" && Object.keys(link.mappings || {}).length ? <View>
         {pickableKinds(link).flatMap((kind) => kind.remoteIds).length > 1 ? <View>
-          <Text style={styles.label}>Accounts (Sync now and Import history use this)</Text>
+          <Text style={styles.label}>Accounts to sync (leave on All to sync everything)</Text>
           <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>
             <Pressable style={[styles.choice, !pickedIds(link).length && styles.choiceActive]} onPress={() => setPicked((current) => ({ ...current, [link.id]: [] }))}><Text style={[styles.choiceText, !pickedIds(link).length && styles.choiceTextActive]}>All accounts</Text></Pressable>
             {pickableKinds(link).map((kind) => { const on = Boolean(pickedIds(link).length) && kind.remoteIds.every((id) => pickedIds(link).includes(id)); return <Pressable key={kind.key} style={[styles.choice, on && styles.choiceActive]} onPress={() => toggleKind(link, kind.remoteIds)}><Text style={[styles.choiceText, on && styles.choiceTextActive]}>{kind.label} ({kind.remoteIds.length})</Text></Pressable>; })}
@@ -4440,17 +4444,14 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
             <View style={[styles.choiceRow, { flexWrap: "wrap" }]}>{kind.accounts.map((entry) => { const on = pickedIds(link).includes(entry.remoteId); return <Pressable key={entry.remoteId} style={[styles.choice, on && styles.choiceActive]} onPress={() => toggleAccount(link, entry.remoteId)}><Text style={[styles.choiceText, on && styles.choiceTextActive]}>{entry.name}</Text></Pressable>; })}</View>
           </View>) : null}
         </View> : null}
-        <Text style={styles.label}>Import older transactions from</Text>
-        <View style={styles.actionRow}>
-          <TextInput style={[styles.input, { flex: 1 }]} value={historyFrom} onChangeText={setHistoryFrom} placeholder="YYYY-MM-DD" autoCapitalize="none" />
-          <Pressable style={styles.secondarySmall} disabled={Boolean(busyId)} onPress={() => importHistory(link)}><Text style={styles.secondaryButtonText}>Import history</Text></Pressable>
-        </View>
-        <Text style={styles.muted}>How far back it goes depends on the bank (often 3-12 months). Rows you already have are skipped; rows you removed with Clean up come back.</Text>
+        <Text style={styles.label}>From (optional)</Text>
+        <TextInput style={styles.input} value={historyFrom} onChangeText={setHistoryFrom} placeholder="YYYY-MM-DD - leave empty to sync what is new" autoCapitalize="none" />
+        <Text style={styles.muted}>Empty: Sync now fetches what is new since each account's last sync. With a date it also fetches older transactions: how far back depends on the bank (often 3-12 months), rows you already have are skipped, and rows you removed with Clean up come back.</Text>
       </View> : null}
     </View>)}
     {overview.links.length ? <Pressable style={styles.checkRow} accessibilityRole="checkbox" accessibilityState={{ checked: state.linkedAutoApply !== false }} onPress={() => void onSave({ ...state, linkedAutoApply: state.linkedAutoApply === false })}>
       <Ionicons name={state.linkedAutoApply === false ? "square-outline" : "checkbox"} size={22} color={state.linkedAutoApply === false ? colors.muted : colors.green} />
-      <Text style={[styles.rowDetail, { flex: 1 }]}>Add new bank transactions to the ledger overnight, without opening the app (categorized with AI; anything doubtful waits in Bank stream)</Text>
+      <Text style={[styles.rowDetail, { flex: 1 }]}>Add new bank transactions to the ledger overnight</Text>
     </Pressable> : null}
     {mapping && activeLink ? <View style={styles.subtaskList}>
       <Text style={styles.label}>Where should each account go?</Text>
