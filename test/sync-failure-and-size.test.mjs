@@ -24,3 +24,9 @@ test("the size meter warns at 75% and 90%", () => {
   assert.equal(householdSizeInfo({ x: "a".repeat(3_300_000) }).level, "full");
   assert.match(householdSizeInfo({ x: "a".repeat(1_000_000) }).label, /of 3\.5 MB/);
 });
+
+test("a run stopped by SimpleFIN's daily limit is raised plainly, and is not 'all loaded'", () => {
+  const link = { id: "l", label: "Bank", status: "active", mappings: { a: { accountId: "x" } }, lastRun: { at: "2026-11-25T08:30:00Z", ok: true, stage: "applied", limited: { through: "2026-02-14T00:00:00.000Z" } } };
+  const problems = bankSyncProblems([link], [], "2026-11-25", (k) => k);
+  assert.match(problems[0].detail, /daily request limit was reached part-way.*the rest follows by itself/);
+});

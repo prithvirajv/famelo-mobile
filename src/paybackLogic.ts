@@ -196,7 +196,7 @@ export function stuckPendingAccounts(accounts: any, todayKey: any, days = 3) {
 export function bankSyncOkText(links: any, pending: any, when: any) {
   const active = (links || []).filter((link) => link.status === "active" && Object.keys(link.mappings || {}).length);
   if (!active.length) return "";
-  const healthy = active.every((link) => link.lastRun && link.lastRun.ok !== false && link.lastRun.stage === "applied");
+  const healthy = active.every((link) => link.lastRun && link.lastRun.ok !== false && !link.lastRun.limited && link.lastRun.stage === "applied");
   if (!healthy) return "";
   const latest = active.map((link) => link.lastRun).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0];
   const imported = active.reduce((sum, link) => sum + Number(link.lastRun.added || 0), 0);
