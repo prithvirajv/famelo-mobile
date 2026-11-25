@@ -998,11 +998,11 @@ export function splitRecordWithFriends(state: HouseholdState, source: IouSource,
 
 
 // ---- Size guard -------------------------------------------------------------------------------------------------------------
-// The whole household state is saved in ONE request and the server rejects any request body over 1 MB - and when that happens,
+// The whole household state is saved in ONE request and the server rejects any request body over 4 MB (it was 1 MB until 2026-11-24) - and when that happens,
 // EVERY later save from every device fails until data is removed. So anything that can add a lot of rows at once (a statement
 // import, a calendar import) checks first and refuses rather than pushing the state past the limit. Kept under it with room for
 // the other fields in the request.
-export const HOUSEHOLD_STATE_SOFT_LIMIT_BYTES = 900_000;
+export const HOUSEHOLD_STATE_SOFT_LIMIT_BYTES = 3_500_000;
 
 export function stateSizeBytes(state: unknown): number {
   return JSON.stringify(state).length;

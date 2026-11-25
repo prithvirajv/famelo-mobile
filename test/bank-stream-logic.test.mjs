@@ -480,10 +480,10 @@ test("splitRecordWithFriends rejects bad input without changing anything: no fri
 
 import { exceedsStateLimit, stateSizeBytes, HOUSEHOLD_STATE_SOFT_LIMIT_BYTES } from "../src/bankStreamLogic.ts";
 
-test("the size guard flags state that would push the single save request past the server's 1 MB JSON limit, leaving headroom", () => {
-  assert.ok(HOUSEHOLD_STATE_SOFT_LIMIT_BYTES < 1_000_000);
+test("the size guard flags state that would push the single save request past the server's 4 MB JSON limit, leaving headroom", () => {
+  assert.ok(HOUSEHOLD_STATE_SOFT_LIMIT_BYTES < 4 * 1024 * 1024 * 0.9);
   assert.equal(exceedsStateLimit(baseState()), false);
-  const rows = Array.from({ length: 4000 }, (_, i) => ({ id: `csv-import-${i}`, payee: `SAMPLE PAYEE NUMBER ${i}`, amount: i + 0.5, date: "2026-07-02", lineId: "", accountId: "chk", orderNumber: "", isDeposit: false, isPayment: false, isPending: false, historyMatch: false, accountHistoryMatch: false }));
+  const rows = Array.from({ length: 16000 }, (_, i) => ({ id: `csv-import-${i}`, payee: `SAMPLE PAYEE NUMBER ${i}`, amount: i + 0.5, date: "2026-07-02", lineId: "", accountId: "chk", orderNumber: "", isDeposit: false, isPayment: false, isPending: false, historyMatch: false, accountHistoryMatch: false }));
   const big = baseState({ transactionInboxDrafts: rows });
   assert.ok(stateSizeBytes(big) > HOUSEHOLD_STATE_SOFT_LIMIT_BYTES);
   assert.equal(exceedsStateLimit(big), true);

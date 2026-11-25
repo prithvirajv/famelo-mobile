@@ -33,7 +33,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     // The server caps ordinary JSON bodies at 1 MB and replies with a non-JSON error page, which would otherwise surface as a
     // meaningless "Request failed" - and the whole household state is saved in one request, so this is the one that matters.
-    if (response.status === 413) throw new ApiError("That is too much data to save - household data is limited to about 1 MB. Remove some old items (for example unreviewed Bank stream rows) and try again.", 413);
+    if (response.status === 413) throw new ApiError("That is too much data to save - household data is limited to about 4 MB. Remove some old items (for example unreviewed Bank stream rows) and try again.", 413);
     throw new ApiError(body.error || "Request failed", response.status);
   }
   return body as T;

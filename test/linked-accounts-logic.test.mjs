@@ -183,7 +183,7 @@ test("a history import skips only rows already in the ledger or Bank stream (rem
   assert.deepEqual(selectNewLinkedTransactions(rows, { A: { accountId: "x" } }, knownLinkedIds(state)).fresh.map((r) => r.externalId), ["sf:A:new"], "an ordinary sync does not resurrect removed rows");
   assert.deepEqual(selectNewLinkedTransactions(rows, { A: { accountId: "x" } }, knownLinkedIds(state, false)).fresh.map((r) => r.externalId), ["sf:A:removed", "sf:A:new"], "a history import does");
   assert.equal(historyImportFits(100_000, 1000), true);
-  assert.equal(historyImportFits(600_000, 1000), false);
+  assert.equal(historyImportFits(3_200_000, 1000), false);
   assert.deepEqual(["2026-01-01", "2026-02-30", "01/01/2026", ""].map(isRealDateKey), [true, false, false, false]);
 });
 
@@ -250,7 +250,7 @@ test("Home lists what the bank connection reported (a bank that needs signing in
   assert.equal(problem.title, "Sample Bridge");
   assert.match(problem.detail, /Auth required.*re-authorise that bank/);
   assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ...healthy.lastRun, notices: ["Rate limited"] } }], [], "2026-10-28", day)[0].detail, "Rate limited", "a message that is not about signing in is shown as the bank said it");
-  assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ok: false, at: "2026-10-28T07:30:00Z", error: "boom" } }], [], "2026-10-28", day)[0].detail, "did not finish overnight: boom");
+  assert.equal(bankSyncProblems([{ ...healthy, lastRun: { ok: false, at: "2026-10-28T07:30:00Z", error: "boom" } }], [], "2026-10-28", day)[0].detail, "last night's sync did not finish. boom Sync again; if it keeps failing, the message above is what to check. Nothing is lost: the bank's rows wait and load on the next run.");
   assert.equal(bankSyncProblems([healthy], [{ id: "a", name: "Sample Checking", syncedThrough: "2026-10-20" }], "2026-10-28", day)[0].title, "Sample Checking");
   assert.ok(bankSyncFacts([withNotice], [], [], "2026-10-28", (iso) => iso, day, (m) => m).some((fact) => /needs the household's attention.*Auth required/.test(fact)), "the AI summary is told about it too");
 });

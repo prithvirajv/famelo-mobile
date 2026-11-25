@@ -1549,7 +1549,7 @@ function Calendar({ state, access, user, onSave }: { state: HouseholdState; acce
       if (result.kind === "chore") next.calendar.chores.push(result.item); else next.calendar.events.push(result.item);
       imported += 1;
     });
-    if (exceedsStateLimit(next)) return Alert.alert("Too much to import", "Adding these would push your household data past the 1 MB the server can save, after which nothing could be saved. Import fewer items, or remove some old ones first.");
+    if (exceedsStateLimit(next)) return Alert.alert("Too much to import", "Adding these would push your household data past the size the server can save, after which nothing could be saved. Import fewer items, or remove some old ones first.");
     await onSave(next);
     setImportDrafts(null);
     Alert.alert("Import complete", `Imported ${imported} calendar item${imported === 1 ? "" : "s"}.`);
@@ -3305,7 +3305,7 @@ function BankStream({ state, onSave, onBack }: { state: HouseholdState; onSave: 
       });
       const importedState = { ...state, transactionInboxDrafts: result.drafts };
       if (exceedsStateLimit(importedState)) {
-        setFeedback(`Not imported: adding ${rows.length} rows would push your household data past the 1 MB the server can save, and then nothing could be saved until data is removed. Review or clear some of the rows already waiting here (or import a shorter date range), then try again.`);
+        setFeedback(`Not imported: adding ${rows.length} rows would push your household data past the size the server can save, and then nothing could be saved until data is removed. Review or clear some of the rows already waiting here (or import a shorter date range), then try again.`);
         return;
       }
       await onSave(importedState);
@@ -4213,7 +4213,7 @@ function LinkedAccountsCard({ state, onSave }: { state: HouseholdState; onSave: 
           working = { ...working, goals: { ...working.goals, debts: matched.debts, netWorth: { assets: [], ...working.goals?.netWorth, liabilities: matched.liabilities } } };
           debtsMatched += 1;
         });
-        if (exceedsStateLimit(working) || !historyImportFits(JSON.stringify(current).length, posted.length)) throw new Error(`Importing ${posted.length} transactions would push your household data past the 1 MB the server can save. Import a shorter range (a later start date), or clean up old transactions first.`);
+        if (exceedsStateLimit(working) || !historyImportFits(JSON.stringify(current).length, posted.length)) throw new Error(`Importing ${posted.length} transactions would push your household data past the size the server can save. Import a shorter range (a later start date), or clean up old transactions first.`);
         summary = simplefinSummary(link.label, posted.length, reconciled.updated, fresh.length - posted.length, unmapped, payload.errors || [], groupsMatched, debtsMatched);
         if (payload.historyGaps?.length) summary += " Some months were left out because the bank did not return them - see Home for what to import from a statement.";
         working = { ...working, household: { ...working.household, activity: [summary, ...(working.household.activity || [])] } };

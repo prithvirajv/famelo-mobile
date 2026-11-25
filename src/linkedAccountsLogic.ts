@@ -115,12 +115,28 @@ export function bridgeNoticeText(notice: string): string {
   return /auth|attention|log\s?in|sign\s?in|credential|password/i.test(notice) ? `${notice} - sign in to your SimpleFIN Bridge account and re-authorise that bank; until then it may stop sending new transactions.` : notice;
 }
 
+// A failed overnight run in words a person can act on (mirrors the web app's explainSyncFailure).
+export function explainSyncFailure(error: unknown): { summary: string; fix: string } {
+  const raw = String(error || "").replace(/^Could not load the new transactions:\s*/i, "").trim();
+  if (/past the size|too large|too much data|size that can be saved/i.test(raw)) return { summary: "Your household data was too big to add the new transactions.", fix: "Free some space (Clean up, or remove old rows you no longer need), then try again." };
+  if (/being edited|postponed/i.test(raw)) return { summary: "Your household was being edited while the new transactions loaded.", fix: "It tries again by itself." };
+  if (/auth|sign\s?in|log\s?in|credential|password|reconnect/i.test(raw)) return { summary: "A bank needs you to sign in again.", fix: "Re-authorise that bank in SimpleFIN Bridge, then sync again." };
+  return { summary: raw ? `${raw.slice(0, 160)}${raw.length > 160 ? "…" : ""}` : "It stopped for a reason it did not report.", fix: "Sync again; if it keeps failing, the message above is what to check." };
+}
+
+// How full the household's saved data is against the import limit (mirrors the web app's householdSizeInfo).
+export function householdSizeInfo(state: unknown, limit = 3_500_000): { bytes: number; pct: number; level: "ok" | "warn" | "full"; label: string } {
+  const bytes = JSON.stringify(state || {}).length;
+  const pct = Math.round((bytes / limit) * 100);
+  return { bytes, pct, level: pct >= 90 ? "full" : pct >= 75 ? "warn" : "ok", label: `${(bytes / 1e6).toFixed(1)} of ${(limit / 1e6).toFixed(1)} MB` };
+}
+
 export function bankSyncProblems(links: LinkedLink[], accounts: HouseholdState["accounts"], todayKey: string, dayLabel: (dateKey: string) => string): Array<{ title: string; detail: string }> {
   const problems: Array<{ title: string; detail: string }> = [];
   for (const link of links) {
     const run = link.lastRun || {};
     if (link.status === "needs_reconnect") problems.push({ title: link.label, detail: "needs signing in again - remove it and link it again under Wealth" });
-    else if (run.ok === false) problems.push({ title: link.label, detail: `did not finish overnight: ${run.error || "unknown problem"}` });
+    else if (run.ok === false) { const why = explainSyncFailure(run.error); problems.push({ title: link.label, detail: `last night's sync did not finish. ${why.summary} ${why.fix} Nothing is lost: the bank's rows wait and load on the next run.` }); }
     else if (run.stage === "waiting") problems.push({ title: link.label, detail: run.reason || "new transactions are waiting for you to open the app" });
     else if (link.hasStaged && link.status === "active") problems.push({ title: link.label, detail: "has fetched transactions that are not loaded yet" });
     else if (linkRunIsStale(link)) problems.push({ title: link.label, detail: `no overnight sync has run since ${new Date(link.lastRun?.at || link.lastSyncAt || "").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}. The next run catches up from the last successful sync on its own.` });
@@ -159,7 +175,7 @@ export function selectNewLinkedTransactions(transactions: LinkedTransaction[], m
   return { fresh, unmapped, alreadyImported };
 }
 
-// The imported-id memory is capped (oldest dropped) so household state stays well inside the server's 1 MB save limit.
+// The imported-id memory is capped (oldest dropped) so household state stays well inside the server's save limit.
 export function rememberLinkedImportedIds(existingIds: string[] | undefined, newIds: string[]): string[] {
   const existing = existingIds || [];
   const merged = [...existing, ...newIds.filter((id) => !existing.includes(id))];
@@ -314,8 +330,8 @@ export function waitingBanner(links: Array<Pick<LinkedLink, "stagedCount" | "has
   return `${waiting} bank transaction${waiting === 1 ? "" : "s"} fetched overnight - tap to review`;
 }
 
-// Whether a pull of this many rows still leaves the household inside the server's ~1 MB save limit (a row is roughly 400 bytes saved).
-export function historyImportFits(currentStateBytes: number, rowCount: number, softLimitBytes = 900_000): boolean {
+// Whether a pull of this many rows still leaves the household inside the server's 4 MB save limit (import guard 3.5 MB) (a row is roughly 400 bytes saved).
+export function historyImportFits(currentStateBytes: number, rowCount: number, softLimitBytes = 3_500_000): boolean {
   return currentStateBytes + rowCount * 400 <= softLimitBytes;
 }
 
